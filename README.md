@@ -136,3 +136,6 @@ samples = estimator.sample(x_obs, num_samples=10000)
 SBI quality depends strongly on prior coverage, simulator fidelity, noise
 modeling, and diagnostic checks. The simulator produces the same active-band
 flux vector convention consumed by the Gaussian likelihood.
+
+See `notebooks/cosmos2020_sbi_fsps_gpu_timing.ipynb` for a COSMOS2020 +
+FSPS + MAF setup focused on GPU/MPS posterior-sampling timing.
