@@ -8,6 +8,9 @@ from .transforms import BoxLogitTransform
 __all__ = [
     "Posterior",
     "SamplingResult",
+    "BatchFitFailure",
+    "BatchFitResult",
+    "fit_many",
     "run_laplace",
     "finite_difference_hessian",
     "run_emcee",
@@ -33,6 +36,14 @@ __all__ = [
 
 
 def __getattr__(name):
+    if name in {"BatchFitFailure", "BatchFitResult", "fit_many"}:
+        from .batch import BatchFitFailure, BatchFitResult, fit_many
+
+        return {
+            "BatchFitFailure": BatchFitFailure,
+            "BatchFitResult": BatchFitResult,
+            "fit_many": fit_many,
+        }[name]
     if name in {"run_laplace", "finite_difference_hessian"}:
         from .laplace import finite_difference_hessian, run_laplace
 

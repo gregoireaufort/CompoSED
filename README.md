@@ -224,6 +224,32 @@ flux vector convention consumed by the Gaussian likelihood.
 See `notebooks/cosmos2020_sbi_fsps_gpu_timing.ipynb` for a COSMOS2020 +
 FSPS + MAF setup focused on GPU/MPS posterior-sampling timing.
 
+## Catalog-scale fitting
+
+For finite photometric grids, use the catalog grid evaluator so the backend
+model grid is computed once and the Gaussian likelihood is evaluated against
+all objects with chunked array operations:
+
+```python
+from sedinfer import run_photometric_grid_catalog
+
+result = run_photometric_grid_catalog(
+    backend,
+    datasets,          # list[SEDDataset], same band order
+    parameter_space,   # finite-valued or fixed priors
+    filters=filters,
+    object_chunk_size=1024,
+    model_chunk_size=4096,
+)
+
+z_map = result.map_estimates[:, parameter_space.names.index("z")]
+```
+
+For independent per-object samplers, use `inftools.fit_many` to run a
+single-object fitting function across a catalog with serial, thread, or process
+execution. For process execution, build fragile backend state such as FSPS or
+CIGALE inside the worker function rather than trying to pickle a live backend.
+
 ## Experimental JAX-CIGALE
 
 `sedinfer.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
