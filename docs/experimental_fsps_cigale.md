@@ -1,7 +1,7 @@
 # Experimental FSPS Stellar Module For CIGALE
 
 This is a research prototype, intentionally separate from the stable
-`sedinfer` backends.
+`composed` backends.
 
 The goal is to replace CIGALE's built-in stellar SSP module, such as `bc03`,
 with a module that calls `python-fsps`, while leaving the rest of CIGALE's chain
@@ -14,13 +14,13 @@ unchanged:
 The module lives under:
 
 ```text
-sedinfer.experimental.cigale_modules.fsps_stellar
+composed.experimental.cigale_modules.fsps_stellar
 ```
 
 and is registered at runtime:
 
 ```python
-from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
 
 register_cigale_fsps_stellar_module()
 ```
@@ -43,7 +43,7 @@ The module is still experimental, but its conventions are now explicit:
 
 - CIGALE BC03 metallicities are absolute `Z` values.
 - FSPS metallicities are passed as `logzsol`.
-- `sedinfer.experimental.cigale_fsps_stellar_conventions` defines the mapping
+- `composed.experimental.cigale_fsps_stellar_conventions` defines the mapping
   between the two. The default matched-BC03 convention is `Z_sun = 0.02`, so
   `Z=0.02` maps to `logzsol=0`.
 - CIGALE BC03 IMF `0` maps to FSPS `imf_type=0` (Salpeter).
@@ -74,7 +74,7 @@ broadband CIGALE experiments.
 Use these helpers when constructing BC03-vs-FSPS comparisons:
 
 ```python
-from sedinfer.experimental.cigale_fsps_stellar_conventions import (
+from composed.experimental.cigale_fsps_stellar_conventions import (
     fsps_parameters_from_cigale_bc03,
 )
 
@@ -108,7 +108,7 @@ when one script alternates between BC03 and FSPS grids. Use the helper below for
 mixed-grid diagnostics:
 
 ```python
-from sedinfer.experimental.cigale_fsps_stellar import make_mixed_grid_sed_warehouse
+from composed.experimental.cigale_fsps_stellar import make_mixed_grid_sed_warehouse
 
 warehouse = make_mixed_grid_sed_warehouse()
 ```
@@ -122,9 +122,9 @@ Use an environment with `pcigale`, `python-fsps`, and `SPS_HOME` configured:
 
 ```bash
 SPS_HOME=/path/to/FSPS \
-PYTHONPATH=/path/to/sedinfer \
+PYTHONPATH=/path/to/composed \
 python - <<'PY'
-from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
 from pcigale.warehouse import SedWarehouse
 
 register_cigale_fsps_stellar_module()

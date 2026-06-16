@@ -1,13 +1,13 @@
 # CIGALE Backend
 
 `CIGALEBackend` wraps CIGALE's low-level `pcigale.warehouse.SedWarehouse`
-interface behind the standard `sedinfer` backend contract:
+interface behind the standard `composed` backend contract:
 
 ```python
 predict_photometry(params, filters) -> ModelPhotometry
 ```
 
-The backend is optional. Importing `sedinfer` does not require CIGALE, but
+The backend is optional. Importing `composed` does not require CIGALE, but
 constructing `CIGALEBackend` requires the `pcigale` package and its database.
 
 ## Units And Filters
@@ -18,7 +18,7 @@ CIGALE `SED` objects use:
 - luminosity density in W / nm,
 - `SED.fnu` and `SED.compute_fnu(filter_name)` in mJy.
 
-`CIGALEBackend` returns maggies, matching the rest of `sedinfer`.
+`CIGALEBackend` returns maggies, matching the rest of `composed`.
 
 Observed-frame photometry should include CIGALE's `redshifting` module. CIGALE's
 current `redshifting` module also applies its built-in IGM attenuation while
@@ -35,7 +35,7 @@ Two photometry modes are supported:
 
 ## Mass Normalization
 
-CIGALE is used in `sedinfer` as a per-solar-mass backend. The backend declares:
+CIGALE is used in `composed` as a per-solar-mass backend. The backend declares:
 
 ```python
 MassNormalization.PER_SOLAR_MASS

@@ -5,19 +5,19 @@ import types
 import numpy as np
 import pytest
 
-from sedinfer.backends.fsps import FSPSBackend
-from sedinfer.filters import FilterSet
-from sedinfer.units import MassNormalization
+from composed.backends.fsps import FSPSBackend
+from composed.filters import FilterSet
+from composed.units import MassNormalization
 
 
 def test_fsps_backend_module_imports_without_fsps_installed():
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     assert hasattr(fsps_backend, "FSPSBackend")
 
 
 def test_constructing_fsps_backend_raises_helpful_error_if_fsps_missing(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: False)
     with pytest.raises(ImportError, match="python-fsps"):
@@ -25,7 +25,7 @@ def test_constructing_fsps_backend_raises_helpful_error_if_fsps_missing(monkeypa
 
 
 def test_invalid_sfh_time_grid_raises_clear_error(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend()
@@ -41,7 +41,7 @@ def test_invalid_sfh_time_grid_raises_clear_error(monkeypatch):
 
 
 def test_negative_sfr_raises_clear_error(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend()
@@ -57,7 +57,7 @@ def test_negative_sfr_raises_clear_error(monkeypatch):
 
 
 def test_sfh_age_exceeding_universe_age_raises_clear_error(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(cosmology=FakeCosmology(age_gyr=1.0))
@@ -73,7 +73,7 @@ def test_sfh_age_exceeding_universe_age_raises_clear_error(monkeypatch):
 
 
 def test_missing_redshift_raises_clear_error(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend()
@@ -90,7 +90,7 @@ def test_missing_redshift_raises_clear_error(monkeypatch):
 def test_photometry_output_shape_matches_number_of_filters(monkeypatch):
     install_fake_sedpy(monkeypatch, magnitudes=[20.0, 21.0, 22.0])
 
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
@@ -114,7 +114,7 @@ def test_photometry_output_shape_matches_number_of_filters(monkeypatch):
 
 
 def test_spectrum_output_matches_requested_wavelengths(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
@@ -138,7 +138,7 @@ def test_spectrum_output_matches_requested_wavelengths(monkeypatch):
 
 
 def test_spectrum_wavelength_range_clips_native_grid(monkeypatch):
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
@@ -161,7 +161,7 @@ def test_spectrum_wavelength_range_clips_native_grid(monkeypatch):
 def test_sedpy_shape_mismatch_raises_clear_error(monkeypatch):
     install_fake_sedpy(monkeypatch, magnitudes=[20.0])
 
-    import sedinfer.backends.fsps as fsps_backend
+    import composed.backends.fsps as fsps_backend
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))

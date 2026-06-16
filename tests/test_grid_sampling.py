@@ -11,8 +11,8 @@ from inftools.grid import (
     sample_discrete_grid,
     split_parameter_space,
 )
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, UniformPrior
+from composed.parameters import ParameterSpace
+from composed.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, UniformPrior
 
 
 def test_enumerate_discrete_grid_from_choice_and_integer_priors():

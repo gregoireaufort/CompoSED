@@ -5,7 +5,7 @@ import pytest
 
 
 def test_cue_exports_import_without_jax_dependency():
-    from sedinfer.experimental import jaxcigale
+    from composed.experimental import jaxcigale
 
     assert hasattr(jaxcigale, "cue_nebular_module")
     assert hasattr(jaxcigale, "derive_cue_inputs_from_stellar_spectrum")
@@ -17,8 +17,8 @@ def test_cue_speculator_jax_matches_numpy_for_toy_weights():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue_port import CuePCAWeights, CueSpeculatorWeights
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.cue_port import CuePCAWeights, CueSpeculatorWeights
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -65,8 +65,8 @@ def test_real_cue_jax_port_matches_public_numpy_if_data_available():
     if not data_dir.exists():
         pytest.skip("Public Cue data directory is not available.")
 
-    from sedinfer.experimental.jaxcigale.cue_port import CueJaxPort
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.cue_port import CueJaxPort
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
     port = CueJaxPort.from_public_cue_data_dir(data_dir)
@@ -90,13 +90,13 @@ def test_cue_derives_power_law_shape_from_stellar_spectrum():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue import (
+    from composed.experimental.jaxcigale.cue import (
         CUE_IONIZING_EDGES_A,
         derive_cue_inputs_from_stellar_spectrum,
         reconstruct_cue_piecewise_lnu,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.photometry import C_A_PER_S
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.photometry import C_A_PER_S
 
     _, jnp = require_jax()
 
@@ -139,8 +139,8 @@ def test_cue_escape_and_dust_fractions_scale_qh_budget():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue import derive_cue_inputs_from_stellar_spectrum
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.cue import derive_cue_inputs_from_stellar_spectrum
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -177,12 +177,12 @@ def test_cue_public_package_theta_conversion_uses_logu_and_density():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue import (
+    from composed.experimental.jaxcigale.cue import (
         cue_logq_from_logu,
         cue_theta12_to_public_package_theta,
         derive_cue_inputs_from_stellar_spectrum,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
     wave = jnp.asarray(np.geomspace(50.0, 2000.0, 512))
@@ -207,7 +207,7 @@ def test_cue_module_plugs_into_sed_graph_with_toy_emulator():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -218,7 +218,7 @@ def test_cue_module_plugs_into_sed_graph_with_toy_emulator():
         redshift_module,
         toy_cue_emulator,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -268,7 +268,7 @@ def test_cue_module_removes_nonescaped_lyc_from_stellar_spectrum():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -278,7 +278,7 @@ def test_cue_module_removes_nonescaped_lyc_from_stellar_spectrum():
         delayed_sfh_module,
         toy_cue_emulator,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -337,8 +337,8 @@ def test_cue_zeroes_numerical_lyc_floors_but_preserves_real_escape():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue import zero_numerical_lyc_floor
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.cue import zero_numerical_lyc_floor
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -356,7 +356,7 @@ def test_cue_module_outputs_exact_zero_for_nebular_lyc_floor_when_fesc_is_zero()
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -365,7 +365,7 @@ def test_cue_module_outputs_exact_zero_for_nebular_lyc_floor_when_fesc_is_zero()
         cue_nebular_module,
         delayed_sfh_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -415,7 +415,7 @@ def test_cue_module_can_add_physical_lyc_continuum_after_floor_cleanup():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -424,7 +424,7 @@ def test_cue_module_can_add_physical_lyc_continuum_after_floor_cleanup():
         cue_nebular_module,
         delayed_sfh_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -484,9 +484,9 @@ def test_fsps_lyc_continuum_table_toggle_is_differentiable(tmp_path):
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.cue import derive_cue_inputs_from_stellar_spectrum
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.fsps_nebular import FspsNebularContinuumTable
+    from composed.experimental.jaxcigale.cue import derive_cue_inputs_from_stellar_spectrum
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.fsps_nebular import FspsNebularContinuumTable
 
     jax, jnp = require_jax()
 

@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
 
 
 OUTPUT_DIR = Path("outputs/experimental_fsps_nebular_vs_cigale_nebular")

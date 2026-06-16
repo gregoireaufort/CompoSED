@@ -15,17 +15,17 @@ Run the stages in the environments that have the required dependencies:
 
     # FSPS environment: build a continuum-only FSPS SSP table and direct FSPS CSPs
     SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
         examples/experimental_dsps_fsps_clock_diagnostic.py --stage make-ssp
 
     SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
         examples/experimental_dsps_fsps_clock_diagnostic.py --stage fsps
 
     # DSPS/JAX environment
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
         examples/experimental_dsps_fsps_clock_diagnostic.py --stage dsps
 
@@ -134,7 +134,7 @@ def make_continuum_fsps_ssp_table(path: Path) -> None:
         print(f"  zmet {zmet_index:02d}/{ssp_lgmet.size}")
 
     with h5py.File(path, "w") as h5:
-        h5.attrs["sedinfer_ssp_kind"] = "stellar_continuum"
+        h5.attrs["composed_ssp_kind"] = "stellar_continuum"
         h5.attrs["fsps_add_neb_emission"] = False
         h5.attrs["fsps_add_dust_emission"] = False
         h5["ssp_lgmet"] = ssp_lgmet

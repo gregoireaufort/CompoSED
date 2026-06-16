@@ -4,7 +4,7 @@ The point of this example is not to fit a real object. It shows the complete
 data flow for one parameter vector:
 
 1. define CIGALE modules and parameter ranges;
-2. build a sedinfer backend and ParameterSpace from those choices;
+2. build a composed backend and ParameterSpace from those choices;
 3. predict per-solar-mass photometry;
 4. multiply by stellar mass explicitly;
 5. build a Gaussian likelihood for the same flux vector.
@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from sedinfer import GaussianPhotometricLikelihood, SEDDataset
-from sedinfer.backends.cigale import build_cigale_backend_and_parameter_space
-from sedinfer.filters import FilterSet
-from sedinfer.priors import UniformPrior
+from composed import GaussianPhotometricLikelihood, SEDDataset
+from composed.backends.cigale import build_cigale_backend_and_parameter_space
+from composed.filters import FilterSet
+from composed.priors import UniformPrior
 
 
 MODULES = ["sfhdelayed", "bc03", "redshifting"]

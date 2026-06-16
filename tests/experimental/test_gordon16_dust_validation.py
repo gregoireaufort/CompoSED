@@ -108,8 +108,8 @@ def test_gordon16_jax_curve_matches_independent_beast_reference_grid():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
 
     _, jnp = require_jax()
 
@@ -135,8 +135,8 @@ def test_gordon16_transmission_matches_reference_and_is_monotonic_in_av():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
 
     _, jnp = require_jax()
 
@@ -162,8 +162,8 @@ def test_gordon16_curve_gradients_are_finite_in_physical_domain():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
 
     jax, jnp = require_jax()
 

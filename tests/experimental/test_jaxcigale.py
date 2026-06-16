@@ -5,8 +5,14 @@ import numpy as np
 import pytest
 
 
+def trapz_numpy(y, x):
+    if hasattr(np, "trapezoid"):
+        return np.trapezoid(y, x)
+    return np.trapz(y, x)
+
+
 def test_jaxcigale_imports_without_jax_dependency():
-    import sedinfer.experimental.jaxcigale as jaxcigale
+    import composed.experimental.jaxcigale as jaxcigale
 
     assert hasattr(jaxcigale, "build_jax_sed_model")
     assert hasattr(jaxcigale, "JaxParameterSpace")
@@ -17,14 +23,14 @@ def test_missing_jax_error_is_helpful_when_jax_unavailable():
     if importlib.util.find_spec("jax") is not None:
         pytest.skip("JAX is installed in this environment.")
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     with pytest.raises(ImportError, match="requires optional JAX"):
         require_jax()
 
 
 def test_filter_set_padding_and_numpy_reference():
-    from sedinfer.experimental.jaxcigale.photometry import JaxFilterSet, integrate_maggies_numpy
+    from composed.experimental.jaxcigale.photometry import JaxFilterSet, integrate_maggies_numpy
 
     wave_model = np.linspace(3000.0, 9000.0, 256)
     flat_fnu_cgs = 3631.0e-23
@@ -42,7 +48,7 @@ def test_filter_set_padding_and_numpy_reference():
 
 
 def test_jax_photometric_data_requires_active_band():
-    from sedinfer.experimental.jaxcigale import GaussianPhotometricData
+    from composed.experimental.jaxcigale import GaussianPhotometricData
 
     with pytest.raises(ValueError, match="at least one active band"):
         GaussianPhotometricData(
@@ -53,7 +59,7 @@ def test_jax_photometric_data_requires_active_band():
 
 
 def test_jax_spectral_data_requires_active_pixel():
-    from sedinfer.experimental.jaxcigale import GaussianSpectralData
+    from composed.experimental.jaxcigale import GaussianSpectralData
 
     with pytest.raises(ValueError, match="at least one active spectral pixel"):
         GaussianSpectralData(
@@ -69,7 +75,7 @@ def test_bin_average_constant_spectrum_requires_edge_coverage():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import bin_average_spectrum
+    from composed.experimental.jaxcigale import bin_average_spectrum
 
     pixel_edges = np.array([0.5, 1.5, 2.5, 3.5])
     with pytest.raises(ValueError, match="cover all spectral pixel edges"):
@@ -81,7 +87,7 @@ def test_bin_average_constant_spectrum_requires_edge_coverage():
 
 
 def test_restricted_cigale_bridge_builds_static_module_specs_without_jax():
-    from sedinfer.experimental.jaxcigale.bridge import restricted_cigale_modules_to_jaxcigale
+    from composed.experimental.jaxcigale.bridge import restricted_cigale_modules_to_jaxcigale
 
     specs = restricted_cigale_modules_to_jaxcigale(
         ["sfhdelayed", "bc03", "nebular", "dustatt_modified_starburst", "redshifting"],
@@ -98,8 +104,96 @@ def test_restricted_cigale_bridge_builds_static_module_specs_without_jax():
     ]
 
 
+@pytest.mark.jaxcigale
+def test_build_jax_sed_model_auto_adds_dust_emission_after_attenuation():
+    if importlib.util.find_spec("jax") is None:
+        pytest.skip("JAX is not installed.")
+
+    from composed.experimental.jaxcigale import (
+        JaxFilterSet,
+        JaxParameterSpace,
+        UniformJaxPrior,
+        build_jax_sed_model,
+        calzetti_attenuation_module,
+        madau_igm_module,
+        redshift_module,
+    )
+    from composed.experimental.jaxcigale.dependencies import require_jax
+
+    _, jnp = require_jax()
+
+    wave_rest = np.geomspace(1.0e3, 3.0e6, 512)
+    filters = JaxFilterSet.from_curves(["dummy"], [np.linspace(4000.0, 6000.0, 16)], [np.ones(16)])
+    space = JaxParameterSpace(names=["A_V"], priors={"A_V": UniformJaxPrior(0.0, 2.0)})
+    model = build_jax_sed_model(
+        [
+            calzetti_attenuation_module(av_parameter="A_V", slope_parameter=None, bump_amplitude_parameter=None),
+            madau_igm_module(),
+            redshift_module(),
+        ],
+        wave_rest,
+        filters,
+        space,
+        fixed_parameters={"z": 0.5, "log10_mass": 0.0},
+    )
+
+    assert [module.name for module in model.modules] == [
+        "calzetti_attenuation",
+        "modified_blackbody_dust",
+        "madau_igm",
+        "redshift",
+    ]
+
+    stellar = jnp.ones_like(jnp.asarray(wave_rest))
+    pre_dust = model.initial_state()._replace(
+        stellar_lum_lsun_per_a=stellar,
+        total_lum_lsun_per_a=stellar,
+    )
+    params = model.params_from_theta(jnp.asarray([1.0]))
+    attenuated = model.modules[0].apply(params, pre_dust)
+    reradiated = model.modules[1].apply(params, attenuated)
+
+    dust_lum = np.asarray(reradiated.dust_lum_lsun_per_a)
+    assert float(attenuated.absorbed_lum_lsun) > 0.0
+    assert np.all(np.isfinite(dust_lum))
+    assert np.all(dust_lum >= 0.0)
+    assert np.isclose(trapz_numpy(dust_lum, wave_rest), float(attenuated.absorbed_lum_lsun), rtol=5e-3)
+
+
+@pytest.mark.jaxcigale
+def test_build_jax_sed_model_allows_explicit_attenuation_only_diagnostics():
+    if importlib.util.find_spec("jax") is None:
+        pytest.skip("JAX is not installed.")
+
+    from composed.experimental.jaxcigale import (
+        JaxFilterSet,
+        JaxParameterSpace,
+        UniformJaxPrior,
+        build_jax_sed_model,
+        calzetti_attenuation_module,
+        redshift_module,
+    )
+
+    wave_rest = np.geomspace(1.0e3, 3.0e4, 64)
+    filters = JaxFilterSet.from_curves(["dummy"], [np.linspace(4000.0, 6000.0, 16)], [np.ones(16)])
+    space = JaxParameterSpace(names=["A_V"], priors={"A_V": UniformJaxPrior(0.0, 2.0)})
+    model = build_jax_sed_model(
+        [
+            calzetti_attenuation_module(av_parameter="A_V", slope_parameter=None, bump_amplitude_parameter=None),
+            redshift_module(),
+        ],
+        wave_rest,
+        filters,
+        space,
+        fixed_parameters={"z": 0.5, "log10_mass": 0.0},
+        dust_mode="attenuation_only",
+    )
+
+    assert [module.name for module in model.modules] == ["calzetti_attenuation", "redshift"]
+
+
 def test_dsps_default_ssp_is_rejected_for_nebular_cue(tmp_path):
-    from sedinfer.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
+    from composed.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
 
     default_file = tmp_path / "ssp_data_fsps_v3.2_lgmet_age.h5"
     default_file.write_bytes(b"not a real hdf5 file; filename provenance is enough")
@@ -109,7 +203,7 @@ def test_dsps_default_ssp_is_rejected_for_nebular_cue(tmp_path):
 
 
 def test_continuum_ssp_filename_is_allowed(tmp_path):
-    from sedinfer.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
+    from composed.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
 
     continuum_file = tmp_path / "ssp_data_continuum_fsps_v3.2_lgmet_age.h5"
     continuum_file.write_bytes(b"not a real hdf5 file; filename provenance is enough")
@@ -118,7 +212,7 @@ def test_continuum_ssp_filename_is_allowed(tmp_path):
 
 
 def test_unknown_ssp_filename_requires_explicit_override(tmp_path):
-    from sedinfer.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
+    from composed.experimental.jaxcigale.ssp_data import require_continuum_ssp_path
 
     unknown_file = tmp_path / "my_ssp_grid.h5"
     unknown_file.write_bytes(b"not a real hdf5 file; filename provenance is enough")
@@ -133,8 +227,8 @@ def test_qmc_nadam_initialization_finds_simple_map():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import JaxParameterSpace, UniformJaxPrior, find_map_initial_position
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale import JaxParameterSpace, UniformJaxPrior, find_map_initial_position
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -176,11 +270,66 @@ def test_qmc_nadam_initialization_finds_simple_map():
 
 
 @pytest.mark.jaxcigale
+def test_madau_igm_module_can_use_fitted_factor_parameter():
+    if importlib.util.find_spec("jax") is None:
+        pytest.skip("JAX is not installed.")
+
+    from composed.experimental.jaxcigale import (
+        JaxFilterSet,
+        JaxParameterSpace,
+        UniformJaxPrior,
+        analytic_stellar_module,
+        build_jax_sed_model,
+        delayed_sfh_module,
+        madau_igm_module,
+        no_nebular_module,
+        redshift_module,
+    )
+    from composed.experimental.jaxcigale.dependencies import require_jax
+
+    _, jnp = require_jax()
+
+    wave_rest = np.linspace(700.0, 5000.0, 512)
+    age_grid = np.linspace(0.02, 1.0, 64)
+    # At z=5 this observed filter samples rest-frame wavelengths below Ly-alpha,
+    # so increasing the IGM factor must reduce the predicted flux.
+    filter_wave = np.linspace(5500.0, 7500.0, 128)
+    filters = JaxFilterSet.from_curves(["observed_uv"], [filter_wave], [np.ones_like(filter_wave)])
+    space = JaxParameterSpace(
+        names=["log10_mass", "z", "tau_gyr", "tage_gyr", "logzsol", "igm_factor"],
+        priors={
+            "log10_mass": UniformJaxPrior(8.0, 12.0),
+            "z": UniformJaxPrior(4.0, 6.0),
+            "tau_gyr": UniformJaxPrior(0.1, 3.0),
+            "tage_gyr": UniformJaxPrior(0.1, 1.0),
+            "logzsol": UniformJaxPrior(-1.0, 0.2),
+            "igm_factor": UniformJaxPrior(0.0, 2.0),
+        },
+    )
+    model = build_jax_sed_model(
+        [
+            delayed_sfh_module(age_grid),
+            analytic_stellar_module(),
+            no_nebular_module(),
+            madau_igm_module(igm_factor_parameter="igm_factor"),
+            redshift_module(),
+        ],
+        wave_rest,
+        filters,
+        space,
+    )
+
+    no_igm = model.predict_photometry(jnp.asarray([10.0, 5.0, 0.5, 0.5, -0.3, 0.0]))[0]
+    strong_igm = model.predict_photometry(jnp.asarray([10.0, 5.0, 0.5, 0.5, -0.3, 2.0]))[0]
+    assert float(no_igm) > float(strong_igm)
+
+
+@pytest.mark.jaxcigale
 def test_jaxcigale_analytic_chain_jit_and_gradient():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianPhotometricData,
         JaxFilterSet,
         JaxParameterSpace,
@@ -193,7 +342,7 @@ def test_jaxcigale_analytic_chain_jit_and_gradient():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
 
@@ -241,7 +390,7 @@ def test_jaxcigale_mass_normalization_applied_once():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -251,7 +400,7 @@ def test_jaxcigale_mass_normalization_applied_once():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -280,7 +429,7 @@ def test_jax_redshift_zero_returns_controlled_minus_inf_log_prob():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianPhotometricData,
         JaxFilterSet,
         JaxParameterSpace,
@@ -291,8 +440,8 @@ def test_jax_redshift_zero_returns_controlled_minus_inf_log_prob():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.core import observed_flux_from_luminosity
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import observed_flux_from_luminosity
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -333,15 +482,15 @@ def test_cosmic_time_sfh_module_outputs_dsps_clock():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         delayed_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -362,7 +511,7 @@ def test_cosmic_time_sfh_module_outputs_dsps_clock():
     assert np.all(np.diff(time) > 0.0)
     assert np.isclose(time[-1], t_obs, rtol=1e-6)
     assert np.isclose(time[0], t_obs - 3.0 + 0.02, rtol=1e-6)
-    assert np.isclose(np.trapezoid(sfr, time * 1.0e9), 1.0, rtol=1e-5)
+    assert np.isclose(trapz_numpy(sfr, time * 1.0e9), 1.0, rtol=1e-5)
 
 
 @pytest.mark.jaxcigale
@@ -370,15 +519,15 @@ def test_cosmic_time_sfh_rejects_age_older_than_universe():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         delayed_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -402,15 +551,15 @@ def test_cosmic_time_sfh_module_supports_tage_fraction_table():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         delayed_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -450,7 +599,7 @@ def test_constant_and_powerlaw_sfh_modules_normalize_to_one_msun():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -458,7 +607,7 @@ def test_constant_and_powerlaw_sfh_modules_normalize_to_one_msun():
         constant_sfh_module,
         powerlaw_sfh_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -490,7 +639,7 @@ def test_constant_and_powerlaw_sfh_modules_normalize_to_one_msun():
         assert np.all(np.diff(time) > 0.0)
         assert np.all(np.isfinite(sfr))
         assert np.all(sfr >= 0.0)
-        assert np.isclose(np.trapezoid(sfr, time * 1.0e9), 1.0, rtol=1e-5)
+        assert np.isclose(trapz_numpy(sfr, time * 1.0e9), 1.0, rtol=1e-5)
 
 
 @pytest.mark.jaxcigale
@@ -498,7 +647,7 @@ def test_cosmic_constant_and_powerlaw_sfh_modules_are_finite_and_normalized():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -506,8 +655,8 @@ def test_cosmic_constant_and_powerlaw_sfh_modules_are_finite_and_normalized():
         constant_sfh_cosmic_time_module,
         powerlaw_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -551,7 +700,7 @@ def test_cosmic_constant_and_powerlaw_sfh_modules_are_finite_and_normalized():
         assert np.isclose(time[-1], t_obs, rtol=1e-6)
         assert np.all(np.isfinite(sfr))
         assert np.all(sfr >= 0.0)
-        assert np.isclose(np.trapezoid(sfr, time * 1.0e9), 1.0, rtol=1e-5)
+        assert np.isclose(trapz_numpy(sfr, time * 1.0e9), 1.0, rtol=1e-5)
 
 
 @pytest.mark.jaxcigale
@@ -559,15 +708,15 @@ def test_redshift_aware_continuity_sfh_hits_age_of_universe_for_fitted_z():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         continuity_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -617,15 +766,15 @@ def test_redshift_aware_continuity_sfh_supports_fixed_z_and_clips_old_edges():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         continuity_sfh_cosmic_time_module,
     )
-    from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -668,14 +817,14 @@ def test_modified_starburst_attenuation_young_old_bookkeeping():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         modified_starburst_attenuation_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -726,14 +875,14 @@ def test_modified_starburst_attenuates_nebular_lines_with_emission_law():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         modified_starburst_attenuation_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -776,8 +925,8 @@ def test_gordon16_rvfa_curve_limiting_cases_and_rv_mapping():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.modules import (
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.modules import (
         _fitzpatrick99_a_over_av,
         _gordon03_smcbar_a_over_av,
         _gordon16_mixture_rv_from_rv_a,
@@ -811,14 +960,14 @@ def test_gordon16_rvfa_extinction_module_attenuates_young_old_and_nebular():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         gordon16_rvfa_extinction_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -878,14 +1027,14 @@ def test_smc_screen_attenuation_has_stronger_uv_than_optical_absorption():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         smc_screen_attenuation_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -940,14 +1089,14 @@ def test_two_temperature_dust_conserves_absorbed_luminosity():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         two_temperature_dust_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -973,7 +1122,7 @@ def test_two_temperature_dust_conserves_absorbed_luminosity():
     cold_dust = np.asarray(cold_only.dust_lum_lsun_per_a)
     assert np.all(np.isfinite(mixed_dust))
     assert np.all(mixed_dust >= 0.0)
-    assert np.isclose(np.trapezoid(mixed_dust, wave), 12.5, rtol=1e-5)
+    assert np.isclose(trapz_numpy(mixed_dust, wave), 12.5, rtol=1e-5)
 
     mid_ir = int(np.argmin(np.abs(wave - 3.0e5)))
     far_ir = int(np.argmin(np.abs(wave - 1.5e6)))
@@ -985,7 +1134,7 @@ def test_jaxcigale_fixed_parameters_feed_modules():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -995,7 +1144,7 @@ def test_jaxcigale_fixed_parameters_feed_modules():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -1028,7 +1177,7 @@ def test_photometric_upper_limit_uses_gaussian_cdf():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianPhotometricData,
         JaxFilterSet,
         JaxParameterSpace,
@@ -1039,7 +1188,7 @@ def test_photometric_upper_limit_uses_gaussian_cdf():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
 
@@ -1076,7 +1225,7 @@ def test_spectro_photometric_log_prob_combines_both_data_types():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianPhotometricData,
         GaussianSpectralData,
         GaussianSpectroPhotometricData,
@@ -1089,7 +1238,7 @@ def test_spectro_photometric_log_prob_combines_both_data_types():
         no_nebular_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
 
@@ -1130,12 +1279,12 @@ def test_spectral_operator_broadens_then_bins_flux_conservingly():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         bin_average_spectrum,
         gaussian_lsf_smooth_observed,
         pixel_edges_from_centers_numpy,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -1155,8 +1304,8 @@ def test_spectral_operator_accepts_wavelength_dependent_resolving_power():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import GaussianSpectralData, gaussian_lsf_smooth_observed
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale import GaussianSpectralData, gaussian_lsf_smooth_observed
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -1182,7 +1331,7 @@ def test_spectral_likelihood_uses_binning_and_lsf_options():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianSpectralData,
         JaxFilterSet,
         JaxParameterSpace,
@@ -1194,8 +1343,8 @@ def test_spectral_likelihood_uses_binning_and_lsf_options():
         pixel_edges_from_centers_numpy,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.spectroscopy import model_spectrum_on_observed_pixels
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.spectroscopy import model_spectrum_on_observed_pixels
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
 
@@ -1249,8 +1398,8 @@ def test_observed_flux_conversion_is_float32_safe():
     if importlib.util.find_spec("jax") is None:
         pytest.skip("JAX is not installed.")
 
-    from sedinfer.experimental.jaxcigale.core import observed_flux_from_luminosity
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.core import observed_flux_from_luminosity
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
     previous_x64 = bool(jax.config.jax_enable_x64)

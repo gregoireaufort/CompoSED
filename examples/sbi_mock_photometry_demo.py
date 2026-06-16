@@ -14,12 +14,12 @@ from __future__ import annotations
 import numpy as np
 
 from inftools.sbi import simulate_training_set, train_maf_posterior
-from sedinfer.backends.base import ModelPhotometry, SEDBackend
-from sedinfer.data import SEDDataset
-from sedinfer.likelihood import GaussianPhotometricLikelihood
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import UniformPrior
-from sedinfer.units import MassNormalization
+from composed.backends.base import ModelPhotometry, SEDBackend
+from composed.data import SEDDataset
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.parameters import ParameterSpace
+from composed.priors import UniformPrior
+from composed.units import MassNormalization
 
 
 RNG_SEED = 123
@@ -36,7 +36,7 @@ N_POSTERIOR_SAMPLES = 2000
 class LinearColorBackend(SEDBackend):
     """Toy backend with an exactly readable flux model.
 
-    This is not an astrophysical SED model. It just gives sedinfer a backend
+    This is not an astrophysical SED model. It just gives composed a backend
     with the same interface as FSPS or CIGALE.
     """
 

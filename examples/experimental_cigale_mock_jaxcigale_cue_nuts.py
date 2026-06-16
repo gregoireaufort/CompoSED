@@ -15,11 +15,11 @@ It runs one controlled cross-model test:
 The two stages can be run in different Python environments:
 
     # CIGALE environment
-    PYTHONPATH=/path/to/sedinfer-public:/path/to/cigale \
+    PYTHONPATH=/path/to/CompoSED:/path/to/cigale \
     python examples/experimental_cigale_mock_jaxcigale_cue_nuts.py --stage mock
 
     # JAX/DSPS/NumPyro/Cue environment
-    PYTHONPATH=/path/to/sedinfer-public \
+    PYTHONPATH=/path/to/CompoSED \
     python examples/experimental_cigale_mock_jaxcigale_cue_nuts.py --stage fit --no-progress
 
 Units and conventions:
@@ -48,11 +48,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.ssp_data import (
+from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
 )
-from sedinfer.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
+from composed.experimental.jaxcigale.core import flat_lcdm_age_gyr_numpy
 
 
 LSUN_W = 3.828e26
@@ -227,7 +227,7 @@ def fit_with_jaxcigale_cue(args: argparse.Namespace) -> None:
 
     from dsps import load_ssp_templates
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         CueJaxPort,
         GaussianPhotometricData,
         JaxFilterSet,
@@ -242,7 +242,7 @@ def fit_with_jaxcigale_cue(args: argparse.Namespace) -> None:
         redshift_module,
         run_numpyro_nuts,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
     mock = np.load(args.output_dir / MOCK_FILE, allow_pickle=True)
@@ -404,7 +404,7 @@ def benchmark_jaxcigale_timing(args: argparse.Namespace) -> None:
 
     from dsps import load_ssp_templates
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         CueJaxPort,
         GaussianPhotometricData,
         JaxFilterSet,
@@ -420,7 +420,7 @@ def benchmark_jaxcigale_timing(args: argparse.Namespace) -> None:
         redshift_module,
         run_numpyro_nuts,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
     mock = np.load(args.output_dir / MOCK_FILE, allow_pickle=True)
@@ -776,7 +776,7 @@ def configure_jax_environment(platform: str, precision: str) -> None:
             os.environ["JAX_PLATFORMS"] = platform_name
     if precision != "auto":
         enable_x64 = precision == "float64"
-        os.environ["SEDINFER_JAX_ENABLE_X64"] = "1" if enable_x64 else "0"
+        os.environ["COMPOSED_JAX_ENABLE_X64"] = "1" if enable_x64 else "0"
         os.environ["JAX_ENABLE_X64"] = "True" if enable_x64 else "False"
 
 
@@ -829,7 +829,7 @@ def photometry_from_rest_spectrum(wave_rest_a: np.ndarray, luminosity_lsun_per_a
 def posterior_predictive_fluxes(model, samples: np.ndarray, max_draws: int = 400) -> np.ndarray:
     """Evaluate photometry for posterior samples, thinning only for plotting."""
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
     chosen = np.asarray(samples, dtype=float)

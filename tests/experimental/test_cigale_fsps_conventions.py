@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from sedinfer.experimental.cigale_fsps_stellar_conventions import (
+from composed.experimental.cigale_fsps_stellar_conventions import (
     FSPS_SOLAR_METALLICITY,
     cigale_bc03_imf_to_fsps_imf_type,
     cigale_metallicity_to_fsps_logzsol,

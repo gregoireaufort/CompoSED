@@ -3,7 +3,7 @@
 This is an experimental science sanity check, not a polished public API demo.
 It asks one concrete question:
 
-    If the differentiable sedinfer JAX-CIGALE graph generated the data, can
+    If the differentiable composed JAX-CIGALE graph generated the data, can
     NUTS recover redshift, mass, metallicity, and dust from noisy broadband
     photometry when the delayed-SFH shape is fixed?
 
@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.ssp_data import (
+from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
 )
@@ -67,7 +67,7 @@ def configure_jax_environment(platform: str, precision: str) -> None:
             os.environ["JAX_PLATFORMS"] = platform_name
     if precision != "auto":
         enable_x64 = precision == "float64"
-        os.environ["SEDINFER_JAX_ENABLE_X64"] = "1" if enable_x64 else "0"
+        os.environ["COMPOSED_JAX_ENABLE_X64"] = "1" if enable_x64 else "0"
         os.environ["JAX_ENABLE_X64"] = "True" if enable_x64 else "False"
 
 
@@ -88,7 +88,7 @@ def import_jaxcigale_after_device_config() -> None:
     global require_jax
     global run_numpyro_nuts
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         GaussianPhotometricData,
         JaxFilterSet,
         JaxParameterSpace,
@@ -102,7 +102,7 @@ def import_jaxcigale_after_device_config() -> None:
         redshift_module,
         run_numpyro_nuts,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
 
 def parse_args() -> argparse.Namespace:
@@ -278,7 +278,7 @@ def main() -> None:
 
     from dsps import load_ssp_templates
 
-    # DSPS may touch JAX global precision during import. Re-apply the sedinfer
+    # DSPS may touch JAX global precision during import. Re-apply the composed
     # choice after importing DSPS so --precision float32 remains meaningful on
     # MPS/Metal.
     jax, jnp = require_jax()

@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from sedinfer.backends.base import ModelSpectrum
-from sedinfer.backends.mock import MockBackend
-from sedinfer.data import SpectrumDataset
-from sedinfer.likelihood import GaussianSpectralLikelihood, SpectralSimulationError
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import DeltaPrior, UniformPrior
-from sedinfer.units import MassNormalization
+from composed.backends.base import ModelSpectrum
+from composed.backends.mock import MockBackend
+from composed.data import SpectrumDataset
+from composed.likelihood import GaussianSpectralLikelihood, SpectralSimulationError
+from composed.parameters import ParameterSpace
+from composed.priors import DeltaPrior, UniformPrior
+from composed.units import MassNormalization
 
 
 def loglike_no_residual(sigma):

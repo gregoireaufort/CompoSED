@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from sedinfer.experimental.jaxcigale import (
+from composed.experimental.jaxcigale import (
     GaussianPhotometricData,
     JaxFilterSet,
     JaxParameterSpace,
@@ -22,7 +22,7 @@ from sedinfer.experimental.jaxcigale import (
     no_nebular_module,
     redshift_module,
 )
-from sedinfer.experimental.jaxcigale.dependencies import require_jax
+from composed.experimental.jaxcigale.dependencies import require_jax
 
 
 def make_tophat_filters() -> JaxFilterSet:

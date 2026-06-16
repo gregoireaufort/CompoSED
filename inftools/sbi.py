@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 import importlib
-from typing import Any, Callable
+import multiprocessing as mp
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -85,6 +87,8 @@ class MAFPosteriorEstimator:
         learning_rate: float = 1e-3,
         device: str | None = None,
         standardize: bool = True,
+        max_grad_norm: float | None = None,
+        restore_best: bool = True,
     ) -> None:
         torch, _ = _require_sbi_dependencies()
         self.torch = torch
@@ -92,6 +96,8 @@ class MAFPosteriorEstimator:
         self.x_dim = int(x_dim)
         self.learning_rate = float(learning_rate)
         self.standardize = bool(standardize)
+        self.max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
+        self.restore_best = bool(restore_best)
         self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         flow = build_maf(
             theta_dim=self.theta_dim,
@@ -141,18 +147,38 @@ class MAFPosteriorEstimator:
         opt = torch.optim.Adam(self.flow.parameters(), lr=self.learning_rate)
         self.history = {"train_loss": []}
         self.flow.train()
+        best_loss = float("inf")
+        best_state = None
         for epoch in range(int(epochs)):
             losses = []
+            saw_nonfinite_loss = False
             for theta_b, x_b in loader:
                 loss = -self.flow.log_prob(inputs=theta_b, context=x_b).mean()
+                if not bool(torch.isfinite(loss).detach().cpu().item()):
+                    saw_nonfinite_loss = True
+                    losses.append(np.nan)
+                    break
                 opt.zero_grad()
                 loss.backward()
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.flow.parameters(), self.max_grad_norm)
                 opt.step()
                 losses.append(float(loss.detach().cpu().item()))
             mean_loss = float(np.mean(losses)) if losses else np.nan
             self.history["train_loss"].append(mean_loss)
+            if np.isfinite(mean_loss) and mean_loss < best_loss:
+                best_loss = mean_loss
+                best_state = {key: value.detach().clone() for key, value in self.flow.state_dict().items()}
             if verbose:
                 print(f"epoch {epoch + 1}/{epochs}: loss={mean_loss:.6g}")
+            if saw_nonfinite_loss:
+                self.history["stopped_early_nonfinite_loss"] = [float(epoch + 1)]
+                if verbose:
+                    print(f"stopping early after non-finite loss at epoch {epoch + 1}")
+                break
+        if self.restore_best and best_state is not None:
+            self.flow.load_state_dict(best_state)
+            self.history["best_train_loss"] = [best_loss]
         return self.history
 
     def sample(self, x_obs: np.ndarray, num_samples: int = 10000) -> np.ndarray:
@@ -204,14 +230,87 @@ def simulate_training_set(
     rng: np.random.Generator | None = None,
     max_retries: int = 100,
     return_metadata: bool = False,
+    batch_size: int = 1,
+    n_workers: int = 1,
+    executor: Literal["process", "thread", "serial"] = "process",
+    mp_context: str | None = None,
 ):
-    """Sample theta from priors and simulate flux-like observations."""
+    """Sample theta from priors and simulate flux-like observations.
+
+    The returned ``x`` rows are the same active-band or active-pixel vectors
+    consumed by the likelihood.  For expensive backends such as FSPS, set
+    ``n_workers > 1`` and a modest ``batch_size`` so each worker keeps its own
+    backend instance alive across many forward-model calls.  Process execution
+    requires ``simulator`` and ``noise_fn`` to be pickleable; in notebooks,
+    define them as top-level functions/classes or use ``executor="thread"``
+    only for thread-safe simulators.
+    """
 
     if rng is None:
         rng = np.random.default_rng()
     n = int(n)
     if n < 0:
         raise ValueError("n must be non-negative.")
+    batch_size = int(batch_size)
+    n_workers = int(n_workers)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if n_workers <= 0:
+        raise ValueError("n_workers must be positive.")
+    if executor not in {"process", "thread", "serial"}:
+        raise ValueError("executor must be one of: process, thread, serial.")
+    if n == 0:
+        theta_empty = np.empty((0, parameter_space.ndim), dtype=float)
+        x_empty = np.empty((0, 0), dtype=float)
+        if return_metadata:
+            return theta_empty, x_empty, {
+                "attempts": 0,
+                "failures": [],
+                "batch_size": batch_size,
+                "n_workers": n_workers,
+                "executor": executor,
+                "mp_context": mp_context,
+            }
+        return theta_empty, x_empty
+
+    if executor == "serial" or n_workers == 1:
+        theta_out, x_out, metadata = _simulate_training_set_serial(
+            parameter_space,
+            simulator,
+            n=n,
+            noise_fn=noise_fn,
+            rng=rng,
+            max_retries=max_retries,
+        )
+    else:
+        theta_out, x_out, metadata = _simulate_training_set_parallel(
+            parameter_space,
+            simulator,
+            n=n,
+            noise_fn=noise_fn,
+            rng=rng,
+            max_retries=max_retries,
+            batch_size=batch_size,
+            n_workers=n_workers,
+            executor=executor,
+            mp_context=mp_context,
+        )
+
+    metadata.update({"batch_size": batch_size, "n_workers": n_workers, "executor": executor, "mp_context": mp_context})
+    if return_metadata:
+        return theta_out, x_out, metadata
+    return theta_out, x_out
+
+
+def _simulate_training_set_serial(
+    parameter_space,
+    simulator,
+    *,
+    n: int,
+    noise_fn: Callable[[np.ndarray], np.ndarray],
+    rng: np.random.Generator,
+    max_retries: int,
+):
     failures = []
     theta_rows = []
     x_rows = []
@@ -235,9 +334,60 @@ def simulate_training_set(
         x_rows.append(x)
     theta_out = np.asarray(theta_rows, dtype=float)
     x_out = np.asarray(x_rows, dtype=float)
-    if return_metadata:
-        return theta_out, x_out, {"attempts": attempts, "failures": failures}
-    return theta_out, x_out
+    return theta_out, x_out, {"attempts": attempts, "failures": failures}
+
+
+def _simulate_training_set_parallel(
+    parameter_space,
+    simulator,
+    *,
+    n: int,
+    noise_fn: Callable[[np.ndarray], np.ndarray],
+    rng: np.random.Generator,
+    max_retries: int,
+    batch_size: int,
+    n_workers: int,
+    executor: Literal["process", "thread"],
+    mp_context: str | None,
+):
+    n_candidate = n + int(max_retries)
+    theta_candidates = parameter_space.sample_prior(n_candidate, rng=rng)
+    chunks = [theta_candidates[start : start + batch_size] for start in range(0, n_candidate, batch_size)]
+    seeds = rng.integers(0, np.iinfo(np.uint32).max, size=len(chunks), dtype=np.uint32)
+    payloads = [(chunk, int(seed)) for chunk, seed in zip(chunks, seeds)]
+
+    if executor == "thread":
+        pool_cls = ThreadPoolExecutor
+        pool_kwargs: dict[str, Any] = {
+            "max_workers": n_workers,
+            "initializer": _init_simulation_worker,
+            "initargs": (simulator, noise_fn),
+        }
+    else:
+        context = mp.get_context(mp_context) if mp_context is not None else None
+        pool_cls = ProcessPoolExecutor
+        pool_kwargs = {
+            "max_workers": n_workers,
+            "mp_context": context,
+            "initializer": _init_simulation_worker,
+            "initargs": (simulator, noise_fn),
+        }
+
+    theta_rows = []
+    x_rows = []
+    failures = []
+    with pool_cls(**pool_kwargs) as pool:
+        for good_theta, good_x, bad in pool.map(_simulate_chunk_from_worker, payloads, chunksize=1):
+            theta_rows.extend(good_theta)
+            x_rows.extend(good_x)
+            failures.extend(bad)
+
+    if len(theta_rows) < n:
+        raise RuntimeError(f"Too many failed simulations: {len(failures)} failures while collecting {len(theta_rows)}/{n}.")
+
+    theta_out = np.asarray(theta_rows[:n], dtype=float)
+    x_out = np.asarray(x_rows[:n], dtype=float)
+    return theta_out, x_out, {"attempts": len(theta_rows) + len(failures), "failures": failures}
 
 
 def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) -> MAFPosteriorEstimator:
@@ -285,6 +435,38 @@ def _simulate_one(simulator, theta: np.ndarray, noise_fn, rng: np.random.Generat
     if hasattr(simulator, "rvs"):
         return simulator.rvs(theta, noise_fn=noise_fn, rng=rng)
     return simulator(theta, noise_fn=noise_fn, rng=rng)
+
+
+_WORKER_SIMULATOR = None
+_WORKER_NOISE_FN = None
+
+
+def _init_simulation_worker(simulator, noise_fn) -> None:
+    global _WORKER_SIMULATOR, _WORKER_NOISE_FN
+    _WORKER_SIMULATOR = simulator
+    _WORKER_NOISE_FN = noise_fn
+
+
+def _simulate_chunk_from_worker(payload):
+    if _WORKER_SIMULATOR is None or _WORKER_NOISE_FN is None:
+        raise RuntimeError("Simulation worker was not initialized.")
+    theta_chunk, seed = payload
+    rng = np.random.default_rng(int(seed))
+    good_theta = []
+    good_x = []
+    failures = []
+    for theta in np.asarray(theta_chunk, dtype=float):
+        try:
+            x = _simulate_one(_WORKER_SIMULATOR, theta, _WORKER_NOISE_FN, rng)
+            x = np.asarray(x, dtype=float)
+            if x.ndim != 1 or not np.all(np.isfinite(x)):
+                raise ValueError(f"Simulator returned invalid observation shape/content: shape={x.shape}.")
+        except Exception as exc:
+            failures.append({"theta": np.asarray(theta, dtype=float), "error": repr(exc)})
+            continue
+        good_theta.append(np.asarray(theta, dtype=float))
+        good_x.append(x)
+    return good_theta, good_x, failures
 
 
 def _as_2d(values: np.ndarray, dim: int, name: str) -> np.ndarray:

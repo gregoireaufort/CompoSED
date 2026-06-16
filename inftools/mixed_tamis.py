@@ -13,6 +13,7 @@ from .grid import (
     run_grid_sampler,
     split_parameter_space,
 )
+from .transforms import box_logit_transform_from_parameter_space
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ def run_mixed_tamis(
     discrete_floor_failure_probability: float = 1e-5,
     discrete_floor_max_mass: float = 0.05,
     covariance_jitter: float = 1e-6,
+    continuous_transform=None,
     rng: np.random.Generator | None = None,
     seed: int | None = None,
 ) -> SamplingResult:
@@ -53,6 +55,11 @@ def run_mixed_tamis(
     choices are proposal variables, not Gaussian coordinates. Tempered weights
     adapt both the continuous Gaussian mixture and the categorical proposal.
     The final weights use AMIS recycling over all proposal rounds.
+
+    If ``continuous_transform`` is ``"auto"`` or ``True``, bounded continuous
+    parameters are sampled in unconstrained box-logit coordinates while results
+    are returned in the original physical parameter space. In that case
+    ``init_span`` and ``var0`` live in transformed coordinates.
     """
 
     if rng is not None and seed is not None:
@@ -69,6 +76,7 @@ def run_mixed_tamis(
     blocks = split_parameter_space(parameter_space)
     if not blocks.continuous_indices:
         return run_grid_sampler(posterior, parameter_space)
+    transform = _resolve_continuous_transform(parameter_space, blocks, continuous_transform)
 
     if x0 is None:
         x0 = parameter_space.sample_prior(1, rng=rng)[0]
@@ -82,6 +90,7 @@ def run_mixed_tamis(
         n_comp=int(n_comp),
         init_span=float(init_span),
         var0=var0,
+        transform=transform,
         rng=rng,
     )
 
@@ -97,9 +106,9 @@ def run_mixed_tamis(
 
     for _ in range(int(T_max)):
         proposal_history.append(proposal)
-        samples = _sample_mixed_proposal(proposal, parameter_space, int(n_per_iter), rng)
+        samples = _sample_mixed_proposal(proposal, parameter_space, int(n_per_iter), rng, transform=transform)
         log_target = np.asarray([posterior.log_prob_fn(theta) for theta in samples], dtype=float)
-        log_proposal = _mixed_proposal_logpdf(samples, proposal, parameter_space)
+        log_proposal = _mixed_proposal_logpdf(samples, proposal, parameter_space, transform=transform)
         log_weight = log_target - log_proposal
 
         weights = _probabilities_from_log_weights(log_weight)
@@ -122,6 +131,7 @@ def run_mixed_tamis(
             parameter_space=parameter_space,
             old=proposal,
             weights=tempered_weights,
+            transform=transform,
             discrete_probability_floor=discrete_probability_floor,
             discrete_floor_failure_probability=discrete_floor_failure_probability,
             discrete_floor_max_mass=discrete_floor_max_mass,
@@ -136,6 +146,7 @@ def run_mixed_tamis(
         proposals=proposal_history,
         parameter_space=parameter_space,
         n_per_iter=int(n_per_iter),
+        transform=transform,
     )
     final_weights = _probabilities_from_log_weights(final_log_weights)
 
@@ -159,6 +170,8 @@ def run_mixed_tamis(
             "ESS": np.asarray(ess_history, dtype=float),
             "tempered_ESS": np.asarray(tempered_ess_history, dtype=float),
             "parameter_blocks": blocks,
+            "continuous_transform": type(transform).__name__ if transform is not None else None,
+            "continuous_transform_names": getattr(transform, "names", None),
             "discrete_probability_floor": discrete_probability_floor,
             "discrete_floor_failure_probability": discrete_floor_failure_probability,
             "discrete_floor_max_mass": discrete_floor_max_mass,
@@ -166,9 +179,19 @@ def run_mixed_tamis(
     )
 
 
-def _initial_mixed_proposal(parameter_space, x0, n_comp, init_span, var0, rng) -> MixedTamisProposal:
+def _resolve_continuous_transform(parameter_space, blocks, continuous_transform):
+    if continuous_transform is None or continuous_transform is False:
+        return None
+    if continuous_transform is True or continuous_transform == "auto":
+        return box_logit_transform_from_parameter_space(parameter_space, names=blocks.continuous_names)
+    return continuous_transform
+
+
+def _initial_mixed_proposal(parameter_space, x0, n_comp, init_span, var0, transform, rng) -> MixedTamisProposal:
     blocks = split_parameter_space(parameter_space)
     continuous_x0 = x0[list(blocks.continuous_indices)]
+    if transform is not None:
+        continuous_x0 = transform.theta_to_y(continuous_x0)
     dim_cont = len(blocks.continuous_indices)
     means = continuous_x0[None, :] + rng.uniform(-init_span, init_span, size=(n_comp, dim_cont))
 
@@ -202,19 +225,20 @@ def _initial_mixed_proposal(parameter_space, x0, n_comp, init_span, var0, rng) -
     )
 
 
-def _sample_mixed_proposal(proposal, parameter_space, n, rng) -> np.ndarray:
+def _sample_mixed_proposal(proposal, parameter_space, n, rng, transform=None) -> np.ndarray:
     blocks = split_parameter_space(parameter_space)
     dim_cont = len(blocks.continuous_indices)
     component = rng.choice(np.arange(proposal.proportions.size), size=n, p=proposal.proportions)
-    continuous = np.empty((n, dim_cont), dtype=float)
+    continuous_work = np.empty((n, dim_cont), dtype=float)
     for k in range(proposal.proportions.size):
         mask = component == k
         if np.any(mask):
-            continuous[mask] = rng.multivariate_normal(
+            continuous_work[mask] = rng.multivariate_normal(
                 mean=proposal.means[k],
                 cov=proposal.covariances[k],
                 size=int(np.sum(mask)),
             )
+    continuous = transform.y_to_theta(continuous_work) if transform is not None else continuous_work
 
     discrete = np.empty((n, len(blocks.discrete_indices)), dtype=float)
     for j, values in enumerate(proposal.discrete_values):
@@ -226,11 +250,17 @@ def _sample_mixed_proposal(proposal, parameter_space, n, rng) -> np.ndarray:
     )
 
 
-def _mixed_proposal_logpdf(samples: np.ndarray, proposal: MixedTamisProposal, parameter_space) -> np.ndarray:
+def _mixed_proposal_logpdf(samples: np.ndarray, proposal: MixedTamisProposal, parameter_space, transform=None) -> np.ndarray:
     blocks = split_parameter_space(parameter_space)
     samples = np.asarray(samples, dtype=float)
     continuous = samples[:, list(blocks.continuous_indices)]
-    log_cont = _gaussian_mixture_logpdf(continuous, proposal)
+    if transform is not None:
+        continuous_work = transform.theta_to_y(continuous)
+        log_cont = _gaussian_mixture_logpdf(continuous_work, proposal) - transform.log_abs_det_jac_each(
+            continuous_work
+        )
+    else:
+        log_cont = _gaussian_mixture_logpdf(continuous, proposal)
     log_disc = np.zeros(samples.shape[0], dtype=float)
     for axis, full_index in enumerate(blocks.discrete_indices):
         values = proposal.discrete_values[axis]
@@ -274,6 +304,7 @@ def _update_mixed_proposal(
     parameter_space,
     old,
     weights,
+    transform,
     discrete_probability_floor,
     discrete_floor_failure_probability,
     discrete_floor_max_mass,
@@ -281,6 +312,8 @@ def _update_mixed_proposal(
 ) -> MixedTamisProposal:
     blocks = split_parameter_space(parameter_space)
     continuous = samples[:, list(blocks.continuous_indices)]
+    if transform is not None:
+        continuous = transform.theta_to_y(continuous)
     responsibilities = _mixture_responsibilities(continuous, old)
     weighted_resp = weights[:, None] * responsibilities
     component_mass = np.sum(weighted_resp, axis=0)
@@ -356,10 +389,12 @@ def _adapt_beta(log_weight: np.ndarray, target_ess: float) -> float:
     return float(high)
 
 
-def _amis_log_weights(samples, log_target, proposals, parameter_space, n_per_iter):
+def _amis_log_weights(samples, log_target, proposals, parameter_space, n_per_iter, transform=None):
     log_q_terms = []
     for proposal in proposals:
-        log_q_terms.append(np.log(float(n_per_iter)) + _mixed_proposal_logpdf(samples, proposal, parameter_space))
+        log_q_terms.append(
+            np.log(float(n_per_iter)) + _mixed_proposal_logpdf(samples, proposal, parameter_space, transform=transform)
+        )
     log_q_terms = np.asarray(log_q_terms, dtype=float)
     log_denom = np.asarray([_logsumexp(log_q_terms[:, i]) for i in range(samples.shape[0])], dtype=float)
     log_denom -= np.log(float(n_per_iter * len(proposals)))

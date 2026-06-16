@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sedinfer"
+name = "composed"
 version = "0.1.0"
-description = "Small interfaces for Bayesian SED fitting and photo-z inference."
+description = "Composable Bayesian SED fitting and photo-z inference."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -33,10 +33,11 @@ dev = [
   "matplotlib",
 ]
 fsps = [
-  "sedpy",
+  "fsps>=0.4",
+  "astro-sedpy>=0.4,<0.5",
 ]
 cigale = [
-  "pcigale",
+  "pcigale<2025",
 ]
 sbi = [
   "torch",
@@ -49,8 +50,9 @@ jaxcigale = [
   "numpyro",
 ]
 all = [
-  "sedpy",
-  "pcigale",
+  "fsps>=0.4",
+  "astro-sedpy>=0.4,<0.5",
+  "pcigale<2025",
   "torch",
   "nflows",
   "jax",
@@ -63,4 +65,4 @@ all = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["sedinfer*", "inftools*"]
+include = ["composed*", "inftools*"]

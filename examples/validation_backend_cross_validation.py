@@ -9,12 +9,12 @@ The staged design is deliberate because the local Python environments differ:
 
     # CIGALE + python-FSPS environment
     SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
         examples/validation_backend_cross_validation.py --stage references --n-draws 80
 
     # JAX + DSPS + Cue environment
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     DSPS_CONTINUUM_SSP_FILE="outputs/experimental_dsps_fsps_clock_diagnostic/fsps_continuum_ssp_data.h5" \
     CUE_DATA_DIR=/private/tmp/cue/src/cue/data \
     /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
@@ -52,7 +52,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.ssp_data import (
+from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
 )
@@ -195,8 +195,8 @@ def load_or_create_draws(path: Path, *, n_draws: int, seed: int) -> list[dict[st
 def run_reference_stage(draws: list[dict[str, float]], output_dir: Path) -> None:
     """Run CIGALE+BC03, CIGALE+FSPS, and direct FSPS spectra."""
 
-    from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
-    from sedinfer.experimental.cigale_fsps_stellar_conventions import fsps_parameters_from_cigale_bc03
+    from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+    from composed.experimental.cigale_fsps_stellar_conventions import fsps_parameters_from_cigale_bc03
 
     register_cigale_fsps_stellar_module()
     from pcigale.warehouse import SedWarehouse
@@ -284,7 +284,7 @@ def run_cue_stage(
 
     from dsps import load_ssp_templates
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -294,8 +294,8 @@ def run_cue_stage(
         delayed_sfh_cosmic_time_module,
         dsps_stellar_module,
     )
-    from sedinfer.experimental.jaxcigale.cue_port import CueJaxPort
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.cue_port import CueJaxPort
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
     print("[cue] JAX backend:", jax.default_backend())

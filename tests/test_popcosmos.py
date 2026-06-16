@@ -1,6 +1,6 @@
 import numpy as np
 
-from sedinfer.transforms.popcosmos import PARAM_NAMES, popcosmos_theta_to_tabular_sfh
+from composed.transforms.popcosmos import PARAM_NAMES, popcosmos_theta_to_tabular_sfh
 
 
 class FakeQuantity:

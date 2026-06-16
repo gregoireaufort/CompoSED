@@ -29,8 +29,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
-from sedinfer.experimental.cigale_fsps_stellar_conventions import (
+from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+from composed.experimental.cigale_fsps_stellar_conventions import (
     fsps_parameters_from_cigale_bc03,
 )
 

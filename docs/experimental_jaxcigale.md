@@ -1,6 +1,6 @@
 # Experimental JAX-CIGALE
 
-`sedinfer.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
+`composed.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
 It is not a wrapper around `pcigale`.  The point is to keep the useful CIGALE
 idea of an ordered module chain while making the numerical graph pure,
 fixed-shape, and differentiable.
@@ -95,7 +95,7 @@ and then be plugged in through `nebular_emulator_module`.
 There is now a more specific experimental Cue-style block:
 
 ```python
-from sedinfer.experimental.jaxcigale import cue_nebular_module
+from composed.experimental.jaxcigale import cue_nebular_module
 
 modules = [
     delayed_sfh_module(age_grid_gyr),
@@ -127,13 +127,13 @@ module. The current repository includes ``toy_cue_emulator`` only for tests and
 plumbing examples; it is not a scientific CLOUDY emulator.
 
 The public Cue TensorFlow/PCA emulator has also been ported to JAX in
-``sedinfer.experimental.jaxcigale.cue_port``. The port reads Cue's public
+``composed.experimental.jaxcigale.cue_port``. The port reads Cue's public
 ``speculator_*.pkl`` and ``pca_*.pkl`` files, without importing TensorFlow, and
 reproduces the public NumPy/PCA calculation for continuum and lines. It can be
 used as a ``cue_nebular_module`` adapter:
 
 ```python
-from sedinfer.experimental.jaxcigale import CueJaxPort, cue_nebular_module
+from composed.experimental.jaxcigale import CueJaxPort, cue_nebular_module
 
 cue_port = CueJaxPort.from_public_cue_data_dir("/path/to/cue/src/cue/data")
 modules = [
@@ -152,7 +152,7 @@ FSPS/CLOUDY-style LyC nebular continuum, keep the Cue emulator pure and add an
 explicit table extension:
 
 ```python
-from sedinfer.experimental.jaxcigale import load_fsps_lyc_continuum_apply
+from composed.experimental.jaxcigale import load_fsps_lyc_continuum_apply
 
 lyc_continuum = load_fsps_lyc_continuum_apply(
     sps_home="/path/to/FSPS",
@@ -178,7 +178,7 @@ unless this extension is passed explicitly.
 The diagnostic comparison script is:
 
 ```bash
-PYTHONPATH=/path/to/sedinfer-public \
+PYTHONPATH=/path/to/CompoSED \
 CUE_DATA_DIR=/path/to/cue/src/cue/data \
 python examples/experimental_cue_jax_port_comparison.py
 ```
@@ -196,7 +196,7 @@ them to be identical.
 
 `run_numpyro_nuts` is the first inference runner. It accepts a vector-valued
 `JaxSedModel` posterior, so it does not need a NumPyro model with named sample
-sites. This keeps the prototype close to the existing `sedinfer` parameter
+sites. This keeps the prototype close to the existing `composed` parameter
 vector convention.
 
 Finite prior bounds are sampled in an unconstrained coordinate system and then
@@ -206,7 +206,7 @@ NUTS bounce directly off hard uniform-prior walls.
 The first DSPS recovery script is:
 
 ```bash
-PYTHONPATH=/path/to/sedinfer-public \
+PYTHONPATH=/path/to/CompoSED \
 python examples/experimental_jaxcigale_dsps_nuts_recovery.py
 ```
 
@@ -251,17 +251,17 @@ The notebook defaults are intended for a real CPU/x64 check. For a fast smoke
 test without editing the notebook, override the counts from the shell:
 
 ```bash
-SEDINFER_JAXCIGALE_WARMUP=20 \
-SEDINFER_JAXCIGALE_SAMPLES=30 \
-SEDINFER_JAXCIGALE_POSTERIOR_PREDICTIVE=10 \
+COMPOSED_JAXCIGALE_WARMUP=20 \
+COMPOSED_JAXCIGALE_SAMPLES=30 \
+COMPOSED_JAXCIGALE_POSTERIOR_PREDICTIVE=10 \
 jupyter nbconvert --to notebook --execute notebooks/experimental_jaxcigale_nuts_assessment.ipynb
 ```
 
 Useful notebook switches are:
 
-- `SEDINFER_JAXCIGALE_FIT_SFH_SHAPE=1`
-- `SEDINFER_JAXCIGALE_MULTI_MOCK=1`
-- `SEDINFER_JAXCIGALE_ADD_NOISE=1`
+- `COMPOSED_JAXCIGALE_FIT_SFH_SHAPE=1`
+- `COMPOSED_JAXCIGALE_MULTI_MOCK=1`
+- `COMPOSED_JAXCIGALE_ADD_NOISE=1`
 
 The first joint spectrum-plus-photometry validation notebook is:
 
@@ -273,7 +273,7 @@ It simulates a JADES-like NIRSpec PRISM spectrum plus approximate NIRCam-like
 broad bands.  Blue bands are encoded as real upper limits using
 `GaussianPhotometricData`, and the fit uses `GaussianSpectroPhotometricData` so
 the spectrum and photometry contribute to the same log posterior.
-- `SEDINFER_JAXCIGALE_OUTPUT_DIR=/path/to/output`
+- `COMPOSED_JAXCIGALE_OUTPUT_DIR=/path/to/output`
 
 ## Current Limits
 

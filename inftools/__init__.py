@@ -3,7 +3,7 @@
 import importlib
 
 from .core import Posterior, SamplingResult
-from .transforms import BoxLogitTransform
+from .transforms import BoxLogitTransform, box_logit_transform_from_parameter_space
 
 __all__ = [
     "Posterior",
@@ -29,6 +29,7 @@ __all__ = [
     "split_parameter_space",
     "plotting",
     "BoxLogitTransform",
+    "box_logit_transform_from_parameter_space",
     "MAFPosteriorEstimator",
     "simulate_training_set",
     "train_maf_posterior",

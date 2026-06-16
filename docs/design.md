@@ -1,8 +1,8 @@
-# sedinfer Design Notes
+# CompoSED Design Notes
 
 ## Package Architecture
 
-`sedinfer` is split around stable interfaces rather than physical model details:
+`composed` is split around stable interfaces rather than physical model details:
 
 - `data.py` contains observed-data containers.
 - `priors.py` and `parameters.py` define scalar priors and the ordered parameter vector contract.
@@ -70,7 +70,7 @@ photometry and the likelihood applies the explicit `log10_mass`.
 
 ## Physical Transforms
 
-Physical transforms live under `sedinfer/transforms/`. For example, Pop-COSMOS continuity-SFH utilities convert catalog theta rows into FSPS-ready tabular SFHs.
+Physical transforms live under `composed/transforms/`. For example, Pop-COSMOS continuity-SFH utilities convert catalog theta rows into FSPS-ready tabular SFHs.
 
 Transforms should be pure functions where possible. They should not own backend instances, caches, multiprocessing pools, or global state.
 

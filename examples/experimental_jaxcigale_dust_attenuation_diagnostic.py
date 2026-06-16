@@ -11,7 +11,7 @@ bookkeeping:
 
 The intended run environment is the JAX/DSPS environment:
 
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/sedinfer-public \
+    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
         examples/experimental_jaxcigale_dust_attenuation_diagnostic.py
 """
@@ -28,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.ssp_data import default_continuum_ssp_path, require_continuum_ssp_path
+from composed.experimental.jaxcigale.ssp_data import default_continuum_ssp_path, require_continuum_ssp_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,7 +53,7 @@ def main() -> None:
 
     from dsps import load_ssp_templates
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
@@ -63,7 +63,7 @@ def main() -> None:
         modified_starburst_attenuation_module,
         no_nebular_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 
@@ -153,8 +153,8 @@ def main() -> None:
 def plot_gordon16_rvfa_extinction_curves(output_dir: Path) -> None:
     """Plot the BEAST/Gordon16 R(V), f_A extinction family we use in JAX."""
 
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.modules import _gordon16_rvfa_a_over_av
 
     _, jnp = require_jax()
 
@@ -193,14 +193,14 @@ def plot_gordon16_rvfa_extinction_curves(output_dir: Path) -> None:
 def plot_nebular_line_extinction(output_dir: Path) -> None:
     """Toy Balmer/OIII line grid showing wavelength-dependent nebular dust."""
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxFilterSet,
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
         modified_starburst_attenuation_module,
     )
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.dependencies import require_jax
 
     _, jnp = require_jax()
 

@@ -13,13 +13,13 @@ auditable by keeping the scientific steps visible:
 The stages can be run in different Python environments:
 
     # JAX/DSPS/Cue environment
-    PYTHONPATH=/path/to/sedinfer-public \
+    PYTHONPATH=/path/to/CompoSED \
     DSPS_CONTINUUM_SSP_FILE=/path/to/fsps_continuum_ssp_data.h5 \
     CUE_DATA_DIR=/path/to/cue/src/cue/data \
     python examples/experimental_dsps_cue_nebular_validation.py --stage dsps-cue
 
     # CIGALE/FSPS environment
-    PYTHONPATH=/path/to/sedinfer-public \
+    PYTHONPATH=/path/to/CompoSED \
     SPS_HOME=/path/to/fsps \
     python examples/experimental_dsps_cue_nebular_validation.py --stage references
 
@@ -41,7 +41,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.ssp_data import (
+from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
 )
@@ -135,7 +135,7 @@ def load_or_create_draws(path: Path) -> list[dict[str, float]]:
 def run_dsps_cue_stage(draws: list[dict[str, float]], args: argparse.Namespace) -> None:
     from dsps import load_ssp_templates
 
-    from sedinfer.experimental.jaxcigale import (
+    from composed.experimental.jaxcigale import (
         JaxParameterSpace,
         UniformJaxPrior,
         build_jax_sed_model,
@@ -144,9 +144,9 @@ def run_dsps_cue_stage(draws: list[dict[str, float]], args: argparse.Namespace) 
         dsps_stellar_module,
         redshift_module,
     )
-    from sedinfer.experimental.jaxcigale.cue_port import CueJaxPort
-    from sedinfer.experimental.jaxcigale.dependencies import require_jax
-    from sedinfer.experimental.jaxcigale.photometry import JaxFilterSet
+    from composed.experimental.jaxcigale.cue_port import CueJaxPort
+    from composed.experimental.jaxcigale.dependencies import require_jax
+    from composed.experimental.jaxcigale.photometry import JaxFilterSet
 
     jax, jnp = require_jax()
     print("Running DSPS + Cue stage with JAX backend:", jax.default_backend())
@@ -217,7 +217,7 @@ def run_reference_stage(draws: list[dict[str, float]], args: argparse.Namespace)
     try:
         from pcigale.warehouse import SedWarehouse
 
-        from sedinfer.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
+        from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
 
         register_cigale_fsps_stellar_module()
         warehouse = SedWarehouse(nocache=["fsps_stellar", "nebular"])
@@ -404,7 +404,7 @@ def photometry_from_rest_spectrum(wave_rest_a: np.ndarray, lum_lsun_per_a: np.nd
 
 
 def jax_filter_set():
-    from sedinfer.experimental.jaxcigale.photometry import JaxFilterSet
+    from composed.experimental.jaxcigale.photometry import JaxFilterSet
 
     waves = []
     transmissions = []

@@ -6,13 +6,13 @@ import numpy as np
 
 from inftools.core import Posterior
 from inftools.grid import run_grid_sampler
-from sedinfer.catalog import run_photometric_grid_catalog
-from sedinfer.data import SEDDataset
-from sedinfer.backends.base import ModelPhotometry, SEDBackend
-from sedinfer.likelihood import GaussianPhotometricLikelihood
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import ChoicePrior
-from sedinfer.units import MassNormalization
+from composed.catalog import run_photometric_grid_catalog
+from composed.data import SEDDataset
+from composed.backends.base import ModelPhotometry, SEDBackend
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.parameters import ParameterSpace
+from composed.priors import ChoicePrior
+from composed.units import MassNormalization
 
 
 @dataclass

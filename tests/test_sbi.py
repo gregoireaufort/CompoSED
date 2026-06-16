@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 
 from inftools.sbi import MAFPosteriorEstimator, simulate_training_set
-from sedinfer.backends.mock import MockBackend
-from sedinfer.data import SEDDataset
-from sedinfer.likelihood import GaussianPhotometricLikelihood
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import UniformPrior
+from composed.backends.mock import MockBackend
+from composed.data import SEDDataset
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.parameters import ParameterSpace
+from composed.priors import UniformPrior
 
 
 def test_importing_inftools_works_without_constructing_sbi_estimator():
@@ -94,6 +94,34 @@ def test_simulate_training_set_with_toy_likelihood():
     assert x.shape == (5, 2)
     assert np.all(np.isfinite(theta))
     assert np.allclose(x, np.array([[1.0, 2.0]] * 5))
+
+
+def test_simulate_training_set_parallel_thread_chunks():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    def simulator(theta, noise_fn=None, rng=None):
+        del noise_fn, rng
+        return np.array([theta[0], theta[0] + 1.0])
+
+    theta, x, meta = simulate_training_set(
+        ps,
+        simulator,
+        n=17,
+        noise_fn=lambda flux: np.zeros_like(flux),
+        rng=np.random.default_rng(11),
+        batch_size=4,
+        n_workers=2,
+        executor="thread",
+        return_metadata=True,
+    )
+
+    assert theta.shape == (17, 1)
+    assert x.shape == (17, 2)
+    assert np.allclose(x[:, 0], theta[:, 0])
+    assert np.allclose(x[:, 1], theta[:, 0] + 1.0)
+    assert meta["batch_size"] == 4
+    assert meta["n_workers"] == 2
+    assert meta["executor"] == "thread"
 
 
 def test_simulate_training_set_retries_failures():

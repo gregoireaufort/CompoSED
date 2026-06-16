@@ -1,13 +1,13 @@
-# sedinfer
+# CompoSED
 
-Small interfaces for Bayesian SED fitting and photo-z inference.
+Composable Bayesian SED fitting and photo-z inference.
 
 ```python
 import numpy as np
 
-from sedinfer import GaussianPhotometricLikelihood, ParameterSpace, SEDDataset
-from sedinfer.backends.mock import MockBackend
-from sedinfer.priors import DeltaPrior
+from composed import GaussianPhotometricLikelihood, ParameterSpace, SEDDataset
+from composed.backends.mock import MockBackend
+from composed.priors import DeltaPrior
 
 data = SEDDataset(
     band_names=["g", "r"],
@@ -35,9 +35,9 @@ Spectra use observed-frame Angstrom and observed `f_lambda` in
 ```python
 import numpy as np
 
-from sedinfer import GaussianSpectralLikelihood, ParameterSpace, SpectrumDataset
-from sedinfer.backends.mock import MockBackend
-from sedinfer.priors import DeltaPrior
+from composed import GaussianSpectralLikelihood, ParameterSpace, SpectrumDataset
+from composed.backends.mock import MockBackend
+from composed.priors import DeltaPrior
 
 data = SpectrumDataset(
     wavelength=np.array([5000.0, 5100.0, 5200.0]),
@@ -71,8 +71,8 @@ backend.
 ```python
 import numpy as np
 
-from sedinfer.backends.fsps import FSPSBackend
-from sedinfer.filters import FilterSet
+from composed.backends.fsps import FSPSBackend
+from composed.filters import FilterSet
 
 from sedpy.observate import load_filters
 
@@ -105,14 +105,14 @@ photometry and observed-frame `f_lambda` cgs per Angstrom for spectra. Native
 CIGALE filter names can be passed as strings; sedpy filters are also supported
 via `photometry_mode="sedpy"`.
 
-In `sedinfer`, CIGALE is deliberately treated as a per-solar-mass backend.
+In `composed`, CIGALE is deliberately treated as a per-solar-mass backend.
 SFH module `normalise=True` is enforced, and the Gaussian likelihood applies
 `10**log10_mass`.
 
 ```python
-from sedinfer.backends.cigale import build_cigale_backend_and_parameter_space
-from sedinfer.filters import FilterSet
-from sedinfer.priors import UniformPrior
+from composed.backends.cigale import build_cigale_backend_and_parameter_space
+from composed.filters import FilterSet
+from composed.priors import UniformPrior
 
 modules = ["sfhdelayed", "bc03", "redshifting"]
 module_parameters = {
@@ -176,7 +176,7 @@ FSPS, sedpy, or `SPS_HOME` are unavailable.
 
 `inftools.sbi` adds an optional Masked Autoregressive Flow posterior estimator
 using `torch` and `nflows`. These dependencies are not required for importing
-`sedinfer` or the rest of `inftools`; constructing the estimator will raise a
+`composed` or the rest of `inftools`; constructing the estimator will raise a
 helpful `ImportError` if they are missing.
 
 Conceptual pipeline:
@@ -203,6 +203,9 @@ theta_train, x_train = simulate_training_set(
     n=1000,
     noise_fn=noise_fn,
     rng=np.random.default_rng(1),
+    batch_size=16,
+    n_workers=4,
+    executor="process",
 )
 
 estimator = train_maf_posterior(
@@ -221,6 +224,13 @@ SBI quality depends strongly on prior coverage, simulator fidelity, noise
 modeling, and diagnostic checks. The simulator produces the same active-band
 flux vector convention consumed by the Gaussian likelihood.
 
+For expensive forward models such as FSPS, `simulate_training_set` can split
+prior draws into chunks and evaluate them in worker processes. Each worker keeps
+its own simulator/backend object alive across chunks, which avoids rebuilding
+the stellar population machinery for every object. Process mode requires the
+simulator and `noise_fn` to be pickleable; if you are calling it from a notebook,
+define those at top level or run from a small script.
+
 See `notebooks/cosmos2020_sbi_fsps_gpu_timing.ipynb` for a COSMOS2020 +
 FSPS + MAF setup focused on GPU/MPS posterior-sampling timing.
 
@@ -231,7 +241,7 @@ model grid is computed once and the Gaussian likelihood is evaluated against
 all objects with chunked array operations:
 
 ```python
-from sedinfer import run_photometric_grid_catalog
+from composed import run_photometric_grid_catalog
 
 result = run_photometric_grid_catalog(
     backend,
@@ -250,16 +260,59 @@ single-object fitting function across a catalog with serial, thread, or process
 execution. For process execution, build fragile backend state such as FSPS or
 CIGALE inside the worker function rather than trying to pickle a live backend.
 
+## Saving and plotting inference runs
+
+The intended fitting pipeline is:
+
+1. declare a backend, parameter space, and likelihood;
+2. declare the observed `SEDDataset` and/or `SpectrumDataset`;
+3. run a sampler;
+4. normalize the sampler output;
+5. save the result;
+6. make diagnostic plots.
+
+```python
+from composed import normalize_sampling_result, save_inference_result
+from composed.plot import (
+    plot_corner_hexbin,
+    plot_posterior_predictive_sed,
+    plot_traces,
+)
+
+raw = run_mixed_tamis(posterior, parameter_space, ...)
+result = normalize_sampling_result(
+    raw,
+    parameter_space,
+    sampler_name="mixed_tamis",
+)
+save_inference_result(result, "runs/object_001")
+
+plot_corner_hexbin(result)
+plot_traces(result)
+plot_posterior_predictive_sed(
+    result,
+    backend,
+    parameter_space,
+    photometry=dataset,
+    filters=filters,
+)
+```
+
+`InferenceResult.weights` are always normalized. MCMC-like outputs use uniform
+weights by default, while grid/TAMIS-style outputs use `weights_norm` from the
+sampler metadata when available. Results are saved as an `.npz` array file plus
+a JSON sidecar containing metadata and posterior summaries.
+
 ## Experimental JAX-CIGALE
 
-`sedinfer.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
+`composed.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
 It does not call `pcigale`; instead it keeps the CIGALE idea of a fixed ordered
 module chain while making each module a pure JAX operation after setup.
 
 Optional dependencies:
 
 ```bash
-pip install "sedinfer[jaxcigale]"
+pip install "composed[jaxcigale]"
 ```
 
 Minimal analytic-stellar demo:
@@ -267,7 +320,7 @@ Minimal analytic-stellar demo:
 ```python
 import numpy as np
 
-from sedinfer.experimental.jaxcigale import (
+from composed.experimental.jaxcigale import (
     JaxFilterSet,
     JaxParameterSpace,
     UniformJaxPrior,

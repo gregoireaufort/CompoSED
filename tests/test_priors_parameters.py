@@ -1,7 +1,7 @@
 import numpy as np
 
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
+from composed.parameters import ParameterSpace
+from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
 
 
 def test_prior_sampling_and_logpdf():

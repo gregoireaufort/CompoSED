@@ -4,28 +4,28 @@ import types
 import numpy as np
 import pytest
 
-from sedinfer.backends.cigale import (
+from composed.backends.cigale import (
     C_A_PER_S,
     CIGALEBackend,
     MJY_PER_MAGGIE,
     build_cigale_backend_and_parameter_space,
     build_cigale_parameter_space,
 )
-from sedinfer.data import SEDDataset
-from sedinfer.filters import FilterSet
-from sedinfer.likelihood import GaussianPhotometricLikelihood
-from sedinfer.priors import DeltaPrior, UniformPrior
-from sedinfer.units import MassNormalization
+from composed.data import SEDDataset
+from composed.filters import FilterSet
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.priors import DeltaPrior, UniformPrior
+from composed.units import MassNormalization
 
 
 def test_cigale_backend_module_imports_without_pcigale_installed():
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     assert hasattr(cigale_backend, "CIGALEBackend")
 
 
 def test_constructing_cigale_backend_raises_helpful_error_if_pcigale_missing(monkeypatch):
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: False)
     with pytest.raises(ImportError, match="pcigale"):
@@ -33,7 +33,7 @@ def test_constructing_cigale_backend_raises_helpful_error_if_pcigale_missing(mon
 
 
 def test_cigale_backend_rejects_absolute_mass_normalization(monkeypatch):
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     with pytest.raises(ValueError, match="PER_SOLAR_MASS"):
@@ -72,7 +72,7 @@ def test_cigale_parameter_space_from_ranges_and_choices():
 def test_cigale_native_photometry_maps_params_and_enforces_sfh_normalise(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     modules = ["sfhdelayed", "bc03", "redshifting"]
@@ -112,7 +112,7 @@ def test_cigale_native_photometry_maps_params_and_enforces_sfh_normalise(monkeyp
 def test_cigale_likelihood_mass_scaling_is_centralized(monkeypatch):
     install_fake_pcigale(monkeypatch, flux_by_filter={"g": 2.0 * MJY_PER_MAGGIE})
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend, space = build_cigale_backend_and_parameter_space(
@@ -133,7 +133,7 @@ def test_cigale_likelihood_mass_scaling_is_centralized(monkeypatch):
 def test_cigale_missing_redshift_raises_clear_error(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
@@ -144,7 +144,7 @@ def test_cigale_missing_redshift_raises_clear_error(monkeypatch):
 def test_cigale_unknown_parameter_raises_clear_error(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
@@ -155,7 +155,7 @@ def test_cigale_unknown_parameter_raises_clear_error(monkeypatch):
 def test_cigale_sfh_normalise_false_raises_clear_error(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(
@@ -169,7 +169,7 @@ def test_cigale_sfh_normalise_false_raises_clear_error(monkeypatch):
 def test_cigale_nonfinite_flux_raises_controlled_error(monkeypatch):
     install_fake_pcigale(monkeypatch, flux_by_filter={"g": np.nan})
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
@@ -181,7 +181,7 @@ def test_cigale_sedpy_mode_integrates_via_sedpy(monkeypatch):
     install_fake_pcigale(monkeypatch)
     install_fake_sedpy(monkeypatch, magnitudes=[20.0, 21.0])
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"], photometry_mode="sedpy")
@@ -196,7 +196,7 @@ def test_cigale_sedpy_mode_integrates_via_sedpy(monkeypatch):
 def test_cigale_predict_spectrum_returns_observed_flambda(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
-    import sedinfer.backends.cigale as cigale_backend
+    import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])

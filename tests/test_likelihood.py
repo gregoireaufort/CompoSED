@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
 
-from sedinfer.backends.mock import MockBackend
-from sedinfer.data import SEDDataset
-from sedinfer.likelihood import GaussianPhotometricLikelihood
-from sedinfer.parameters import ParameterSpace
-from sedinfer.priors import DeltaPrior, UniformPrior
-from sedinfer.units import MassNormalization
+from composed.backends.mock import MockBackend
+from composed.data import SEDDataset
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.parameters import ParameterSpace
+from composed.priors import DeltaPrior, UniformPrior
+from composed.units import MassNormalization
 
 
 def loglike_no_residual(sigma):
@@ -113,6 +113,75 @@ def test_nonfinite_or_bad_sigma_bands_are_masked_automatically():
     assert np.allclose(data.active_sigma, [0.4])
 
 
+def test_upper_limit_band_can_have_nan_flux_and_stays_active():
+    data = SEDDataset(
+        ["fuv"],
+        flux=np.array([np.nan]),
+        sigma=np.array([0.2]),
+        upper_limit=np.array([1.0]),
+        upper_limit_mask=np.array([True]),
+    )
+
+    assert data.active_band_names == ("fuv",)
+    assert np.allclose(data.active_upper_limit, [1.0])
+    assert np.all(data.active_upper_limit_mask)
+
+
+def test_upper_limit_likelihood_uses_gaussian_cdf():
+    data = SEDDataset(
+        ["fuv"],
+        flux=np.array([np.nan]),
+        sigma=np.array([0.2]),
+        upper_limit=np.array([1.0]),
+        upper_limit_mask=np.array([True]),
+    )
+    backend = MockBackend([1.0], band_names=["fuv"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+
+    logp = GaussianPhotometricLikelihood(backend, data, ps).log_prob([0.0])
+    assert np.isclose(logp, np.log(0.5))
+
+
+def test_upper_limit_and_detection_terms_can_mix():
+    data = SEDDataset(
+        ["g", "fuv"],
+        flux=np.array([2.0, np.nan]),
+        sigma=np.array([0.1, 0.5]),
+        upper_limit=np.array([0.0, 1.0]),
+        upper_limit_mask=np.array([False, True]),
+    )
+    backend = MockBackend([2.0, 1.0], band_names=["g", "fuv"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+
+    expected_detection = loglike_no_residual([0.1])
+    expected_upper = np.log(0.5)
+    logp = GaussianPhotometricLikelihood(backend, data, ps).log_prob([0.0])
+    assert np.isclose(logp, expected_detection + expected_upper)
+
+
+def test_invalid_upper_limit_raises_clear_error():
+    with pytest.raises(ValueError, match="upper_limit"):
+        SEDDataset(
+            ["fuv"],
+            flux=np.array([np.nan]),
+            sigma=np.array([0.2]),
+            upper_limit=np.array([np.nan]),
+            upper_limit_mask=np.array([True]),
+        )
+
+
+def test_upper_limit_band_must_respect_mask():
+    with pytest.raises(ValueError, match="Upper-limit bands"):
+        SEDDataset(
+            ["fuv"],
+            flux=np.array([np.nan]),
+            sigma=np.array([0.2]),
+            mask=np.array([False]),
+            upper_limit=np.array([1.0]),
+            upper_limit_mask=np.array([True]),
+        )
+
+
 def test_model_data_shape_mismatch_raises_clear_error():
     data = SEDDataset(["g", "r"], flux=np.array([1.0, 2.0]), sigma=np.array([0.1, 0.2]))
     backend = MockBackend([1.0], band_names=["g"])
@@ -215,7 +284,7 @@ def test_simulate_mass_scaling_matches_likelihood_convention():
 
 
 def test_simulate_invalid_backend_output_raises_controlled_error():
-    from sedinfer.likelihood import PhotometricSimulationError
+    from composed.likelihood import PhotometricSimulationError
 
     data = SEDDataset(["g"], flux=np.array([0.0]), sigma=np.array([1.0]))
     backend = MockBackend([np.nan], band_names=["g"])

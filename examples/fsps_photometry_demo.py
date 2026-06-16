@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from sedinfer.backends.fsps import FSPSBackend
-from sedinfer.filters import FilterSet
+from composed.backends.fsps import FSPSBackend
+from composed.filters import FilterSet
 
 
 FILTER_NAMES = ["sdss_g0", "sdss_r0", "sdss_i0"]

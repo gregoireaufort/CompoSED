@@ -4,7 +4,7 @@ Run this in a local science environment with python-fsps, sedpy, astropy, and
 ``SPS_HOME`` configured. The script computes the same simple tabular-SFH galaxy
 two ways:
 
-1. through ``sedinfer.backends.FSPSBackend``;
+1. through ``composed.backends.FSPSBackend``;
 2. directly with ``fsps.StellarPopulation`` plus sedpy filter integration.
 
 It fails loudly for non-finite fluxes, negative maggies, shape mismatches, or a
@@ -20,10 +20,10 @@ from typing import Sequence
 
 import numpy as np
 
-from sedinfer.backends.fsps import FSPSBackend
-from sedinfer.filters import FilterSet
-from sedinfer.transforms.sfh import normalize_sfh_to_formed_mass
-from sedinfer.units import LSUN_CGS, MassNormalization, PARSEC_CM
+from composed.backends.fsps import FSPSBackend
+from composed.filters import FilterSet
+from composed.transforms.sfh import normalize_sfh_to_formed_mass
+from composed.units import LSUN_CGS, MassNormalization, PARSEC_CM
 
 DEFAULT_FILTER_NAMES = ("sdss_g0", "sdss_r0", "sdss_i0")
 FLUX_RTOL = 1e-10
@@ -124,6 +124,14 @@ def ab_magnitudes_from_maggies(flux_maggies: np.ndarray) -> np.ndarray:
     return -2.5 * np.log10(flux_maggies)
 
 
+def trapz_numpy(y: np.ndarray, x: np.ndarray) -> float:
+    """NumPy 1.x/2.x compatible trapezoidal integral."""
+
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    return float(np.trapz(y, x))
+
+
 def flat_fnu_tophat_sanity_check() -> float:
     """Closed-form unit sanity check independent of FSPSBackend and sedpy.
 
@@ -142,7 +150,7 @@ def flat_fnu_tophat_sanity_check() -> float:
     lam2_a = 5000.0
     wave_a = np.linspace(lam1_a, lam2_a, 4096)
     flat_flam = AB_ZERO_FNU_CGS * C_A_PER_S / wave_a**2
-    numerator = np.trapezoid(flat_flam * wave_a, wave_a)
+    numerator = trapz_numpy(flat_flam * wave_a, wave_a)
     analytic_ab_zero = AB_ZERO_FNU_CGS * C_A_PER_S * np.log(lam2_a / lam1_a)
     maggies = numerator / analytic_ab_zero
     error = abs(maggies - 1.0)

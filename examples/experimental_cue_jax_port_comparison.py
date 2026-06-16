@@ -29,8 +29,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sedinfer.experimental.jaxcigale.cue_port import CueJaxPort
-from sedinfer.experimental.jaxcigale.dependencies import require_jax
+from composed.experimental.jaxcigale.cue_port import CueJaxPort
+from composed.experimental.jaxcigale.dependencies import require_jax
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,7 +112,7 @@ def main() -> None:
     for i in range(theta.shape[0]):
         ax = axes[i, 0]
         ax.plot(continuum_wave, continuum_numpy[i], color="black", lw=2.0, label="Cue public NumPy/PCA")
-        ax.plot(continuum_wave, continuum_jax[i], color="tab:orange", lw=1.2, ls="--", label="sedinfer JAX port")
+        ax.plot(continuum_wave, continuum_jax[i], color="tab:orange", lw=1.2, ls="--", label="composed JAX port")
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Rest wavelength [Angstrom]")
@@ -123,7 +123,7 @@ def main() -> None:
 
         ax = axes[i, 1]
         ax.scatter(line_wave, line_numpy[i], s=15, color="black", label="Cue public NumPy/PCA")
-        ax.scatter(line_wave, line_jax[i], s=10, color="tab:orange", marker="x", label="sedinfer JAX port")
+        ax.scatter(line_wave, line_jax[i], s=10, color="tab:orange", marker="x", label="composed JAX port")
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("Rest wavelength [Angstrom]")

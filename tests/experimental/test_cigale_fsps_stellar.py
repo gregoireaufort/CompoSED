@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from sedinfer.experimental.cigale_fsps_stellar import (
+from composed.experimental.cigale_fsps_stellar import (
     mixed_grid_nocache_modules,
     module_directory,
     register_cigale_fsps_stellar_module,
