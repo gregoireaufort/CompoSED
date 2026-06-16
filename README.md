@@ -27,6 +27,13 @@ may expose `predict_spectrum(params, wavelengths=...) -> ModelSpectrum`. They
 must declare their `MassNormalization`. The likelihood multiplies by
 `10**log10_mass` only for `MassNormalization.PER_SOLAR_MASS`.
 
+## Acknowledgements and citations
+
+CompoSED is an inference/interface layer around scientific modeling codes. If
+you use the CIGALE, FSPS, DSPS, or Cue paths, cite those projects as well as
+CompoSED. See `docs/citations.md` for the current citation checklist and a
+short acknowledgement template.
+
 ## Spectral likelihood
 
 Spectra use observed-frame Angstrom and observed `f_lambda` in
