@@ -87,7 +87,7 @@ def main() -> None:
             "uv_bump_amplitude",
         ],
         priors={
-            "z": UniformJaxPrior(0.0, 5.0),
+            "z": UniformJaxPrior(1.0e-4, 5.0),
             "tau_gyr": UniformJaxPrior(0.1, 10.0),
             "tage_gyr": UniformJaxPrior(0.1, 10.0),
             "logzsol": UniformJaxPrior(-2.0, 0.5),

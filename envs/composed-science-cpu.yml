@@ -1,0 +1,36 @@
+name: composed-science-cpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26
+  - scipy=1.12
+  - astropy=6.1
+  - matplotlib
+  - pandas
+  - h5py
+  - tqdm
+  - pytest
+  - ipykernel
+  - jupyterlab
+  - configobj
+  - rich
+  - emcee
+  - corner
+  - scikit-learn
+  - jax=0.4.38
+  - jaxlib=0.4.38
+  - numpyro=0.17
+  - dsps
+  - compilers
+  - pip:
+      # Heavy science extras.  CIGALE itself is intentionally installed by
+      # following the upstream v2022.0 instructions, so users see its database
+      # and module setup explicitly.
+      - fsps==0.4.7
+      - astro-sedpy==0.4.1
+      - torch
+      - nflows
+      - dill
+      - pocomc

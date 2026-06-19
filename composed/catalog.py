@@ -7,7 +7,7 @@ import numpy as np
 
 from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
-from composed.likelihood import _backend_params_and_mass_scale
+from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
 
 
 @dataclass
@@ -64,7 +64,9 @@ def run_photometric_grid_catalog(
     if sigma_floor is not None and float(sigma_floor) < 0.0:
         raise ValueError("sigma_floor must be non-negative.")
 
-    band_names, data_flux, data_sigma, active_mask = _stack_catalog_arrays(datasets, sigma_floor=sigma_floor)
+    band_names, data_flux, data_sigma, active_mask, upper_limit, upper_limit_mask = _stack_catalog_arrays(
+        datasets, sigma_floor=sigma_floor
+    )
     if filters is None:
         filters = datasets[0].metadata.get("filters")
 
@@ -82,6 +84,8 @@ def run_photometric_grid_catalog(
         data_flux=data_flux,
         data_sigma=data_sigma,
         active_mask=active_mask,
+        upper_limit=upper_limit,
+        upper_limit_mask=upper_limit_mask,
         model_flux=model_flux,
         log_prior=log_prior,
         valid_grid=valid_grid,
@@ -94,6 +98,8 @@ def run_photometric_grid_catalog(
 
     meta = {
         "active_mask": active_mask,
+        "upper_limit": upper_limit,
+        "upper_limit_mask": upper_limit_mask,
         "valid_grid": valid_grid,
         "sigma_floor": sigma_floor,
         "model_chunk_size": int(model_chunk_size),
@@ -118,11 +124,13 @@ def _stack_catalog_arrays(
     datasets: Sequence[SEDDataset],
     *,
     sigma_floor: float | None,
-) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     band_names = tuple(datasets[0].band_names)
     flux_rows = []
     sigma_rows = []
     mask_rows = []
+    upper_limit_rows = []
+    upper_limit_mask_rows = []
     for i, dataset in enumerate(datasets):
         if tuple(dataset.band_names) != band_names:
             raise ValueError(
@@ -135,14 +143,20 @@ def _stack_catalog_arrays(
         sigma = np.asarray(dataset.sigma, dtype=float)
         if sigma_floor is not None:
             sigma = np.sqrt(sigma**2 + float(sigma_floor) ** 2)
-        flux_rows.append(np.where(mask, np.asarray(dataset.flux, dtype=float), 0.0))
+        upper_mask = mask & np.asarray(dataset.upper_limit_mask, dtype=bool)
+        detection_mask = mask & ~upper_mask
+        flux_rows.append(np.where(detection_mask, np.asarray(dataset.flux, dtype=float), 0.0))
         sigma_rows.append(np.where(mask, sigma, 1.0))
         mask_rows.append(mask)
+        upper_limit_rows.append(np.where(upper_mask, np.asarray(dataset.upper_limit, dtype=float), 0.0))
+        upper_limit_mask_rows.append(upper_mask)
     return (
         band_names,
         np.asarray(flux_rows, dtype=float),
         np.asarray(sigma_rows, dtype=float),
         np.asarray(mask_rows, dtype=bool),
+        np.asarray(upper_limit_rows, dtype=float),
+        np.asarray(upper_limit_mask_rows, dtype=bool),
     )
 
 
@@ -205,6 +219,8 @@ def _catalog_gaussian_logp(
     data_flux,
     data_sigma,
     active_mask,
+    upper_limit,
+    upper_limit_mask,
     model_flux,
     log_prior,
     valid_grid,
@@ -214,8 +230,9 @@ def _catalog_gaussian_logp(
     n_objects = data_flux.shape[0]
     n_grid = model_flux.shape[0]
     logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
-    inv_sigma2 = np.where(active_mask, 1.0 / data_sigma**2, 0.0)
-    logdet = np.sum(np.where(active_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
+    detection_mask = active_mask & ~upper_limit_mask
+    inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
+    logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
 
     for g0 in range(0, n_grid, model_chunk_size):
         g1 = min(g0 + model_chunk_size, n_grid)
@@ -228,9 +245,12 @@ def _catalog_gaussian_logp(
             o1 = min(o0 + object_chunk_size, n_objects)
             diff = data_flux[o0:o1, None, :] - model[None, :, :]
             chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, :], axis=2)
-            logp[o0:o1, grid_indices] = log_prior[grid_indices][None, :] - 0.5 * (
-                chi2 + logdet[o0:o1, None]
-            )
+            log_like = -0.5 * (chi2 + logdet[o0:o1, None])
+            local_upper_mask = upper_limit_mask[o0:o1]
+            if np.any(local_upper_mask):
+                z = (upper_limit[o0:o1, None, :] - model[None, :, :]) / data_sigma[o0:o1, None, :]
+                log_like += np.sum(np.where(local_upper_mask[:, None, :], _normal_logcdf(z), 0.0), axis=2)
+            logp[o0:o1, grid_indices] = log_prior[grid_indices][None, :] + log_like
 
     if not np.all(np.any(np.isfinite(logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(logp), axis=1))[0]

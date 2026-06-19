@@ -31,34 +31,64 @@ dependencies = [
 dev = [
   "pytest",
   "matplotlib",
+  "scipy",
+]
+plot = [
+  "matplotlib",
+  "corner",
+]
+samplers = [
+  "scipy",
+  "emcee",
+  "pocomc",
+  "tqdm",
+]
+notebooks = [
+  "jupyterlab",
+  "ipykernel",
+  "pandas",
+  "tqdm",
 ]
 fsps = [
-  "fsps>=0.4",
-  "astro-sedpy>=0.4,<0.5",
+  "fsps==0.4.7",
+  "astro-sedpy==0.4.1",
 ]
 cigale = [
-  "pcigale<2025",
+  # Install CIGALE itself from the upstream v2022.0 tutorial/release:
+  # https://gitlab.lam.fr/cigale/cigale/-/tree/v2022.0
 ]
 sbi = [
   "torch",
   "nflows",
+  "scikit-learn",
 ]
 jaxcigale = [
-  "jax",
-  "jaxlib",
+  "jax==0.4.38",
+  "jaxlib==0.4.38",
   "dsps",
-  "numpyro",
+  "numpyro==0.17.0",
+  "h5py",
+  "dill",
+  "scikit-learn",
 ]
 all = [
-  "fsps>=0.4",
-  "astro-sedpy>=0.4,<0.5",
-  "pcigale<2025",
+  "fsps==0.4.7",
+  "astro-sedpy==0.4.1",
   "torch",
   "nflows",
-  "jax",
-  "jaxlib",
+  "scikit-learn",
+  "jax==0.4.38",
+  "jaxlib==0.4.38",
   "dsps",
-  "numpyro",
+  "numpyro==0.17.0",
+  "h5py",
+  "dill",
+  "scipy",
+  "emcee",
+  "pocomc",
+  "corner",
+  "pandas",
+  "tqdm",
   "matplotlib",
   "pytest",
 ]

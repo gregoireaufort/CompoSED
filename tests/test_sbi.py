@@ -3,7 +3,7 @@ import importlib.util
 import numpy as np
 import pytest
 
-from inftools.sbi import MAFPosteriorEstimator, simulate_training_set
+from inftools.sbi import MAFPosteriorEstimator, simulate_training_set, train_maf_posterior_from_dataset
 from composed.backends.mock import MockBackend
 from composed.data import SEDDataset
 from composed.likelihood import GaussianPhotometricLikelihood
@@ -22,6 +22,79 @@ def test_importing_inftools_sbi_works_without_dependencies():
     import inftools.sbi as sbi
 
     assert hasattr(sbi, "simulate_training_set")
+    assert hasattr(sbi, "train_maf_posterior_from_dataset")
+
+
+def test_train_maf_posterior_from_dataset_prepares_paired_arrays(monkeypatch):
+    import inftools.sbi as sbi
+
+    calls = {}
+
+    def fake_train(theta_train, x_train, **kwargs):
+        calls["theta"] = theta_train
+        calls["x"] = x_train
+        calls["kwargs"] = kwargs
+        return {"estimator": "fake"}
+
+    monkeypatch.setattr(sbi, "train_maf_posterior", fake_train)
+
+    theta = np.array([[0.1, 9.0], [0.2, 9.5], [0.3, 10.0]])
+    x = np.array([[21.0, 22.0], [20.0, 21.0], [19.0, 20.0]])
+    estimator, meta = train_maf_posterior_from_dataset(
+        theta,
+        x,
+        theta_names=["z", "log10_mass"],
+        x_names=["g", "r"],
+        source="empirical_catalog",
+        epochs=3,
+        batch_size=2,
+        return_metadata=True,
+    )
+
+    assert estimator == {"estimator": "fake"}
+    assert np.allclose(calls["theta"], theta)
+    assert np.allclose(calls["x"], x)
+    assert calls["kwargs"]["epochs"] == 3
+    assert calls["kwargs"]["batch_size"] == 2
+    assert meta["source"] == "empirical_catalog"
+    assert meta["theta_names"] == ("z", "log10_mass")
+    assert meta["x_names"] == ("g", "r")
+    assert meta["n_train"] == 3
+
+
+def test_train_maf_posterior_from_dataset_can_drop_nonfinite_rows(monkeypatch):
+    import inftools.sbi as sbi
+
+    calls = {}
+
+    def fake_train(theta_train, x_train, **kwargs):
+        calls["theta"] = theta_train
+        calls["x"] = x_train
+        return "trained"
+
+    monkeypatch.setattr(sbi, "train_maf_posterior", fake_train)
+
+    theta = np.array([[0.1], [np.nan], [0.3]])
+    x = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    estimator, meta = train_maf_posterior_from_dataset(theta, x, finite="drop", return_metadata=True)
+
+    assert estimator == "trained"
+    assert np.allclose(calls["theta"], [[0.1], [0.3]])
+    assert np.allclose(calls["x"], [[1.0, 2.0], [5.0, 6.0]])
+    assert meta["dropped_nonfinite"] == 1
+    assert meta["n_train"] == 2
+
+
+def test_train_maf_posterior_from_dataset_rejects_bad_pairing(monkeypatch):
+    import inftools.sbi as sbi
+
+    monkeypatch.setattr(sbi, "train_maf_posterior", lambda *args, **kwargs: object())
+    with pytest.raises(ValueError, match="same number of rows"):
+        train_maf_posterior_from_dataset(np.ones((3, 2)), np.ones((4, 2)))
+    with pytest.raises(ValueError, match="NaN or inf"):
+        train_maf_posterior_from_dataset(np.array([[1.0], [np.inf]]), np.ones((2, 1)))
+    with pytest.raises(ValueError, match="theta_names"):
+        train_maf_posterior_from_dataset(np.ones((3, 2)), np.ones((3, 1)), theta_names=["z"])
 
 
 def test_constructing_maf_without_nflows_gives_helpful_import_error(monkeypatch):

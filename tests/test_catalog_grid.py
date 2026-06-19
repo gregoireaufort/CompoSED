@@ -37,6 +37,26 @@ class PerMassBackend(SEDBackend):
         return ModelPhotometry(band_names=("u", "g"), flux=np.asarray([1.0, 2.0]))
 
 
+@dataclass
+class OneBandBackend(SEDBackend):
+    flux: float
+    mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+
+    def predict_photometry(self, params, filters):
+        del params, filters
+        return ModelPhotometry(band_names=("fuv",), flux=np.asarray([self.flux], dtype=float))
+
+
+@dataclass
+class TwoBandBackend(SEDBackend):
+    flux: tuple[float, float]
+    mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+
+    def predict_photometry(self, params, filters):
+        del params, filters
+        return ModelPhotometry(band_names=("g", "fuv"), flux=np.asarray(self.flux, dtype=float))
+
+
 def test_photometric_grid_catalog_matches_single_object_grid_likelihoods():
     backend = TemplateBackend()
     space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
@@ -94,6 +114,43 @@ def test_photometric_grid_catalog_applies_per_solar_mass_scaling_once():
     assert catalog.map_estimates.shape == (1, 1)
     assert catalog.map_estimates[0, 0] == 1.0
     assert catalog.logp[0, 1] > catalog.logp[0, 0]
+
+
+def test_photometric_grid_catalog_handles_one_band_upper_limit_like_scalar_likelihood():
+    backend = OneBandBackend(flux=1.0)
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("fuv",),
+        flux=np.asarray([np.nan]),
+        sigma=np.asarray([0.2]),
+        upper_limit=np.asarray([1.0]),
+        upper_limit_mask=np.asarray([True]),
+    )
+
+    catalog = run_photometric_grid_catalog(backend, [dataset], space)
+    scalar = GaussianPhotometricLikelihood(backend, dataset, space).log_prob([0.0])
+
+    assert np.isclose(scalar, np.log(0.5))
+    assert np.allclose(catalog.logp[0], [scalar])
+    assert np.allclose(catalog.weights_norm[0], [1.0])
+
+
+def test_photometric_grid_catalog_handles_mixed_detection_and_upper_limit_like_scalar_likelihood():
+    backend = TwoBandBackend(flux=(2.0, 1.0))
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("g", "fuv"),
+        flux=np.asarray([2.0, np.nan]),
+        sigma=np.asarray([0.1, 0.5]),
+        upper_limit=np.asarray([0.0, 1.0]),
+        upper_limit_mask=np.asarray([False, True]),
+    )
+
+    catalog = run_photometric_grid_catalog(backend, [dataset], space, model_chunk_size=1, object_chunk_size=1)
+    scalar = GaussianPhotometricLikelihood(backend, dataset, space).log_prob([0.0])
+
+    assert np.allclose(catalog.logp[0], [scalar])
+    assert np.all(np.isfinite(catalog.logp[0]))
 
 
 def test_photometric_grid_catalog_rejects_mismatched_band_order():

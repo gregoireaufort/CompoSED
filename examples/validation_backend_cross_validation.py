@@ -52,6 +52,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed.provenance import require_provenance, save_npz_with_provenance
 from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
@@ -144,13 +145,11 @@ def main() -> None:
     draws = load_or_create_draws(args.output_dir / "parameter_draws.json", n_draws=args.n_draws, seed=args.seed)
 
     if args.stage in {"all", "references"}:
-        run_reference_stage(draws, args.output_dir)
+        run_reference_stage(draws, args)
     if args.stage in {"all", "cue"}:
         run_cue_stage(
             draws,
-            args.output_dir,
-            args.ssp_file,
-            args.cue_data_dir,
+            args,
             allow_nebular_included_ssp=args.allow_nebular_included_ssp,
         )
     if args.stage in {"all", "plots"}:
@@ -192,8 +191,10 @@ def load_or_create_draws(path: Path, *, n_draws: int, seed: int) -> list[dict[st
     return draws
 
 
-def run_reference_stage(draws: list[dict[str, float]], output_dir: Path) -> None:
+def run_reference_stage(draws: list[dict[str, float]], args: argparse.Namespace) -> None:
     """Run CIGALE+BC03, CIGALE+FSPS, and direct FSPS spectra."""
+
+    output_dir = args.output_dir
 
     from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
     from composed.experimental.cigale_fsps_stellar_conventions import fsps_parameters_from_cigale_bc03
@@ -267,20 +268,29 @@ def run_reference_stage(draws: list[dict[str, float]], output_dir: Path) -> None
         )
         print(f"[references] {i + 1:04d}/{len(draws):04d} {draw['label']}", flush=True)
 
-    save_stage(output_dir / "reference_spectra.npz", spectra, phot)
+    save_stage(
+        output_dir / "reference_spectra.npz",
+        spectra,
+        phot,
+        seed=args.seed,
+        command_args=vars(args),
+        extra={"stage": "references", "n_draws": len(draws)},
+    )
     (output_dir / "reference_info.json").write_text(json.dumps(info_rows, indent=2, sort_keys=True) + "\n")
     print("Saved reference stage:", output_dir / "reference_spectra.npz")
 
 
 def run_cue_stage(
     draws: list[dict[str, float]],
-    output_dir: Path,
-    ssp_file: Path,
-    cue_data_dir: Path,
+    args: argparse.Namespace,
     *,
     allow_nebular_included_ssp: bool,
 ) -> None:
     """Run JAX-CIGALE DSPS + Cue spectra in the JAX environment."""
+
+    output_dir = args.output_dir
+    ssp_file = args.ssp_file
+    cue_data_dir = args.cue_data_dir
 
     from dsps import load_ssp_templates
 
@@ -437,8 +447,20 @@ def run_cue_stage(
             )
         print(f"[cue] {i + 1:04d}/{len(draws):04d} {draw['label']}", flush=True)
 
-    np.savez(
+    save_npz_with_provenance(
         output_dir / "cue_spectra.npz",
+        provenance_paths={
+            "dsps_continuum_ssp_file": ssp_file,
+            "cue_data_dir": cue_data_dir,
+            "reference_spectra": reference_path,
+        },
+        seed=args.seed,
+        command_args=vars(args),
+        extra={
+            "stage": "cue",
+            "n_draws": len(draws),
+            "allow_nebular_included_ssp": bool(allow_nebular_included_ssp),
+        },
         rest_wave_nm=REST_WAVE_NM,
         filter_names=np.asarray([name for name, _, _ in FILTER_SPECS]),
         filter_centers_a=np.asarray([center for _, center, _ in FILTER_SPECS]),
@@ -453,9 +475,15 @@ def run_cue_stage(
 def run_plot_stage(draws: list[dict[str, float]], output_dir: Path) -> None:
     """Merge saved stages, make plots, and write discrepancy metrics."""
 
-    reference = np.load(output_dir / "reference_spectra.npz", allow_pickle=True)
+    reference_path = output_dir / "reference_spectra.npz"
+    require_provenance(reference_path)
+    reference = np.load(reference_path, allow_pickle=True)
     cue_path = output_dir / "cue_spectra.npz"
-    cue = np.load(cue_path, allow_pickle=True) if cue_path.exists() else None
+    if cue_path.exists():
+        require_provenance(cue_path)
+        cue = np.load(cue_path, allow_pickle=True)
+    else:
+        cue = None
 
     spectra = {}
     phot = {}
@@ -484,9 +512,20 @@ def empty_photometry(n_draws: int) -> dict[str, np.ndarray]:
     return {name: np.full((int(n_draws), len(FILTER_SPECS)), np.nan, dtype=float) for name in MODEL_NAMES + ("jax_dsps_stellar",)}
 
 
-def save_stage(path: Path, spectra: dict[str, np.ndarray], phot: dict[str, np.ndarray]) -> None:
-    np.savez(
+def save_stage(
+    path: Path,
+    spectra: dict[str, np.ndarray],
+    phot: dict[str, np.ndarray],
+    *,
+    seed: int,
+    command_args: dict[str, object],
+    extra: dict[str, object],
+) -> None:
+    save_npz_with_provenance(
         path,
+        seed=seed,
+        command_args=command_args,
+        extra=extra,
         rest_wave_nm=REST_WAVE_NM,
         filter_names=np.asarray([name for name, _, _ in FILTER_SPECS]),
         filter_centers_a=np.asarray([center for _, center, _ in FILTER_SPECS]),

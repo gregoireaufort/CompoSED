@@ -33,6 +33,7 @@ __all__ = [
     "MAFPosteriorEstimator",
     "simulate_training_set",
     "train_maf_posterior",
+    "train_maf_posterior_from_dataset",
 ]
 
 
@@ -101,12 +102,23 @@ def __getattr__(name):
         return run_mixed_tamis
     if name == "plotting":
         return importlib.import_module(".plotting", __name__)
-    if name in {"MAFPosteriorEstimator", "simulate_training_set", "train_maf_posterior"}:
-        from .sbi import MAFPosteriorEstimator, simulate_training_set, train_maf_posterior
+    if name in {
+        "MAFPosteriorEstimator",
+        "simulate_training_set",
+        "train_maf_posterior",
+        "train_maf_posterior_from_dataset",
+    }:
+        from .sbi import (
+            MAFPosteriorEstimator,
+            simulate_training_set,
+            train_maf_posterior,
+            train_maf_posterior_from_dataset,
+        )
 
         return {
             "MAFPosteriorEstimator": MAFPosteriorEstimator,
             "simulate_training_set": simulate_training_set,
             "train_maf_posterior": train_maf_posterior,
+            "train_maf_posterior_from_dataset": train_maf_posterior_from_dataset,
         }[name]
     raise AttributeError(f"module 'inftools' has no attribute {name!r}")

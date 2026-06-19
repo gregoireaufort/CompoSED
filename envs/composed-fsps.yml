@@ -1,0 +1,24 @@
+name: composed-fsps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26
+  - scipy
+  - astropy
+  - matplotlib
+  - pandas
+  - tqdm
+  - pytest
+  - ipykernel
+  - jupyterlab
+  - emcee
+  - corner
+  - compilers
+  - pip:
+      # This installs the Python binding.  FSPS data files and SPS_HOME still
+      # follow the upstream python-fsps/FSPS install instructions.
+      - fsps==0.4.7
+      - astro-sedpy==0.4.1
+      - pocomc

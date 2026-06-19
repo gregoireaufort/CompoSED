@@ -2,6 +2,25 @@
 
 Composable Bayesian SED fitting and photo-z inference.
 
+## Installation
+
+The core CompoSED package is lightweight, but scientific engines such as FSPS,
+CIGALE, DSPS, and Cue have their own upstream installation and data
+requirements.  Start with the install guide:
+
+```bash
+python -m pip install -e ".[dev,plot,samplers,notebooks]"
+python scripts/check_environment.py --core
+```
+
+Then install only the backend stack you need.  FSPS users must configure
+`SPS_HOME`; CIGALE users should install the upstream `v2022.0` release; Cue
+users must provide `CUE_DATA_DIR`; JAX-CIGALE DSPS validation uses
+`DSPS_CONTINUUM_SSP_FILE`.
+
+See [`docs/install.md`](docs/install.md) for the supported environment recipes
+and backend checks.
+
 ```python
 import numpy as np
 
@@ -186,7 +205,7 @@ using `torch` and `nflows`. These dependencies are not required for importing
 `composed` or the rest of `inftools`; constructing the estimator will raise a
 helpful `ImportError` if they are missing.
 
-Conceptual pipeline:
+Backend-generated simulation pipeline:
 
 1. Define a `ParameterSpace`.
 2. Wrap a backend with `GaussianPhotometricLikelihood`.
@@ -199,7 +218,7 @@ Conceptual pipeline:
 ```python
 import numpy as np
 
-from inftools.sbi import simulate_training_set, train_maf_posterior
+from inftools.sbi import simulate_training_set, train_maf_posterior_from_dataset
 
 def noise_fn(flux):
     return 0.02 + 0.05 * np.abs(flux)
@@ -215,9 +234,12 @@ theta_train, x_train = simulate_training_set(
     executor="process",
 )
 
-estimator = train_maf_posterior(
+estimator = train_maf_posterior_from_dataset(
     theta_train,
     x_train,
+    theta_names=parameter_space.names,
+    x_names=dataset.active_band_names,
+    source="composed_forward_model",
     hidden_features=64,
     num_transforms=3,
     epochs=50,
@@ -225,6 +247,32 @@ estimator = train_maf_posterior(
 )
 
 samples = estimator.sample(x_obs, num_samples=10000)
+```
+
+If the training pairs already exist, skip the CompoSED simulator entirely:
+
+```python
+from inftools.sbi import train_maf_posterior_from_dataset
+
+# theta_train[i] and x_train[i] must describe the same object or simulation.
+# x_train must use the same feature convention as x_obs: same bands, units,
+# masks/cuts, and optional concatenated errors.
+estimator, meta = train_maf_posterior_from_dataset(
+    theta_train,          # shape (n, n_parameters)
+    x_train,              # shape (n, n_features)
+    theta_names=["z", "log10_mass"],
+    x_names=["u", "g", "r", "i", "z", "y", "j", "h"],
+    source="empirical_catalog_labels",
+    finite="drop",
+    shuffle=True,
+    rng=np.random.default_rng(7),
+    return_metadata=True,
+    hidden_features=128,
+    num_transforms=6,
+    epochs=200,
+    batch_size=1024,
+    device="mps",
+)
 ```
 
 SBI quality depends strongly on prior coverage, simulator fidelity, noise
@@ -347,7 +395,7 @@ space = JaxParameterSpace(
     names=["log10_mass", "z", "tau_gyr", "tage_gyr", "logzsol"],
     priors={
         "log10_mass": UniformJaxPrior(8.0, 12.0),
-        "z": UniformJaxPrior(0.0, 3.0),
+        "z": UniformJaxPrior(1.0e-4, 3.0),
         "tau_gyr": UniformJaxPrior(0.2, 8.0),
         "tage_gyr": UniformJaxPrior(0.2, 10.0),
         "logzsol": UniformJaxPrior(-1.0, 0.3),
@@ -361,6 +409,14 @@ model = build_jax_sed_model(
     space,
 )
 ```
+
+Use a strictly positive lower bound for JAX-CIGALE redshift priors. The JAX
+observed-flux conversion intentionally treats `z <= 0` as invalid rather than
+silently adopting a local 10 pc convention.
+
+Validation scripts that cache arrays should write provenance sidecars with
+`composed.provenance.save_npz_with_provenance`; see
+[`docs/validation_provenance.md`](docs/validation_provenance.md).
 
 For science runs, replace `analytic_stellar_module()` with
 `dsps_stellar_module(ssp_data)`. Nebular emission is currently an explicit graph

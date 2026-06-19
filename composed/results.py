@@ -7,6 +7,8 @@ import json
 
 import numpy as np
 
+from composed.provenance import collect_run_provenance
+
 
 @dataclass
 class InferenceResult:
@@ -151,6 +153,17 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
     """Save arrays to ``.npz`` and metadata to a JSON sidecar."""
 
     npz_path, json_path = _result_paths(path)
+    metadata = dict(result.metadata)
+    metadata.setdefault(
+        "provenance",
+        collect_run_provenance(
+            extra={
+                "sampler_name": result.sampler_name,
+                "parameter_names": tuple(result.parameter_names),
+                "n_sample": int(result.samples.shape[0]),
+            }
+        ),
+    )
     arrays = {
         "samples": result.samples,
         "logp": result.logp,
@@ -167,7 +180,7 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
         json.dumps(
             {
                 "sampler_name": result.sampler_name,
-                "metadata": _json_safe(result.metadata),
+                "metadata": _json_safe(metadata),
                 "posterior_summary": posterior_summary(result),
             },
             indent=2,

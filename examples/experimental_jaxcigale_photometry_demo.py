@@ -45,7 +45,7 @@ def main() -> None:
         names=["log10_mass", "z", "tau_gyr", "tage_gyr", "logzsol", "dust2", "dust_slope", "uv_bump"],
         priors={
             "log10_mass": UniformJaxPrior(8.0, 12.0),
-            "z": UniformJaxPrior(0.0, 3.0),
+            "z": UniformJaxPrior(1.0e-4, 3.0),
             "tau_gyr": UniformJaxPrior(0.2, 8.0),
             "tage_gyr": UniformJaxPrior(0.2, 10.0),
             "logzsol": UniformJaxPrior(-1.0, 0.3),

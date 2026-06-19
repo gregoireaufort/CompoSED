@@ -25,3 +25,12 @@ Current notebooks:
 Fast analytic or toy-nebular notebooks belong in `notebooks/smoke/`, where they
 can remain useful for debugging without being confused for scientific
 validation.
+
+Validation notebooks that load cached arrays must check provenance before
+plotting. Use `composed.provenance.require_provenance(path)` before loading a
+cached `.npz`; use `composed.provenance.save_npz_with_provenance(...)` when
+creating one. At minimum, provenance should record the git commit/dirty flag,
+engine versions, random seed, command arguments, `SPS_HOME`, SSP file path and
+hash, Cue data directory and hash, and any input catalog or filter curves. If a
+sidecar is missing, the plot should fail loudly rather than silently reusing a
+stale local product. See `docs/validation_provenance.md`.

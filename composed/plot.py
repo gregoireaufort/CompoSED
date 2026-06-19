@@ -157,14 +157,27 @@ def plot_posterior_predictive_sed(
         ax.errorbar(x, median, yerr=yerr, fmt="o", color="tab:blue", label="model photometry")
         if photometry is not None:
             active = photometry.active_mask
-            ax.errorbar(
-                x[active],
-                photometry.flux[active],
-                yerr=photometry.sigma[active],
-                fmt="s",
-                color="0.2",
-                label="observed",
-            )
+            upper_mask = active & np.asarray(photometry.upper_limit_mask, dtype=bool)
+            detection_mask = active & ~upper_mask
+            if np.any(detection_mask):
+                ax.errorbar(
+                    x[detection_mask],
+                    photometry.flux[detection_mask],
+                    yerr=photometry.sigma[detection_mask],
+                    fmt="s",
+                    color="0.2",
+                    label="observed detection",
+                )
+            if np.any(upper_mask):
+                ax.errorbar(
+                    x[upper_mask],
+                    photometry.upper_limit[upper_mask],
+                    yerr=photometry.sigma[upper_mask],
+                    uplims=True,
+                    fmt="v",
+                    color="0.35",
+                    label="upper limit",
+                )
             if np.any(~active):
                 ax.plot(x[~active], photometry.flux[~active], "x", color="0.6", label="masked")
         ax.set_xlabel(xlabel)

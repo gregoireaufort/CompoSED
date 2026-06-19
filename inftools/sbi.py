@@ -390,6 +390,48 @@ def _simulate_training_set_parallel(
     return theta_out, x_out, {"attempts": len(theta_rows) + len(failures), "failures": failures}
 
 
+def train_maf_posterior_from_dataset(
+    theta: np.ndarray,
+    x: np.ndarray,
+    *,
+    theta_names: list[str] | tuple[str, ...] | None = None,
+    x_names: list[str] | tuple[str, ...] | None = None,
+    source: str = "precomputed_dataset",
+    finite: Literal["raise", "drop"] = "raise",
+    shuffle: bool = False,
+    rng: np.random.Generator | None = None,
+    return_metadata: bool = False,
+    **kwargs,
+):
+    """Train a MAF posterior from precomputed paired rows ``(theta, x)``.
+
+    This is the explicit entry point for SBI when the training set already
+    exists: a presampled forward model, an external simulation campaign, or an
+    empirical catalog with fitted labels.  Row ``i`` of ``theta`` must describe
+    the same object/simulation as row ``i`` of ``x``.  No CompoSED backend is
+    called here.
+
+    ``x`` should be the exact observation vector that will be supplied at
+    inference time: for example active-band fluxes, magnitudes, or
+    ``[mags, mag_errors]`` concatenated in a documented order.
+    """
+
+    theta_train, x_train, metadata = _prepare_precomputed_training_pairs(
+        theta,
+        x,
+        theta_names=theta_names,
+        x_names=x_names,
+        source=source,
+        finite=finite,
+        shuffle=shuffle,
+        rng=rng,
+    )
+    estimator = train_maf_posterior(theta_train, x_train, **kwargs)
+    if return_metadata:
+        return estimator, metadata
+    return estimator
+
+
 def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) -> MAFPosteriorEstimator:
     theta_train = np.asarray(theta_train, dtype=float)
     x_train = np.asarray(x_train, dtype=float)
@@ -427,6 +469,79 @@ def _prepare_flow_for_device(flow, torch, device):
 
     flow = flow.to(dtype=torch.float32)
     return flow.to(device=device)
+
+
+def _prepare_precomputed_training_pairs(
+    theta: np.ndarray,
+    x: np.ndarray,
+    *,
+    theta_names,
+    x_names,
+    source: str,
+    finite: Literal["raise", "drop"],
+    shuffle: bool,
+    rng: np.random.Generator | None,
+):
+    theta_arr = np.asarray(theta, dtype=float)
+    x_arr = np.asarray(x, dtype=float)
+    if theta_arr.ndim == 1:
+        theta_arr = theta_arr[:, None]
+    if x_arr.ndim == 1:
+        x_arr = x_arr[:, None]
+    if theta_arr.ndim != 2:
+        raise ValueError(f"theta must be a two-dimensional array; got shape {theta_arr.shape}.")
+    if x_arr.ndim != 2:
+        raise ValueError(f"x must be a two-dimensional array; got shape {x_arr.shape}.")
+    if theta_arr.shape[0] != x_arr.shape[0]:
+        raise ValueError("theta and x must have the same number of rows.")
+    if theta_arr.shape[0] == 0:
+        raise ValueError("theta and x must contain at least one paired row.")
+
+    theta_names_tuple = None if theta_names is None else tuple(str(name) for name in theta_names)
+    x_names_tuple = None if x_names is None else tuple(str(name) for name in x_names)
+    if theta_names_tuple is not None and len(theta_names_tuple) != theta_arr.shape[1]:
+        raise ValueError("theta_names length must match theta.shape[1].")
+    if x_names_tuple is not None and len(x_names_tuple) != x_arr.shape[1]:
+        raise ValueError("x_names length must match x.shape[1].")
+
+    finite_rows = np.all(np.isfinite(theta_arr), axis=1) & np.all(np.isfinite(x_arr), axis=1)
+    dropped_nonfinite = int(np.count_nonzero(~finite_rows))
+    if dropped_nonfinite:
+        if finite == "raise":
+            raise ValueError(
+                f"Found {dropped_nonfinite} row(s) with NaN or inf in theta or x. "
+                "Pass finite='drop' to remove them before training."
+            )
+        if finite != "drop":
+            raise ValueError("finite must be either 'raise' or 'drop'.")
+        theta_arr = theta_arr[finite_rows]
+        x_arr = x_arr[finite_rows]
+        if theta_arr.shape[0] == 0:
+            raise ValueError("All paired rows were removed by finite='drop'.")
+    elif finite not in {"raise", "drop"}:
+        raise ValueError("finite must be either 'raise' or 'drop'.")
+
+    permutation = None
+    if shuffle:
+        if rng is None:
+            rng = np.random.default_rng()
+        permutation = rng.permutation(theta_arr.shape[0])
+        theta_arr = theta_arr[permutation]
+        x_arr = x_arr[permutation]
+
+    metadata = {
+        "source": str(source),
+        "n_input": int(np.asarray(theta).shape[0]),
+        "n_train": int(theta_arr.shape[0]),
+        "theta_dim": int(theta_arr.shape[1]),
+        "x_dim": int(x_arr.shape[1]),
+        "theta_names": theta_names_tuple,
+        "x_names": x_names_tuple,
+        "dropped_nonfinite": dropped_nonfinite,
+        "shuffled": bool(shuffle),
+        "permutation": permutation,
+    }
+    return theta_arr, x_arr, metadata
 
 
 def _simulate_one(simulator, theta: np.ndarray, noise_fn, rng: np.random.Generator) -> np.ndarray:

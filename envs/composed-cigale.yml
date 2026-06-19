@@ -1,0 +1,22 @@
+name: composed-cigale
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26
+  - scipy=1.12
+  - astropy=6.1
+  - matplotlib
+  - pandas
+  - tqdm
+  - pytest
+  - ipykernel
+  - jupyterlab
+  - emcee
+  - corner
+  - configobj
+  - pip:
+      # Install CIGALE v2022.0 from its upstream GitLab tutorial/release after
+      # creating the env.  Then install CompoSED from the repository root.
+      - pocomc

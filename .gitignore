@@ -33,6 +33,7 @@ popcosmos_*/
 *_cache*/
 outputs/
 results/
+external/
 
 # Local manuscript / export scratch artifacts.
 paper/

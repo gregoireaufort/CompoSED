@@ -82,3 +82,45 @@ def test_posterior_predictive_sed_plots_photometry_and_spectrum():
 
     assert len(axes) == 2
     fig.canvas.draw()
+
+
+def test_posterior_predictive_sed_plots_upper_limits_separately_from_detections():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_posterior_predictive_sed
+
+    result = _toy_result()
+    space = ParameterSpace(
+        names=("z", "log10_mass"),
+        priors={"z": UniformPrior(0.0, 3.0), "log10_mass": UniformPrior(0.0, 4.0)},
+    )
+    backend = MockBackend(flux=[1.0, 0.5], band_names=("g", "fuv"))
+    photometry = SEDDataset(
+        band_names=("g", "fuv"),
+        flux=np.asarray([1.1, np.nan]),
+        sigma=np.asarray([0.1, 0.2]),
+        upper_limit=np.asarray([0.0, 1.0]),
+        upper_limit_mask=np.asarray([False, True]),
+    )
+
+    fig, axes = plot_posterior_predictive_sed(
+        result,
+        backend,
+        space,
+        photometry=photometry,
+        filters=("g", "fuv"),
+        n_draw=3,
+    )
+
+    ax = np.atleast_1d(axes)[0]
+    labels = ax.get_legend_handles_labels()[1]
+    assert "observed detection" in labels
+    assert "upper limit" in labels
+    detection = [container for container in ax.containers if container.get_label() == "observed detection"]
+    upper = [container for container in ax.containers if container.get_label() == "upper limit"]
+    assert len(detection) == 1
+    assert len(upper) == 1
+    assert len(detection[0].lines[0].get_xdata()) == 1
+    assert len(upper[0].lines[0].get_xdata()) == 1
+    fig.canvas.draw()
