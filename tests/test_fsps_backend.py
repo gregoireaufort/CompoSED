@@ -181,10 +181,10 @@ def test_sedpy_shape_mismatch_raises_clear_error(monkeypatch):
 
 @pytest.mark.fsps
 def test_real_fsps_integration_smoke():
-    pytest.importorskip("fsps")
-    pytest.importorskip("sedpy")
     if not os.environ.get("SPS_HOME"):
         pytest.skip("SPS_HOME is not configured.")
+    pytest.importorskip("fsps")
+    pytest.importorskip("sedpy")
 
     from sedpy.observate import load_filters
 

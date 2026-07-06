@@ -86,3 +86,20 @@ class SEDBackend:
         resolution: float | None = None,
     ) -> ModelSpectrum:
         raise NotImplementedError
+
+    def predict_rest_spectrum(
+        self,
+        params: Mapping[str, float],
+        wavelengths: Sequence[float] | None = None,
+        wavelength_range: tuple[float, float] | None = None,
+    ) -> ModelSpectrum:
+        """Predict rest-frame luminosity density for fast catalog projection.
+
+        Implementations should return a ``ModelSpectrum`` whose wavelength unit
+        and luminosity-density unit are explicit in the metadata.  The
+        CompoSED-native catalog path expects rest-frame wavelength in nm and
+        luminosity density in W/nm, but conversion can be done by the grid
+        builder when a backend documents another compatible unit.
+        """
+
+        raise NotImplementedError

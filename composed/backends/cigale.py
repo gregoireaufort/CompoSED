@@ -171,9 +171,53 @@ class CIGALEBackend(SEDBackend):
             },
         )
 
+    def predict_rest_spectrum(
+        self,
+        params: Mapping[str, Any],
+        wavelengths: Sequence[float] | None = None,
+        wavelength_range: tuple[float, float] | None = None,
+    ) -> ModelSpectrum:
+        """Predict rest-frame CIGALE luminosity density.
+
+        This intentionally stops the CIGALE module chain before
+        ``redshifting``.  The returned wavelength is in nm and the returned
+        luminosity density is in W/nm, matching CIGALE's native
+        ``SED.wavelength_grid`` and ``SED.luminosity`` conventions.
+        """
+
+        sed, module_list = self._rest_sed_from_params(params)
+        wave_nm = np.asarray(getattr(sed, "wavelength_grid"), dtype=float)
+        luminosity_w_per_nm = np.asarray(getattr(sed, "luminosity"), dtype=float)
+        wave_out, flux_out = _sample_or_clip_spectrum(wave_nm, luminosity_w_per_nm, wavelengths, wavelength_range)
+        if not np.all(np.isfinite(flux_out)):
+            raise FloatingPointError("CIGALE rest spectrum contains non-finite luminosity values after sampling.")
+        if np.any(flux_out < 0.0):
+            raise FloatingPointError("CIGALE rest spectrum contains negative luminosity values after sampling.")
+        return ModelSpectrum(
+            wavelength=wave_out,
+            flux=flux_out,
+            wavelength_unit="nm",
+            flux_unit="W/nm",
+            metadata={
+                "backend": "cigale",
+                "modules": module_list,
+                "cigale_info": dict(getattr(sed, "info", {})),
+                "spectrum_frame": "rest",
+                "mass_normalization": self.mass_normalization.value,
+            },
+        )
+
     def _sed_from_params(self, params: Mapping[str, Any]):
         params = dict(params)
-        module_list, parameter_list = self._build_cigale_configuration(params)
+        module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=True)
+        sed = self._sed_warehouse().get_sed(module_list, parameter_list)
+        if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
+            self._validate_per_solar_mass_sed(sed)
+        return sed, module_list
+
+    def _rest_sed_from_params(self, params: Mapping[str, Any]):
+        params = dict(params)
+        module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=False)
         sed = self._sed_warehouse().get_sed(module_list, parameter_list)
         if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
             self._validate_per_solar_mass_sed(sed)
@@ -191,11 +235,21 @@ class CIGALEBackend(SEDBackend):
             self._warehouse = warehouse
         return warehouse
 
-    def _build_cigale_configuration(self, params: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    def _build_cigale_configuration(
+        self,
+        params: Mapping[str, Any],
+        *,
+        include_redshifting: bool,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         configs = {module: {} for module in self.modules}
         used = set()
+        redshift_module = _first_redshifting_module(self.modules)
 
         for entry in self._entries:
+            if not include_redshifting and entry.module == redshift_module:
+                if entry.flat_name in params:
+                    used.add(entry.flat_name)
+                continue
             if entry.prior is None:
                 value = entry.fixed_value
             else:
@@ -206,10 +260,17 @@ class CIGALEBackend(SEDBackend):
             configs[entry.module][entry.parameter] = _coerce_cigale_value(value, entry.dtype)
 
         self._enforce_sfh_normalise(configs)
-        self._inject_redshift(configs, params, used)
+        if include_redshifting:
+            self._inject_redshift(configs, params, used)
+            output_modules = list(self.modules)
+        else:
+            output_modules = [module for module in self.modules if module != redshift_module]
+            for key in REDSHIFT_KEYS:
+                if key in params:
+                    used.add(key)
         self._check_unknown_parameters(params, used)
 
-        return list(self.modules), [configs[module] for module in self.modules]
+        return output_modules, [configs[module] for module in output_modules]
 
     def _enforce_sfh_normalise(self, configs: dict[str, dict[str, Any]]) -> None:
         for module in self.modules:

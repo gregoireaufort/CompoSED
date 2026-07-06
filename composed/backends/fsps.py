@@ -118,7 +118,50 @@ class FSPSBackend(SEDBackend):
             metadata=metadata,
         )
 
+    def predict_rest_spectrum(
+        self,
+        params: Mapping[str, Any],
+        wavelengths: Sequence[float] | None = None,
+        wavelength_range: tuple[float, float] | None = None,
+    ) -> ModelSpectrum:
+        """Predict rest-frame FSPS luminosity density in W/nm.
+
+        FSPS returns ``Lsun / Angstrom``.  The catalog projection machinery uses
+        CIGALE-like ``W / nm``, so the conversion is
+        ``Lsun/Angstrom * 10 Angstrom/nm * 1e-7 W/(erg/s)``.
+        """
+
+        wave_rest_a, llam_lsun_per_a, metadata = self._rest_spectrum_from_params(params)
+        wave_nm = wave_rest_a / 10.0
+        luminosity_w_per_nm = llam_lsun_per_a * LSUN_CGS * 1.0e-6
+        wave_out, flux_out = _sample_or_clip_spectrum(wave_nm, luminosity_w_per_nm, wavelengths, wavelength_range)
+        if not np.all(np.isfinite(flux_out)):
+            raise FloatingPointError("FSPS rest spectrum contains non-finite luminosity values after sampling.")
+        return ModelSpectrum(
+            wavelength=wave_out,
+            flux=flux_out,
+            wavelength_unit="nm",
+            flux_unit="W/nm",
+            metadata={
+                **metadata,
+                "spectrum_frame": "rest",
+                "flux_unit": "W/nm",
+            },
+        )
+
     def _observed_spectrum_from_params(self, params: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        wave_rest_a, llam_lsun_per_a, metadata = self._rest_spectrum_from_params(params)
+        z = float(metadata["redshift"])
+        wave_obs_a, flam_obs = self._rest_spectrum_to_observed_flux(wave_rest_a, llam_lsun_per_a, z)
+        metadata = {
+            **metadata,
+            "wavelength_unit": "angstrom",
+            "flux_unit": "erg/s/cm^2/angstrom",
+            "spectrum_frame": "observed",
+        }
+        return wave_obs_a, flam_obs, metadata
+
+    def _rest_spectrum_from_params(self, params: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         params = dict(params)
         z = self._get_redshift(params)
         t_gyr, sfr = self._get_tabular_sfh(params)
@@ -135,16 +178,15 @@ class FSPSBackend(SEDBackend):
 
         sp.set_tabular_sfh(t_gyr, sfr)
         wave_rest_a, llam_lsun_per_a = sp.get_spectrum(tage=float(t_gyr[-1]), peraa=True)
-        wave_obs_a, flam_obs = self._rest_spectrum_to_observed_flux(wave_rest_a, llam_lsun_per_a, z)
         metadata = {
             "backend": "fsps",
             "redshift": z,
             "wavelength_unit": "angstrom",
-            "flux_unit": "erg/s/cm^2/angstrom",
-            "spectrum_frame": "observed",
+            "flux_unit": "Lsun/angstrom",
+            "spectrum_frame": "rest",
             "mass_normalization": self.mass_normalization.value,
         }
-        return wave_obs_a, flam_obs, metadata
+        return wave_rest_a, llam_lsun_per_a, metadata
 
     def _stellar_population(self):
         if self._sp is None:
