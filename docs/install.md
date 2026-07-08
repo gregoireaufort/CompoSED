@@ -23,7 +23,7 @@ basic samplers.
 git clone https://github.com/YOUR_ORG/CompoSED.git
 cd CompoSED
 
-mamba env create -f envs/composed-core.yml
+conda env create -f envs/composed-core.yml
 conda activate composed-core
 
 python -m pip install -e ".[dev,plot,samplers,notebooks]"
@@ -53,19 +53,37 @@ points at the wrong location.
 One clean setup is:
 
 ```bash
-mamba env create -f envs/composed-fsps.yml
+conda env create -f envs/composed-fsps.yml
 conda activate composed-fsps
 
 # Follow the upstream FSPS/python-fsps instructions, then:
 export SPS_HOME=/path/to/fsps
 
-python -m pip install -e ".[dev,plot,samplers,notebooks,fsps]"
+python -m pip install -e ".[fsps,plot]"
 python scripts/check_environment.py --fsps
 python examples/validate_fsps_backend.py
 ```
 
 The validation script checks a real `FSPSBackend` call against a direct
 `python-fsps` + `sedpy` calculation in the same environment.
+
+This environment intentionally does not install notebooks, pocomc, emcee,
+nflows, or torch.  Add those only when the analysis needs them:
+
+```bash
+# High-level diffusion SBI pipeline.
+python -m pip install -e ".[diffusion]"
+
+# MAF/nflows SBI path.
+python -m pip install -e ".[sbi]"
+
+# Traditional samplers such as emcee/pocomc.
+python -m pip install -e ".[samplers]"
+
+# Only if this env should appear as a Jupyter kernel.
+python -m pip install ipykernel
+python -m ipykernel install --user --name composed-fsps
+```
 
 ## CIGALE Backend
 
@@ -85,11 +103,11 @@ python -c "import pcigale; print(pcigale.__file__)"
 One clean setup is:
 
 ```bash
-mamba env create -f envs/composed-cigale.yml
+conda env create -f envs/composed-cigale.yml
 conda activate composed-cigale
 
 # Follow the upstream CIGALE v2022.0 install/setup instructions, then:
-python -m pip install -e ".[dev,plot,samplers,notebooks,cigale]"
+python -m pip install -e ".[cigale,plot]"
 
 python scripts/check_environment.py --cigale
 python examples/cigale_photometry_demo.py
@@ -97,6 +115,15 @@ python examples/cigale_photometry_demo.py
 
 CompoSED does not hide CIGALE's database/module setup.  If CIGALE cannot build
 one SED through `pcigale.warehouse.SedWarehouse`, CompoSED cannot use it either.
+
+As with FSPS, keep the backend environment small and install neural or sampler
+layers only when needed:
+
+```bash
+python -m pip install -e ".[diffusion]"  # diffusion SBI
+python -m pip install -e ".[sbi]"        # MAF/nflows SBI
+python -m pip install -e ".[samplers]"   # emcee/pocomc/TAMIS helpers
+```
 
 ## JAX-CIGALE, DSPS, and Cue
 
@@ -107,7 +134,7 @@ emulator data for nebular emission.
 For a CPU validation environment:
 
 ```bash
-mamba env create -f envs/composed-science-cpu.yml
+conda env create -f envs/composed-science-cpu.yml
 conda activate composed-science-cpu
 python -m pip install -e ".[dev,plot,samplers,notebooks,jaxcigale]"
 ```
@@ -141,8 +168,16 @@ record it for validation runs.
 
 ## SBI / Neural Posterior Estimation
 
-The SBI layer uses torch and nflows.  It can run without FSPS or CIGALE if you
-train from a pre-existing `(theta, x)` dataset.
+The neural SBI layers are optional.  The high-level conditional diffusion
+pipeline uses torch only:
+
+```bash
+python -m pip install -e ".[diffusion]"
+python examples/minimal_photometric_diffusion_sbi.py
+```
+
+The MAF/nflows posterior estimator needs torch and nflows.  It can run without
+FSPS or CIGALE if you train from a pre-existing `(theta, x)` dataset.
 
 ```bash
 python -m pip install -e ".[sbi]"
@@ -160,7 +195,7 @@ For development and validation on a machine where all upstream engines are
 available:
 
 ```bash
-mamba env create -f envs/composed-science-cpu.yml
+conda env create -f envs/composed-science-cpu.yml
 conda activate composed-science-cpu
 
 # Follow upstream CIGALE v2022.0 setup.
@@ -186,8 +221,7 @@ This is the environment intended for the validation notebooks in
 - `pcigale` for CIGALE;
 - JAX, NumPyro, DSPS, h5py, dill, and scikit-learn for JAX-CIGALE;
 - `CUE_DATA_DIR` and expected public Cue files for Cue;
-- torch and nflows for SBI.
+- torch and nflows for the MAF/nflows SBI checker.  Diffusion uses torch only.
 
 It does not install anything and it does not prove scientific validity.  It is a
 pre-flight check that the intended backend can be reached before a long run.
-
