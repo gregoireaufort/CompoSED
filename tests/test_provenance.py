@@ -50,6 +50,21 @@ def test_collect_run_provenance_records_seed_args_and_artifact_hash(tmp_path):
     assert "commit" in provenance["git"] or provenance["git"]["available"] is False
 
 
+def test_collect_run_provenance_hashes_science_resource_environment_paths(tmp_path, monkeypatch):
+    ssp = tmp_path / "ssp.h5"
+    ssp.write_bytes(b"ssp data")
+    cue = tmp_path / "cue"
+    cue.mkdir()
+    (cue / "weights.pkl").write_bytes(b"cue data")
+    monkeypatch.setenv("DSPS_CONTINUUM_SSP_FILE", str(ssp))
+    monkeypatch.setenv("CUE_DATA_DIR", str(cue))
+
+    provenance = collect_run_provenance(repo_root=tmp_path)
+
+    assert provenance["artifacts"]["DSPS_CONTINUUM_SSP_FILE"]["sha256"] == sha256_file(ssp)
+    assert provenance["artifacts"]["CUE_DATA_DIR"]["n_files"] == 1
+
+
 def test_save_npz_with_provenance_writes_sidecar_and_requires_it(tmp_path):
     data_path = tmp_path / "reference_spectra.npz"
     input_path = tmp_path / "input.txt"

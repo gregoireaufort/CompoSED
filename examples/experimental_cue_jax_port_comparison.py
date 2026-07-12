@@ -31,6 +31,7 @@ import numpy as np
 
 from composed.experimental.jaxcigale.cue_port import CueJaxPort
 from composed.experimental.jaxcigale.dependencies import require_jax
+from composed.provenance import save_npz_with_provenance
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cue-data-dir",
         type=Path,
-        default=Path(os.environ.get("CUE_DATA_DIR", "/private/tmp/cue/src/cue/data")),
+        default=Path(os.environ["CUE_DATA_DIR"]) if os.environ.get("CUE_DATA_DIR") else None,
         help="Path to public Cue data directory containing speculator_*.pkl and pca_*.pkl files.",
     )
     parser.add_argument(
@@ -74,6 +75,8 @@ def finite_log10(values: np.ndarray) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
+    if args.cue_data_dir is None:
+        raise ValueError("Set CUE_DATA_DIR or pass --cue-data-dir to identify the public Cue data files.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     jax, jnp = require_jax()
@@ -155,8 +158,10 @@ def main() -> None:
     fig.savefig(residual_path, dpi=180)
     plt.close(fig)
 
-    np.savez(
+    save_npz_with_provenance(
         args.output_dir / "cue_jax_port_comparison.npz",
+        provenance_paths={"cue_data_dir": args.cue_data_dir},
+        extra={"validation": "cue_public_numpy_vs_jax_port"},
         theta_public=theta,
         continuum_wave_a=continuum_wave,
         continuum_public=continuum_numpy,

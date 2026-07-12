@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from composed.parameters import ParameterSpace
 from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
@@ -89,9 +90,13 @@ def test_parameter_space_ordering_is_deterministic():
 
 
 def test_parameter_space_rejects_duplicate_names():
-    try:
+    with pytest.raises(ValueError, match="unique"):
         ParameterSpace(names=["z", "z"], priors={"z": DeltaPrior(0.1)})
-    except ValueError as exc:
-        assert "unique" in str(exc)
-    else:
-        raise AssertionError("Expected duplicate names to be rejected.")
+
+
+def test_parameter_space_requires_exactly_one_prior_per_name():
+    with pytest.raises(ValueError, match="Missing prior"):
+        ParameterSpace(names=["z", "log10_mass"], priors={"z": DeltaPrior(0.1)})
+
+    with pytest.raises(ValueError, match="absent from names"):
+        ParameterSpace(names=["z"], priors={"z": DeltaPrior(0.1), "unused": DeltaPrior(1.0)})

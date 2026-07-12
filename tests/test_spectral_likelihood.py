@@ -49,6 +49,17 @@ def test_all_bad_sigma_spectrum_raises_clear_error():
         )
 
 
+def test_spectrum_dataset_rejects_unimplemented_units_instead_of_misinterpreting_them():
+    with pytest.raises(ValueError, match="currently requires observed wavelength in Angstrom"):
+        SpectrumDataset(
+            wavelength=np.asarray([400.0, 500.0]),
+            flux=np.asarray([1.0, 2.0]),
+            sigma=np.asarray([0.1, 0.1]),
+            wavelength_unit="nm",
+            flux_unit="W/nm",
+        )
+
+
 def test_gaussian_spectral_likelihood_value_for_mock_backend():
     data = SpectrumDataset(
         wavelength=np.array([4000.0, 5000.0]),

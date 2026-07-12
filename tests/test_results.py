@@ -7,6 +7,7 @@ from inftools.core import SamplingResult
 from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
 from composed.results import (
+    InferenceFailure,
     InferenceResult,
     load_inference_result,
     normalize_sampling_result,
@@ -76,3 +77,44 @@ def test_inference_result_rejects_unnormalizable_weights():
             weights=np.asarray([0.0, 0.0]),
             parameter_names=("z",),
         )
+
+
+def test_inference_result_rejects_total_log_probability_failure():
+    with pytest.raises(InferenceFailure, match="no finite log-probability"):
+        InferenceResult(
+            samples=np.asarray([[0.0], [1.0]]),
+            logp=np.asarray([-np.inf, -np.inf]),
+            weights=np.asarray([0.5, 0.5]),
+            parameter_names=("z",),
+        )
+
+
+def test_equal_weight_median_matches_ordinary_sample_median():
+    result = InferenceResult(
+        samples=np.asarray([[0.0], [1.0], [2.0]]),
+        logp=np.asarray([-1.0, 0.0, -1.0]),
+        weights=np.ones(3),
+        parameter_names=("x",),
+    )
+
+    assert np.allclose(result.posterior_median, [1.0])
+
+
+def test_sample_only_result_does_not_invent_log_density_or_map(tmp_path):
+    result = InferenceResult(
+        samples=np.asarray([[0.0], [1.0], [2.0]]),
+        logp=None,
+        weights=np.ones(3),
+        parameter_names=("z",),
+        sampler_name="diffusion",
+    )
+
+    assert result.logp is None
+    assert result.map_estimate is None
+    assert np.allclose(result.posterior_median, [1.0])
+
+    npz_path, _ = save_inference_result(result, tmp_path / "sample_only")
+    loaded = load_inference_result(npz_path)
+    assert loaded.logp is None
+    assert loaded.map_estimate is None
+    assert posterior_summary(loaded)["z"]["map"] is None

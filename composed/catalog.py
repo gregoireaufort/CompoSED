@@ -10,7 +10,8 @@ import numpy as np
 from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
-from composed.units import MassNormalization
+from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
+from composed.units import MassNormalization, canonical_photometric_flux_unit, convert_photometric_flux
 
 
 @dataclass
@@ -50,6 +51,7 @@ class PhotometricModelGrid:
     parameter_names: tuple[str, ...]
     band_names: tuple[str, ...]
     mass_normalization: MassNormalization
+    flux_unit: str = "maggies"
     meta: dict = field(default_factory=dict)
 
     def save(self, path: str | Path) -> None:
@@ -129,7 +131,11 @@ def build_photometric_model_grid(
         params = {name: float(value) for name, value in zip(names, row)}
         try:
             model = backend.predict_photometry(params, filters)
-            aligned = _align_model_flux(model, band_names)
+            aligned = convert_photometric_flux(
+                _align_model_flux(model, band_names),
+                getattr(model, "flux_unit", "maggies"),
+                "maggies",
+            )
         except (FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         model_flux[i] = aligned
@@ -143,9 +149,10 @@ def build_photometric_model_grid(
         parameter_names=names,
         band_names=band_names,
         mass_normalization=mass_norm,
+        flux_unit="maggies",
         meta={
             "excluded_parameters": excluded,
-            "units": "backend photometry units; CompoSED CIGALEBackend uses maggies",
+            "units": "maggies",
             "mass_scale_applied": False,
         },
     )
@@ -172,10 +179,10 @@ def evaluate_catalog_model_grid_likelihood(
 
     ``A_hat = sum(f_obs f_model / sigma^2) / sum(f_model^2 / sigma^2)``.
 
-    Upper limits are then evaluated at that profiled mass.  If
-    ``log10_mass_grid`` is supplied, the likelihood is additionally evaluated
-    on that mass grid, giving a pseudo-posterior over mass and a mass-marginal
-    posterior over the non-mass model grid.
+    The analytic normalization is used only for detection-only catalogs. If
+    any object contains an upper limit, ``log10_mass_grid`` is required and the
+    complete censored likelihood is maximized over that grid. The same grid is
+    also used for mass marginalization with the declared mass prior.
     """
 
     if model_grid.mass_normalization != MassNormalization.PER_SOLAR_MASS:
@@ -190,7 +197,7 @@ def evaluate_catalog_model_grid_likelihood(
 
     datasets = tuple(datasets)
     band_names, data_flux, data_sigma, active_mask, upper_limit, upper_limit_mask = _stack_catalog_arrays(
-        datasets, sigma_floor=sigma_floor
+        datasets, sigma_floor=sigma_floor, target_flux_unit=model_grid.flux_unit
     )
     if tuple(model_grid.band_names) != band_names:
         raise ValueError(
@@ -215,6 +222,8 @@ def evaluate_catalog_model_grid_likelihood(
         model_chunk_size=int(model_chunk_size),
         object_chunk_size=int(object_chunk_size),
         log10_mass_bounds=mass_bounds,
+        log10_mass_grid=log10_mass_grid_arr,
+        mass_chunk_size=int(mass_chunk_size),
         require_finite=log10_mass_grid_arr is None,
     )
 
@@ -287,8 +296,11 @@ def save_photometric_model_grid(grid: PhotometricModelGrid, path: str | Path) ->
     """Save a :class:`PhotometricModelGrid` for later catalog evaluation."""
 
     path = Path(path)
-    np.savez_compressed(
+    save_npz_with_provenance(
         path,
+        compressed=True,
+        provenance_paths=grid.meta.get("provenance_paths"),
+        extra={"artifact_type": "PhotometricModelGrid", "grid_meta": grid.meta},
         samples=np.asarray(grid.samples, dtype=float),
         flux=np.asarray(grid.flux, dtype=float),
         log_prior=np.asarray(grid.log_prior, dtype=float),
@@ -296,14 +308,28 @@ def save_photometric_model_grid(grid: PhotometricModelGrid, path: str | Path) ->
         parameter_names=np.asarray(grid.parameter_names, dtype=object),
         band_names=np.asarray(grid.band_names, dtype=object),
         mass_normalization=np.asarray(grid.mass_normalization.value, dtype=object),
+        flux_unit=np.asarray(grid.flux_unit, dtype=object),
         meta=np.asarray(json.dumps(grid.meta, sort_keys=True, default=str), dtype=object),
     )
 
 
-def load_photometric_model_grid(path: str | Path) -> PhotometricModelGrid:
+def load_photometric_model_grid(
+    path: str | Path,
+    *,
+    require_provenance_sidecar: bool = False,
+) -> PhotometricModelGrid:
     """Load a model grid saved by :func:`save_photometric_model_grid`."""
 
-    data = np.load(Path(path), allow_pickle=True)
+    path = Path(path)
+    provenance = None
+    if require_provenance_sidecar:
+        provenance = require_provenance(path)
+    elif provenance_path_for(path).exists():
+        provenance = read_provenance(provenance_path_for(path))
+    data = np.load(path, allow_pickle=True)
+    meta = json.loads(str(data["meta"].item())) if "meta" in data.files else {}
+    if provenance is not None:
+        meta["provenance"] = provenance
     return PhotometricModelGrid(
         samples=np.asarray(data["samples"], dtype=float),
         flux=np.asarray(data["flux"], dtype=float),
@@ -312,7 +338,8 @@ def load_photometric_model_grid(path: str | Path) -> PhotometricModelGrid:
         parameter_names=tuple(str(name) for name in data["parameter_names"]),
         band_names=tuple(str(name) for name in data["band_names"]),
         mass_normalization=MassNormalization(str(data["mass_normalization"].item())),
-        meta=json.loads(str(data["meta"].item())) if "meta" in data.files else {},
+        flux_unit=(str(data["flux_unit"].item()) if "flux_unit" in data.files else "maggies"),
+        meta=meta,
     )
 
 
@@ -352,7 +379,7 @@ def run_photometric_grid_catalog(
         raise ValueError("sigma_floor must be non-negative.")
 
     band_names, data_flux, data_sigma, active_mask, upper_limit, upper_limit_mask = _stack_catalog_arrays(
-        datasets, sigma_floor=sigma_floor
+        datasets, sigma_floor=sigma_floor, target_flux_unit="maggies"
     )
     if filters is None:
         filters = datasets[0].metadata.get("filters")
@@ -411,8 +438,11 @@ def _stack_catalog_arrays(
     datasets: Sequence[SEDDataset],
     *,
     sigma_floor: float | None,
+    target_flux_unit: str = "maggies",
 ) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     band_names = tuple(datasets[0].band_names)
+    source_flux_unit = datasets[0].flux_unit
+    target_flux_unit = canonical_photometric_flux_unit(target_flux_unit)
     flux_rows = []
     sigma_rows = []
     mask_rows = []
@@ -424,18 +454,26 @@ def _stack_catalog_arrays(
                 "All catalog datasets must have the same band order; "
                 f"object 0 has {band_names}, object {i} has {tuple(dataset.band_names)}."
             )
+        if dataset.flux_unit != source_flux_unit:
+            raise ValueError(
+                "All catalog datasets must use the same flux_unit before stacking; "
+                f"object 0 uses {source_flux_unit!r}, object {i} uses {dataset.flux_unit!r}."
+            )
         mask = np.asarray(dataset.active_mask, dtype=bool)
         if not np.any(mask):
             raise ValueError(f"Object {i} has no active bands.")
-        sigma = np.asarray(dataset.sigma, dtype=float)
+        flux = convert_photometric_flux(dataset.flux, source_flux_unit, target_flux_unit)
+        sigma = convert_photometric_flux(dataset.sigma, source_flux_unit, target_flux_unit)
         if sigma_floor is not None:
-            sigma = np.sqrt(sigma**2 + float(sigma_floor) ** 2)
+            floor = float(convert_photometric_flux(sigma_floor, source_flux_unit, target_flux_unit))
+            sigma = np.sqrt(sigma**2 + floor**2)
         upper_mask = mask & np.asarray(dataset.upper_limit_mask, dtype=bool)
         detection_mask = mask & ~upper_mask
-        flux_rows.append(np.where(detection_mask, np.asarray(dataset.flux, dtype=float), 0.0))
+        flux_rows.append(np.where(detection_mask, flux, 0.0))
         sigma_rows.append(np.where(mask, sigma, 1.0))
         mask_rows.append(mask)
-        upper_limit_rows.append(np.where(upper_mask, np.asarray(dataset.upper_limit, dtype=float), 0.0))
+        upper = convert_photometric_flux(dataset.upper_limit, source_flux_unit, target_flux_unit)
+        upper_limit_rows.append(np.where(upper_mask, upper, 0.0))
         upper_limit_mask_rows.append(upper_mask)
     return (
         band_names,
@@ -561,7 +599,11 @@ def _predict_model_grid_flux(backend, samples, parameter_space, filters, band_na
                 quantity_name="photometry",
             )
             model = backend.predict_photometry(backend_params, filters)
-            aligned = _align_model_flux(model, band_names)
+            aligned = convert_photometric_flux(
+                _align_model_flux(model, band_names),
+                getattr(model, "flux_unit", "maggies"),
+                "maggies",
+            )
         except (FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         model_flux[i] = mass_scale * aligned
@@ -681,8 +723,31 @@ def _catalog_profile_mass_logp(
     model_chunk_size,
     object_chunk_size,
     log10_mass_bounds,
+    log10_mass_grid=None,
+    mass_chunk_size=128,
     require_finite=True,
 ):
+    if np.any(upper_limit_mask):
+        if log10_mass_grid is None:
+            raise ValueError(
+                "Mass profiling with upper limits requires an explicit log10_mass_grid because the "
+                "detection-only analytic normalization is not the censored-likelihood optimum."
+            )
+        return _catalog_grid_profile_mass_logp(
+            data_flux=data_flux,
+            data_sigma=data_sigma,
+            active_mask=active_mask,
+            upper_limit=upper_limit,
+            upper_limit_mask=upper_limit_mask,
+            model_flux=model_flux,
+            log_prior=log_prior,
+            valid_grid=valid_grid,
+            model_chunk_size=model_chunk_size,
+            object_chunk_size=object_chunk_size,
+            log10_mass_grid=np.asarray(log10_mass_grid, dtype=float),
+            mass_chunk_size=int(mass_chunk_size),
+        )
+
     n_objects = data_flux.shape[0]
     n_grid = model_flux.shape[0]
     profile_logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
@@ -723,6 +788,80 @@ def _catalog_profile_mass_logp(
     if require_finite and not np.all(np.any(np.isfinite(profile_logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(profile_logp), axis=1))[0]
         raise RuntimeError(f"No finite profiled grid point for catalog object(s): {bad.tolist()}")
+    return {
+        "profile_logp": profile_logp,
+        "mass_scale_profile": mass_scale,
+        "log10_mass_profile": log10_mass,
+    }
+
+
+def _catalog_grid_profile_mass_logp(
+    *,
+    data_flux,
+    data_sigma,
+    active_mask,
+    upper_limit,
+    upper_limit_mask,
+    model_flux,
+    log_prior,
+    valid_grid,
+    model_chunk_size,
+    object_chunk_size,
+    log10_mass_grid,
+    mass_chunk_size,
+):
+    """Maximize the complete detection+censoring likelihood over mass."""
+
+    n_objects = data_flux.shape[0]
+    n_grid = model_flux.shape[0]
+    profile_logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
+    mass_scale = np.full((n_objects, n_grid), np.nan, dtype=float)
+    log10_mass = np.full((n_objects, n_grid), np.nan, dtype=float)
+    detection_mask = active_mask & ~upper_limit_mask
+    inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
+    logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
+    scales = 10.0 ** np.asarray(log10_mass_grid, dtype=float)
+
+    for g0 in range(0, n_grid, model_chunk_size):
+        g1 = min(g0 + model_chunk_size, n_grid)
+        local_valid = valid_grid[g0:g1]
+        if not np.any(local_valid):
+            continue
+        grid_indices = np.arange(g0, g1)[local_valid]
+        model = model_flux[grid_indices]
+        for o0 in range(0, n_objects, object_chunk_size):
+            o1 = min(o0 + object_chunk_size, n_objects)
+            best_values = np.full((o1 - o0, grid_indices.size), -np.inf, dtype=float)
+            best_mass_index = np.zeros((o1 - o0, grid_indices.size), dtype=int)
+            for m0 in range(0, scales.size, mass_chunk_size):
+                m1 = min(m0 + mass_chunk_size, scales.size)
+                scaled = model[:, None, :] * scales[None, m0:m1, None]
+                diff = data_flux[o0:o1, None, None, :] - scaled[None, :, :, :]
+                chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, None, :], axis=3)
+                values = -0.5 * (chi2 + logdet[o0:o1, None, None])
+                local_upper_mask = upper_limit_mask[o0:o1]
+                if np.any(local_upper_mask):
+                    z = (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :]) / data_sigma[
+                        o0:o1, None, None, :
+                    ]
+                    values += np.sum(
+                        np.where(local_upper_mask[:, None, None, :], _normal_logcdf(z), 0.0),
+                        axis=3,
+                    )
+                values += log_prior[grid_indices][None, :, None]
+                local_index = np.argmax(values, axis=2)
+                local_best = np.take_along_axis(values, local_index[:, :, None], axis=2)[:, :, 0]
+                improve = local_best > best_values
+                best_values = np.where(improve, local_best, best_values)
+                best_mass_index = np.where(improve, m0 + local_index, best_mass_index)
+
+            profile_logp[o0:o1, grid_indices] = best_values
+            log10_mass[o0:o1, grid_indices] = log10_mass_grid[best_mass_index]
+            mass_scale[o0:o1, grid_indices] = scales[best_mass_index]
+
+    if not np.all(np.any(np.isfinite(profile_logp), axis=1)):
+        bad = np.where(~np.any(np.isfinite(profile_logp), axis=1))[0]
+        raise RuntimeError(f"No finite censored mass-profile grid point for catalog object(s): {bad.tolist()}")
     return {
         "profile_logp": profile_logp,
         "mass_scale_profile": mass_scale,

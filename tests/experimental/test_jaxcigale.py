@@ -380,6 +380,11 @@ def test_jaxcigale_analytic_chain_jit_and_gradient():
     assert np.all(np.isfinite(np.asarray(phot)))
 
     data = GaussianPhotometricData(np.asarray(phot), 0.1 * np.asarray(phot))
+    log_prior = model.log_prior(theta)
+    log_likelihood = model.log_likelihood(theta, data)
+    assert np.asarray(model.log_posterior(theta, data)) == pytest.approx(
+        float(np.asarray(log_prior + log_likelihood))
+    )
     grad = jax.grad(lambda x: model.log_prob(x, data))(theta)
     assert grad.shape == theta.shape
     assert np.all(np.isfinite(np.asarray(grad)))

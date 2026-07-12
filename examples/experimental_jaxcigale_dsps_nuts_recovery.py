@@ -370,8 +370,13 @@ def main() -> None:
 
     npz_path = output_dir / "dsps_nuts_recovery_samples.npz"
     json_path = output_dir / "dsps_nuts_recovery_summary.json"
-    np.savez(
+    from composed.provenance import save_npz_with_provenance
+
+    save_npz_with_provenance(
         npz_path,
+        provenance_paths={"ssp_file": ssp_file},
+        seed=args.seed,
+        extra={"validation": "jaxcigale_dsps_nuts_recovery"},
         samples=samples,
         log_prob=nuts_result.log_prob,
         truth=truth,

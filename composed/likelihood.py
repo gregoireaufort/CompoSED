@@ -9,7 +9,7 @@ import numpy as np
 
 from composed.data import SEDDataset, SpectrumDataset
 from composed.parameters import ParameterSpace
-from composed.units import MassNormalization
+from composed.units import MassNormalization, convert_photometric_flux
 
 
 class PhotometricSimulationError(RuntimeError):
@@ -22,9 +22,11 @@ class SpectralSimulationError(RuntimeError):
 
 @dataclass
 class GaussianPhotometricLikelihood:
-    """Backend-agnostic Gaussian photometric log posterior for one SED.
+    """Backend-agnostic Gaussian photometric model for one SED.
 
-    The returned value is ``log_prior(theta) + log_likelihood(data | theta)``.
+    ``log_likelihood`` contains only the data term. ``log_prior`` delegates to
+    the parameter space, and ``log_posterior`` adds the two exactly once.
+    ``log_prob`` remains a compatibility alias for ``log_posterior``.
     The likelihood aligns model and observed photometry by band name, applies an
     optional uncertainty floor in quadrature, and applies ``10**log10_mass`` only
     when the backend explicitly declares ``MassNormalization.PER_SOLAR_MASS``.
@@ -40,13 +42,31 @@ class GaussianPhotometricLikelihood:
     sigma_floor: float | None = None
 
     def log_prob(self, theta: Sequence[float]) -> float:
-        return self._log_prob_checked(theta)
+        """Compatibility alias for :meth:`log_posterior`."""
 
-    def _log_prob_checked(self, theta: Sequence[float]) -> float:
+        return self.log_posterior(theta)
+
+    def log_prior(self, theta: Sequence[float]) -> float:
+        """Evaluate only the declared parameter prior."""
+
+        return self.parameter_space.log_prior(np.asarray(theta, dtype=float))
+
+    def log_posterior(self, theta: Sequence[float]) -> float:
+        """Evaluate ``log_prior + log_likelihood`` exactly once."""
+
         theta = np.asarray(theta, dtype=float)
-        log_prior = self.parameter_space.log_prior(theta)
+        log_prior = self.log_prior(theta)
         if not np.isfinite(log_prior):
             return -np.inf
+        log_like = self.log_likelihood(theta)
+        return float(log_prior + log_like) if np.isfinite(log_like) else -np.inf
+
+    def log_likelihood(self, theta: Sequence[float]) -> float:
+        """Evaluate only the Gaussian detection/censoring data term."""
+
+        theta = np.asarray(theta, dtype=float)
+        if theta.shape != (self.parameter_space.ndim,):
+            raise ValueError(f"Expected theta shape {(self.parameter_space.ndim,)}, got {theta.shape}.")
 
         f_obs, sigma, idx, active_bands = self.dataset.active_arrays()
         if f_obs.size == 0:
@@ -80,7 +100,7 @@ class GaussianPhotometricLikelihood:
             z = (upper_limit[upper_mask] - model_flux[upper_mask]) / sigma[upper_mask]
             log_like += np.sum(_normal_logcdf(z))
 
-        return float(log_prior + log_like)
+        return float(log_like)
 
     def simulate(self, theta: Sequence[float], noise_fn, rng: np.random.Generator | None = None) -> np.ndarray:
         """Simulate flux-like observations for active/masked bands.
@@ -147,6 +167,11 @@ class GaussianPhotometricLikelihood:
 
         model = self.backend.predict_photometry(backend_params, filters)
         model_flux = self._align_model_flux(model, idx, active_bands)
+        model_flux = convert_photometric_flux(
+            model_flux,
+            getattr(model, "flux_unit", "maggies"),
+            self.dataset.flux_unit,
+        )
         return mass_scale * np.asarray(model_flux, dtype=float)
 
     @staticmethod
@@ -168,13 +193,13 @@ class GaussianPhotometricLikelihood:
 
 @dataclass
 class GaussianSpectralLikelihood:
-    """Backend-agnostic Gaussian spectral log posterior for one spectrum.
+    """Backend-agnostic Gaussian spectral model for one spectrum.
 
     The dataset is interpreted as observed-frame ``f_lambda`` sampled on a
     strictly increasing wavelength grid. The likelihood asks the backend for a
     model spectrum on the active data wavelengths, applies the same explicit
-    mass-normalization rule as photometry, and evaluates a diagonal Gaussian
-    log likelihood plus the parameter-space log prior.
+    mass-normalization rule as photometry. Prior, likelihood, and posterior are
+    exposed separately so sampler adapters cannot count the prior twice.
     """
 
     backend: object
@@ -183,10 +208,27 @@ class GaussianSpectralLikelihood:
     sigma_floor: float | None = None
 
     def log_prob(self, theta: Sequence[float]) -> float:
+        """Compatibility alias for :meth:`log_posterior`."""
+
+        return self.log_posterior(theta)
+
+    def log_prior(self, theta: Sequence[float]) -> float:
+        return self.parameter_space.log_prior(np.asarray(theta, dtype=float))
+
+    def log_posterior(self, theta: Sequence[float]) -> float:
         theta = np.asarray(theta, dtype=float)
-        log_prior = self.parameter_space.log_prior(theta)
+        log_prior = self.log_prior(theta)
         if not np.isfinite(log_prior):
             return -np.inf
+        log_like = self.log_likelihood(theta)
+        return float(log_prior + log_like) if np.isfinite(log_like) else -np.inf
+
+    def log_likelihood(self, theta: Sequence[float]) -> float:
+        """Evaluate only the diagonal Gaussian spectral data term."""
+
+        theta = np.asarray(theta, dtype=float)
+        if theta.shape != (self.parameter_space.ndim,):
+            raise ValueError(f"Expected theta shape {(self.parameter_space.ndim,)}, got {theta.shape}.")
 
         wavelength, f_obs, sigma, _ = self.dataset.active_arrays()
         if f_obs.size == 0:
@@ -209,7 +251,7 @@ class GaussianSpectralLikelihood:
 
         residual = (f_obs - model_flux) / sigma
         logdet = np.sum(np.log(2.0 * np.pi * sigma**2))
-        return float(log_prior - 0.5 * (np.sum(residual**2) + logdet))
+        return float(-0.5 * (np.sum(residual**2) + logdet))
 
     def simulate(self, theta: Sequence[float], noise_fn, rng: np.random.Generator | None = None) -> np.ndarray:
         """Simulate flux-like spectral observations on active data pixels."""
@@ -256,6 +298,15 @@ class GaussianSpectralLikelihood:
             quantity_name="spectrum",
         )
         model = self.backend.predict_spectrum(backend_params, wavelengths=wavelength)
+        if str(model.wavelength_unit) != self.dataset.wavelength_unit:
+            raise ValueError(
+                f"Model wavelength unit {model.wavelength_unit!r} does not match data unit "
+                f"{self.dataset.wavelength_unit!r}."
+            )
+        if str(model.flux_unit) != self.dataset.flux_unit:
+            raise ValueError(
+                f"Model spectral flux unit {model.flux_unit!r} does not match data unit {self.dataset.flux_unit!r}."
+            )
         model_wavelength = np.asarray(model.wavelength, dtype=float)
         model_flux = np.asarray(model.flux, dtype=float)
         if model_flux.shape != wavelength.shape:

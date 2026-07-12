@@ -7,6 +7,8 @@ import pytest
 
 from composed.backends.base import ModelSpectrum, SEDBackend
 from composed.catalog_fast import (
+    AB_ZERO_FNU_W_M2_HZ,
+    C_NM_PER_S,
     PARSEC_M,
     RestFrameSpectralGrid,
     build_redshift_filter_operator,
@@ -20,6 +22,7 @@ from composed.data import SEDDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
+from composed.provenance import provenance_path_for
 from composed.units import MassNormalization
 
 
@@ -28,6 +31,30 @@ class TabulatedFilter:
     name: str
     wavelength_nm: np.ndarray
     transmission: np.ndarray
+
+
+@dataclass(frozen=True)
+class AngstromFilter:
+    name: str
+    wavelength: np.ndarray
+    transmission: np.ndarray
+    wavelength_unit: str = "angstrom"
+
+
+class FixedDistanceCosmology:
+    name = "fixed-distance-test"
+
+    def __init__(self, distance_m, age_myr=14_000.0):
+        self.distance_m = float(distance_m)
+        self.age_myr = float(age_myr)
+
+    def luminosity_distance(self, redshift):
+        del redshift
+        return self.distance_m
+
+    def age(self, redshift):
+        del redshift
+        return self.age_myr
 
 
 @dataclass
@@ -60,8 +87,8 @@ class ToyRestBackend(SEDBackend):
         )
 
 
-def test_redshift_filter_operator_matches_manual_trapezoid_at_z0():
-    wavelength_nm = np.asarray([400.0, 500.0, 600.0])
+def test_raw_filter_operator_returns_one_maggie_for_flat_ab_standard():
+    wavelength_nm = np.linspace(400.0, 600.0, 2001)
     filt = TabulatedFilter(
         name="box",
         wavelength_nm=np.asarray([400.0, 600.0]),
@@ -76,14 +103,52 @@ def test_redshift_filter_operator_matches_manual_trapezoid_at_z0():
         luminosity_distance_m=10.0 * PARSEC_M,
     )
 
-    luminosity = np.asarray([2.0, 2.0, 2.0])
+    # A 3631 Jy source is one maggie by definition. Convert flat f_nu to
+    # f_lambda [W m^-2 nm^-1], then to luminosity density at 10 pc.
+    f_lambda = AB_ZERO_FNU_W_M2_HZ * C_NM_PER_S / wavelength_nm**2
+    luminosity = f_lambda * 4.0 * np.pi * (10.0 * PARSEC_M) ** 2
     flux = luminosity @ operator.matrix[0]
-    expected_integral_w = 2.0 * (600.0 - 400.0)
-    expected_maggies = expected_integral_w / (4.0 * np.pi * (10.0 * PARSEC_M) ** 2) / (3631.0e3)
 
     assert operator.band_names == ("box",)
     assert np.array_equal(operator.valid_bands, [True])
-    assert np.isclose(flux, expected_maggies)
+    assert np.isclose(flux, 1.0, rtol=2.0e-6)
+
+
+def test_angstrom_filter_curve_is_converted_before_ab_integration():
+    wavelength_nm = np.linspace(400.0, 600.0, 2001)
+    filt = AngstromFilter(
+        name="box",
+        wavelength=np.asarray([4000.0, 6000.0]),
+        transmission=np.asarray([1.0, 1.0]),
+    )
+    operator = build_redshift_filter_operator(
+        wavelength_nm,
+        FilterSet([filt]),
+        redshift=0.0,
+        igm_model=None,
+        luminosity_distance_m=10.0 * PARSEC_M,
+    )
+    f_lambda = AB_ZERO_FNU_W_M2_HZ * C_NM_PER_S / wavelength_nm**2
+    luminosity = f_lambda * 4.0 * np.pi * (10.0 * PARSEC_M) ** 2
+
+    assert np.isclose(luminosity @ operator.matrix[0], 1.0, rtol=2.0e-6)
+
+
+def test_default_cosmology_does_not_depend_on_cigale_import(monkeypatch):
+    import composed.catalog_fast as catalog_fast
+
+    distance = 123.0 * PARSEC_M
+    cosmology = FixedDistanceCosmology(distance)
+    operator = build_redshift_filter_operator(
+        np.linspace(400.0, 600.0, 101),
+        FilterSet([TabulatedFilter("box", np.asarray([400.0, 600.0]), np.ones(2))]),
+        redshift=0.1,
+        igm_model=None,
+        cosmology=cosmology,
+    )
+
+    assert operator.meta["luminosity_distance_m"] == pytest.approx(distance)
+    assert operator.meta["cosmology"] == "fixed-distance-test"
 
 
 def test_build_restframe_grid_and_project_to_photometry():
@@ -143,6 +208,9 @@ def test_restframe_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.samples, rest_grid.samples)
     assert np.allclose(loaded.log_prior, rest_grid.log_prior)
     assert np.array_equal(loaded.valid, rest_grid.valid)
+    assert provenance_path_for(path).exists()
+    locked = load_restframe_spectral_grid(path, require_provenance_sidecar=True)
+    assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
 
 
 @pytest.mark.cigale
@@ -231,6 +299,25 @@ def test_cached_restframe_catalog_fit_with_real_cigale_backend(tmp_path):
     assert result.profile_map_estimates[0, 0] == pytest.approx(0.02)
     assert result.log10_mass_profile[0, best] == pytest.approx(9.0, abs=1.0e-10)
 
+    native_filters = FilterSet(["sdss.gp", "sdss.rp"])
+    from astropy.cosmology import WMAP7
+
+    native_operator = build_redshift_filter_operator(
+        loaded_grid.wavelength_nm,
+        native_filters,
+        redshift=0.05,
+        igm_model="cigale",
+        cosmology=WMAP7,
+    )
+    native_grid = project_rest_grid_to_photometric_grid(
+        loaded_grid,
+        native_operator,
+        age_parameter=None,
+        cosmology=WMAP7,
+    )
+    direct = backend.predict_photometry({"metallicity": 0.02, "z": 0.05}, native_filters)
+    assert np.allclose(native_grid.flux[true_model], direct.flux, rtol=2.0e-5, atol=0.0)
+
 
 def test_native_catalog_fit_recovers_template_and_profile_mass():
     backend = ToyRestBackend()
@@ -278,6 +365,71 @@ def test_native_catalog_fit_recovers_template_and_profile_mass():
     assert result.profile_map_estimates[0, 0] == 1.0
     best = result.profile_map_indices[0]
     assert np.isclose(result.log10_mass_profile[0, best], 1.0, atol=1.0e-10)
+
+
+def test_catalog_keeps_input_redshift_and_does_not_round_by_default():
+    backend = ToyRestBackend()
+    space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={"log10_mass": UniformPrior(0.0, 3.0), "template": ChoicePrior([0.0])},
+    )
+    rest_grid = build_restframe_spectral_grid(backend, space)
+    filters = FilterSet([TabulatedFilter("box", np.asarray([405.0, 595.0]), np.ones(2))])
+    z = 0.004
+    operator = build_redshift_filter_operator(
+        rest_grid.wavelength_nm,
+        filters,
+        z,
+        igm_model=None,
+        cosmology=FixedDistanceCosmology(1.0e24),
+    )
+    phot_grid = project_rest_grid_to_photometric_grid(
+        rest_grid,
+        operator,
+        age_parameter=None,
+        cosmology=FixedDistanceCosmology(1.0e24),
+    )
+    dataset = SEDDataset(("box",), 10.0 * phot_grid.flux[0], np.maximum(phot_grid.flux[0] * 0.01, 1e-40))
+
+    result = fit_catalog_with_restframe_grid(
+        rest_grid,
+        [dataset],
+        [z],
+        filters,
+        igm_model=None,
+        cosmology=FixedDistanceCosmology(1.0e24),
+        log10_mass_bounds=(0.0, 3.0),
+        age_parameter=None,
+    )
+
+    assert result.redshifts[0] == pytest.approx(z)
+    assert result.evaluated_redshifts[0] == pytest.approx(z)
+
+
+def test_catalog_rejects_rounding_positive_redshift_to_zero():
+    rest_grid = RestFrameSpectralGrid(
+        wavelength_nm=np.asarray([400.0, 500.0, 600.0]),
+        luminosity_w_per_nm=np.ones((1, 3)),
+        samples=np.asarray([[0.0]]),
+        log_prior=np.zeros(1),
+        valid=np.ones(1, dtype=bool),
+        parameter_names=("template",),
+        mass_normalization=MassNormalization.PER_SOLAR_MASS,
+    )
+    dataset = SEDDataset(("box",), np.asarray([1.0]), np.asarray([0.1]))
+    filters = FilterSet([TabulatedFilter("box", np.asarray([400.0, 600.0]), np.ones(2))])
+
+    with pytest.raises(ValueError, match="mapped positive observed redshift.*to zero"):
+        fit_catalog_with_restframe_grid(
+            rest_grid,
+            [dataset],
+            [0.004],
+            filters,
+            redshift_decimals=2,
+            igm_model=None,
+            cosmology=FixedDistanceCosmology(1.0e24),
+            age_parameter=None,
+        )
 
 
 def test_projection_rejects_models_older_than_universe():

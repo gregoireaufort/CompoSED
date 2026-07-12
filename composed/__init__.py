@@ -1,6 +1,6 @@
 """Composable Bayesian SED fitting and photo-z inference."""
 
-from composed.data import SEDDataset, SpectrumDataset
+from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
 from composed.catalog import CatalogGridResult, run_photometric_grid_catalog
 from composed.catalog_fast import (
     NativeCatalogFitResult,
@@ -14,8 +14,24 @@ from composed.catalog_fast import (
     save_restframe_spectral_grid,
 )
 from composed.likelihood import GaussianPhotometricLikelihood, GaussianSpectralLikelihood
+from composed.filters import FilterSet, load_filter_set
 from composed.parameters import ParameterSpace
 from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
+from composed.problem import (
+    Emcee,
+    Gaussian,
+    Grid,
+    Laplace,
+    MixedGibbs,
+    MixedTAMIS,
+    PocoMC,
+    Problem,
+    RandomWalk,
+    Sampler,
+    SamplerCapabilities,
+    TAMIS,
+    fit,
+)
 from composed.provenance import (
     collect_run_provenance,
     provenance_path_for,
@@ -27,35 +43,80 @@ from composed.provenance import (
 )
 from composed.results import (
     InferenceResult,
+    InferenceFailure,
     load_inference_result,
     normalize_sampling_result,
     posterior_summary,
     save_inference_result,
 )
+from composed.sbi import (
+    Diffusion,
+    DiffusionPhotometricSBIResult,
+    MAF,
+    MAFPhotometricSBIResult,
+    PhotometricTrainingSet,
+    SBITrainingSet,
+    Simulate,
+    TrainedDiffusionSBI,
+    TrainedMAFSBI,
+    default_photometric_diffusion_mask,
+    simulate_photometric_training_set,
+    simulate_sbi_training_set,
+    train_sbi,
+    train_diffusion_photometric_sbi,
+    train_maf_photometric_sbi,
+    transform_photometry,
+)
 from composed.units import MassNormalization
 
 __all__ = [
     "DeltaPrior",
+    "Diffusion",
     "CatalogGridResult",
     "GaussianPhotometricLikelihood",
     "GaussianSpectralLikelihood",
+    "Gaussian",
+    "Grid",
     "InferenceResult",
+    "InferenceFailure",
+    "Laplace",
+    "FilterSet",
     "LogUniformPrior",
     "MassNormalization",
+    "MAF",
+    "MAFPhotometricSBIResult",
+    "MixedGibbs",
+    "MixedTAMIS",
     "NormalPrior",
     "NativeCatalogFitResult",
     "ParameterSpace",
+    "PocoMC",
+    "Problem",
+    "PhotometricTrainingSet",
+    "SBITrainingSet",
     "RedshiftFilterOperator",
     "RestFrameSpectralGrid",
     "SEDDataset",
+    "Sampler",
+    "SamplerCapabilities",
+    "Simulate",
+    "SpectroPhotometricDataset",
     "SpectrumDataset",
+    "RandomWalk",
+    "TAMIS",
+    "TrainedDiffusionSBI",
+    "TrainedMAFSBI",
+    "Emcee",
     "UniformPrior",
     "build_redshift_filter_operator",
     "build_restframe_spectral_grid",
     "collect_run_provenance",
+    "default_photometric_diffusion_mask",
     "fit_catalog_with_restframe_grid",
+    "fit",
     "load_restframe_spectral_grid",
     "load_inference_result",
+    "load_filter_set",
     "normalize_sampling_result",
     "posterior_summary",
     "project_rest_grid_to_photometric_grid",
@@ -63,9 +124,16 @@ __all__ = [
     "read_provenance",
     "require_provenance",
     "run_photometric_grid_catalog",
+    "simulate_photometric_training_set",
+    "simulate_sbi_training_set",
     "save_inference_result",
     "save_npz_with_provenance",
     "save_restframe_spectral_grid",
     "sha256_file",
+    "train_diffusion_photometric_sbi",
+    "train_maf_photometric_sbi",
+    "train_sbi",
+    "transform_photometry",
     "write_provenance",
+    "DiffusionPhotometricSBIResult",
 ]

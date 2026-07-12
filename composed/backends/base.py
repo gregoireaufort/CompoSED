@@ -5,7 +5,12 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from composed.units import MassNormalization
+from composed.units import (
+    MassNormalization,
+    canonical_photometric_flux_unit,
+    canonical_spectral_flux_unit,
+    canonical_wavelength_unit,
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +25,7 @@ class ModelPhotometry:
     band_names: Sequence[str]
     flux: np.ndarray
     metadata: Mapping[str, object] | None = None
+    flux_unit: str = "maggies"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "band_names", tuple(str(name) for name in self.band_names))
@@ -28,8 +34,11 @@ class ModelPhotometry:
             raise ValueError("ModelPhotometry.flux must be one-dimensional.")
         if len(self.band_names) != flux.size:
             raise ValueError("band_names length must match flux length.")
+        if len(set(self.band_names)) != len(self.band_names):
+            raise ValueError("ModelPhotometry band_names must be unique.")
         object.__setattr__(self, "flux", flux)
         object.__setattr__(self, "metadata", {} if self.metadata is None else dict(self.metadata))
+        object.__setattr__(self, "flux_unit", canonical_photometric_flux_unit(self.flux_unit))
 
 
 @dataclass(frozen=True)
@@ -58,8 +67,8 @@ class ModelSpectrum:
             raise ValueError("ModelSpectrum wavelength and flux must have the same shape.")
         object.__setattr__(self, "wavelength", wavelength)
         object.__setattr__(self, "flux", flux)
-        object.__setattr__(self, "wavelength_unit", str(self.wavelength_unit))
-        object.__setattr__(self, "flux_unit", str(self.flux_unit))
+        object.__setattr__(self, "wavelength_unit", canonical_wavelength_unit(self.wavelength_unit))
+        object.__setattr__(self, "flux_unit", canonical_spectral_flux_unit(self.flux_unit))
         object.__setattr__(self, "metadata", {} if self.metadata is None else dict(self.metadata))
 
 

@@ -24,14 +24,22 @@ __all__ = [
     "full_theta_from_blocks",
     "run_grid_sampler",
     "run_mixed_gibbs",
+    "run_thresholded_mixed_gibbs",
     "run_mixed_tamis",
     "sample_discrete_grid",
     "split_parameter_space",
     "plotting",
+    "diagnostics",
     "BoxLogitTransform",
     "box_logit_transform_from_parameter_space",
+    "PosteriorSampleSet",
+    "marginal_coverage",
     "MAFPosteriorEstimator",
+    "prediction_summary",
+    "rank_statistics",
     "simulate_training_set",
+    "sample_posterior_dataset",
+    "run_sbi_diagnostics",
     "train_maf_posterior",
     "train_maf_posterior_from_dataset",
 ]
@@ -70,6 +78,7 @@ def __getattr__(name):
         "full_theta_from_blocks",
         "run_grid_sampler",
         "run_mixed_gibbs",
+        "run_thresholded_mixed_gibbs",
         "sample_discrete_grid",
         "split_parameter_space",
     }:
@@ -81,6 +90,7 @@ def __getattr__(name):
             full_theta_from_blocks,
             run_grid_sampler,
             run_mixed_gibbs,
+            run_thresholded_mixed_gibbs,
             sample_discrete_grid,
             split_parameter_space,
         )
@@ -93,6 +103,7 @@ def __getattr__(name):
             "full_theta_from_blocks": full_theta_from_blocks,
             "run_grid_sampler": run_grid_sampler,
             "run_mixed_gibbs": run_mixed_gibbs,
+            "run_thresholded_mixed_gibbs": run_thresholded_mixed_gibbs,
             "sample_discrete_grid": sample_discrete_grid,
             "split_parameter_space": split_parameter_space,
         }[name]
@@ -102,6 +113,33 @@ def __getattr__(name):
         return run_mixed_tamis
     if name == "plotting":
         return importlib.import_module(".plotting", __name__)
+    if name == "diagnostics":
+        return importlib.import_module(".diagnostics", __name__)
+    if name in {
+        "PosteriorSampleSet",
+        "marginal_coverage",
+        "prediction_summary",
+        "rank_statistics",
+        "sample_posterior_dataset",
+        "run_sbi_diagnostics",
+    }:
+        from .diagnostics import (
+            PosteriorSampleSet,
+            marginal_coverage,
+            prediction_summary,
+            rank_statistics,
+            run_sbi_diagnostics,
+            sample_posterior_dataset,
+        )
+
+        return {
+            "PosteriorSampleSet": PosteriorSampleSet,
+            "marginal_coverage": marginal_coverage,
+            "prediction_summary": prediction_summary,
+            "rank_statistics": rank_statistics,
+            "sample_posterior_dataset": sample_posterior_dataset,
+            "run_sbi_diagnostics": run_sbi_diagnostics,
+        }[name]
     if name in {
         "MAFPosteriorEstimator",
         "simulate_training_set",

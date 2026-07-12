@@ -283,7 +283,7 @@ def run_mixed_gibbs(
     continuous_sampler_kwargs: Mapping | None = None,
     rng: np.random.Generator | None = None,
     discrete_candidates: int | None = None,
-    discrete_probability_floor: float | str | None = "survival",
+    discrete_probability_floor: float | str | None = None,
     discrete_floor_failure_probability: float = 1e-5,
     discrete_floor_max_mass: float = 0.05,
     max_exact_grid_size: int = 50_000,
@@ -300,9 +300,10 @@ def run_mixed_gibbs(
     The discrete block is updated by SIR over the Cartesian grid. If
     ``discrete_candidates`` is ``None`` the candidate set is the full finite
     grid. If it is an integer, that many grid points are sampled uniformly.
-    ``discrete_probability_floor`` keeps low-probability grid points alive in
-    the SIR categorical distribution; this is intentionally pragmatic, not an
-    exact Gibbs kernel.
+    The default full-grid update with no probability floor is an exact
+    categorical conditional. Setting ``discrete_candidates`` or
+    ``discrete_probability_floor`` requests an explicitly approximate SIR
+    update; this choice is recorded in the result metadata.
     """
 
     if int(nsteps) <= 0:
@@ -392,7 +393,25 @@ def run_mixed_gibbs(
             "discrete_floor_failure_probability": discrete_floor_failure_probability,
             "discrete_floor_max_mass": discrete_floor_max_mass,
             "max_exact_grid_size": max_exact_grid_size,
+            "approximate_discrete_kernel": (
+                discrete_candidates is not None or discrete_probability_floor is not None
+            ),
         },
+    )
+
+
+def run_thresholded_mixed_gibbs(*args, discrete_probability_floor="survival", **kwargs) -> SamplingResult:
+    """Run the pragmatic thresholded-SIR variant of mixed Gibbs.
+
+    This named entry point preserves low-probability discrete states by
+    modifying the categorical conditional. It is useful as an exploration
+    heuristic but is not an exact Gibbs kernel.
+    """
+
+    return run_mixed_gibbs(
+        *args,
+        discrete_probability_floor=discrete_probability_floor,
+        **kwargs,
     )
 
 

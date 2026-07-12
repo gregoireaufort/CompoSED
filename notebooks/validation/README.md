@@ -21,6 +21,9 @@ Current notebooks:
 - `09_cigale_mixed_prior_validation.ipynb`: real CIGALE mock photometry and
   CIGALE refit under a mixed continuous/discrete prior, comparing grid, Gibbs,
   and mixed TAMIS samplers.
+- `10_fsps_sbi_mock_catalog_validation.ipynb`: real FSPS mock photometric
+  catalog, MAF posterior estimator, and generic SBI diagnostics on held-out
+  mock galaxies.
 
 Fast analytic or toy-nebular notebooks belong in `notebooks/smoke/`, where they
 can remain useful for debugging without being confused for scientific

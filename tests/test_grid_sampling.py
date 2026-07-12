@@ -8,6 +8,7 @@ from inftools.grid import (
     full_theta_from_blocks,
     run_grid_sampler,
     run_mixed_gibbs,
+    run_thresholded_mixed_gibbs,
     sample_discrete_grid,
     split_parameter_space,
 )
@@ -222,6 +223,37 @@ def test_mixed_gibbs_discrete_sir_applies_probability_floor():
     probabilities = result.meta["discrete_probabilities"][0]
     assert np.all(probabilities >= 0.1)
     assert np.isclose(np.sum(probabilities), 1.0)
+
+
+def test_mixed_gibbs_default_discrete_update_is_exact_without_floor():
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
+
+    def log_prob(theta):
+        return 0.0 if theta[0] == 0.0 else -1000.0
+
+    result = run_mixed_gibbs(
+        Posterior(log_prob, dim=1),
+        space,
+        x0=np.asarray([0.0]),
+        nsteps=1,
+        rng=np.random.default_rng(1),
+    )
+
+    assert np.allclose(result.meta["discrete_probabilities"][0], [1.0, 0.0])
+    assert result.meta["approximate_discrete_kernel"] is False
+
+
+def test_thresholded_mixed_gibbs_is_explicitly_marked_approximate():
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
+    result = run_thresholded_mixed_gibbs(
+        Posterior(lambda theta: 0.0 if theta[0] == 0.0 else -1000.0, dim=1),
+        space,
+        x0=np.asarray([0.0]),
+        nsteps=1,
+        rng=np.random.default_rng(2),
+    )
+
+    assert result.meta["approximate_discrete_kernel"] is True
 
 
 def test_mixed_gibbs_passes_seed_to_samplers_without_rng_argument():

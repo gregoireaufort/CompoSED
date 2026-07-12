@@ -149,11 +149,26 @@ def test_maf_constructor_forces_float32_before_device_move(monkeypatch):
     monkeypatch.setattr(sbi, "_require_sbi_dependencies", lambda: (FakeTorch, object()))
     monkeypatch.setattr(sbi, "build_maf", lambda **kwargs: FakeFlow())
 
-    est = sbi.MAFPosteriorEstimator(theta_dim=1, x_dim=1, device="mps")
+    est = sbi.MAFPosteriorEstimator(theta_dim=1, x_dim=1, device="mps", validate_device=False)
     assert est.flow is not None
     assert calls[0] == ((), {"dtype": "float32"})
     assert isinstance(calls[1][1]["device"], FakeDevice)
     assert calls[1][1]["device"].value == "mps"
+
+
+@pytest.mark.sbi
+def test_maf_resolve_torch_device_cpu_and_bad_explicit_device():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    import torch
+    import inftools.sbi as sbi
+
+    device = sbi.resolve_torch_device(torch, "cpu", validate=True)
+    assert device.type == "cpu"
+
+    with pytest.raises(RuntimeError, match="not usable"):
+        sbi.resolve_torch_device(torch, "not_a_real_device", validate=True, allow_fallback=False)
 
 
 def test_simulate_training_set_with_toy_likelihood():
@@ -249,10 +264,43 @@ def test_tiny_maf_training_if_dependencies_available():
         learning_rate=5e-3,
         device="cpu",
     )
-    estimator.fit(theta, x, epochs=2, batch_size=32, seed=6)
+    history = estimator.fit(theta, x, epochs=2, batch_size=32, validation_split=0.25, seed=6)
     samples = estimator.sample(np.array([0.0]), num_samples=16)
     logp = estimator.log_prob(samples[:4], np.array([0.0]))
     assert samples.shape == (16, 1)
     assert logp.shape == (4,)
     assert np.all(np.isfinite(samples))
     assert np.all(np.isfinite(logp))
+    assert len(history["val_loss"]) == 2
+    assert np.all(np.isfinite(history["val_loss"]))
+
+
+@pytest.mark.sbi
+def test_maf_stays_float32_when_global_default_dtype_is_float64():
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch/nflows are not installed.")
+
+    import torch
+
+    old_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        rng = np.random.default_rng(8)
+        theta = rng.normal(size=(32, 1))
+        x = theta + 0.1 * rng.normal(size=(32, 1))
+        estimator = MAFPosteriorEstimator(
+            theta_dim=1,
+            x_dim=1,
+            hidden_features=8,
+            num_transforms=1,
+            num_blocks=1,
+            learning_rate=5e-3,
+            device="cpu",
+        )
+        assert next(estimator.flow.parameters()).dtype == torch.float32
+        estimator.fit(theta, x, epochs=1, batch_size=16, seed=9)
+        samples = estimator.sample(np.array([0.0]), num_samples=4)
+        assert samples.shape == (4, 1)
+        assert np.all(np.isfinite(samples))
+    finally:
+        torch.set_default_dtype(old_dtype)

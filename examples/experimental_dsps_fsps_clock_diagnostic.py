@@ -14,20 +14,14 @@ DSPS an age grid while also setting ``t_obs = age_of_universe(z)``.
 Run the stages in the environments that have the required dependencies:
 
     # FSPS environment: build a continuum-only FSPS SSP table and direct FSPS CSPs
-    SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
-    /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
+    SPS_HOME=/path/to/FSPS python \
         examples/experimental_dsps_fsps_clock_diagnostic.py --stage make-ssp
 
-    SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
-    /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
+    SPS_HOME=/path/to/FSPS python \
         examples/experimental_dsps_fsps_clock_diagnostic.py --stage fsps
 
     # DSPS/JAX environment
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
-    /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
-        examples/experimental_dsps_fsps_clock_diagnostic.py --stage dsps
+    python examples/experimental_dsps_fsps_clock_diagnostic.py --stage dsps
 
     # Either environment with matplotlib
     python examples/experimental_dsps_fsps_clock_diagnostic.py --stage plots
@@ -45,6 +39,8 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from composed.provenance import require_provenance, save_npz_with_provenance
 
 C_A_PER_S = 2.99792458e18
 Z_SUN_FSPS = 0.019
@@ -159,8 +155,9 @@ def run_direct_fsps_stage(draws: list[dict[str, float]], args: argparse.Namespac
         cosmic_axis.append(np.interp(REST_WAVE_A, wave_a, lum, left=np.nan, right=np.nan))
         print(f"  FSPS {draw['label']}")
 
-    np.savez(
+    save_npz_with_provenance(
         args.output_dir / "direct_fsps_clock_spectra.npz",
+        extra={"validation": "direct_fsps_clock_spectra", "clock_conventions": ["age", "cosmic"]},
         rest_wave_nm=REST_WAVE_NM,
         fsps_age_axis_lsun_per_a=np.asarray(age_axis),
         fsps_cosmic_axis_lsun_per_a=np.asarray(cosmic_axis),
@@ -255,8 +252,10 @@ def run_dsps_stage(draws: list[dict[str, float]], args: argparse.Namespace) -> N
         )
         print(f"  DSPS {draw['label']}")
 
-    np.savez(
+    save_npz_with_provenance(
         args.output_dir / "dsps_clock_spectra.npz",
+        provenance_paths={"ssp_file": args.ssp_file},
+        extra={"validation": "dsps_clock_spectra", "clock_conventions": ["wrong", "age", "cosmic"]},
         rest_wave_nm=REST_WAVE_NM,
         dsps_current_wrong_lsun_per_a=np.asarray(current_wrong),
         dsps_age_axis_lsun_per_a=np.asarray(age_axis),
@@ -310,8 +309,12 @@ def delayed_sfh_on_galaxy_age_grid(draw: dict[str, float]) -> tuple[np.ndarray, 
 
 def make_plots_and_summary(output_dir: Path) -> None:
     draws = json.loads((output_dir / "parameter_draws.json").read_text())
-    dsps = np.load(output_dir / "dsps_clock_spectra.npz")
-    fsps = np.load(output_dir / "direct_fsps_clock_spectra.npz")
+    dsps_path = output_dir / "dsps_clock_spectra.npz"
+    fsps_path = output_dir / "direct_fsps_clock_spectra.npz"
+    require_provenance(dsps_path)
+    require_provenance(fsps_path)
+    dsps = np.load(dsps_path)
+    fsps = np.load(fsps_path)
     wave_nm = dsps["rest_wave_nm"]
 
     products = {

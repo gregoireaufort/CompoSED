@@ -24,6 +24,13 @@ class ParameterSpace:
         names = tuple(str(name) for name in self.names)
         if len(set(names)) != len(names):
             raise ValueError("ParameterSpace names must be unique.")
+        prior_names = set(self.priors)
+        missing = [name for name in names if name not in prior_names]
+        extra = sorted(prior_names - set(names))
+        if missing:
+            raise ValueError(f"Missing prior(s) for parameter(s): {', '.join(missing)}.")
+        if extra:
+            raise ValueError(f"Prior mapping contains parameter(s) absent from names: {', '.join(extra)}.")
         object.__setattr__(self, "names", names)
         object.__setattr__(self, "priors", dict(self.priors))
 
@@ -65,9 +72,7 @@ class ParameterSpace:
             raise ValueError(f"Expected theta shape {(self.ndim,)}, got {theta.shape}.")
         total = 0.0
         for name, value in zip(self.names, theta):
-            prior = self.priors.get(name)
-            if prior is None:
-                continue
+            prior = self.priors[name]
             logp = prior.logpdf(float(value))
             if not np.isfinite(logp):
                 return -np.inf

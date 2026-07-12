@@ -13,16 +13,11 @@ from composed.transforms.sfh import normalize_sfh_to_formed_mass
 from composed.units import LSUN_CGS, MassNormalization, PARSEC_CM
 
 REDSHIFT_KEYS = ("z", "zred", "redshift")
-FSPS_PARAMETER_KEYS = (
-    "logzsol",
-    "dust2",
-    "dust1",
-    "dust_index",
-    "gas_logz",
-    "gas_logu",
-    "fagn",
-    "agn_tau",
-)
+FSPS_CONTROL_PARAMETER_KEYS = {
+    *REDSHIFT_KEYS,
+    "tabular_time_gyr",
+    "tabular_sfr_msun_per_yr",
+}
 
 
 @dataclass
@@ -60,6 +55,8 @@ class FSPSBackend(SEDBackend):
     default_z_key: str = "zred"
     age_tolerance_gyr: float = 1e-6
     _sp: Any = field(default=None, init=False, repr=False)
+    _baseline_sp_params: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _last_sp_overrides: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mass_normalization = MassNormalization(self.mass_normalization)
@@ -171,10 +168,7 @@ class FSPSBackend(SEDBackend):
             sfr = normalize_sfh_to_formed_mass(t_gyr, sfr)
 
         sp = self._stellar_population()
-        sp.params["zred"] = z
-        for key in FSPS_PARAMETER_KEYS:
-            if key in params:
-                sp.params[key] = float(params[key])
+        self._configure_stellar_population(sp, params, z)
 
         sp.set_tabular_sfh(t_gyr, sfr)
         wave_rest_a, llam_lsun_per_a = sp.get_spectrum(tage=float(t_gyr[-1]), peraa=True)
@@ -202,7 +196,64 @@ class FSPSBackend(SEDBackend):
             if self.sp_kwargs is not None:
                 kwargs.update(dict(self.sp_kwargs))
             self._sp = fsps.StellarPopulation(**kwargs)
+        if self._baseline_sp_params is None:
+            self._baseline_sp_params = self._snapshot_stellar_population_params(self._sp)
         return self._sp
+
+    @staticmethod
+    def _snapshot_stellar_population_params(sp) -> dict[str, Any]:
+        params = sp.params
+        if hasattr(params, "all_params"):
+            names = tuple(str(name) for name in params.all_params)
+        else:
+            # This fallback mainly supports lightweight test doubles. Real
+            # python-fsps exposes ParameterSet.all_params.
+            names = tuple(str(name) for name in params.keys())
+        return {name: params[name] for name in names}
+
+    def _configure_stellar_population(self, sp, params: Mapping[str, Any], redshift: float) -> None:
+        """Reset prior call overrides and apply this call's FSPS parameters.
+
+        ``python-fsps`` keeps one mutable ``StellarPopulation`` object. Without
+        this reset, a parameter supplied for object A silently remains active
+        for object B when B omits it.
+        """
+
+        if self._baseline_sp_params is None:
+            self._baseline_sp_params = self._snapshot_stellar_population_params(sp)
+        baseline = self._baseline_sp_params
+        valid_names = set(baseline)
+
+        for key in self._last_sp_overrides:
+            sp.params[key] = baseline[key]
+        self._last_sp_overrides.clear()
+
+        sp.params["zred"] = float(redshift)
+        overrides = {}
+        unknown = []
+        for key, value in params.items():
+            if key in FSPS_CONTROL_PARAMETER_KEYS:
+                continue
+            if key not in valid_names:
+                unknown.append(key)
+                continue
+            scalar = np.asarray(value)
+            if scalar.ndim != 0:
+                raise ValueError(f"FSPS parameter {key!r} must be scalar; got shape {scalar.shape}.")
+            scalar_value = scalar.item()
+            if isinstance(scalar_value, (float, np.floating)) and not np.isfinite(scalar_value):
+                raise ValueError(f"FSPS parameter {key!r} must be finite.")
+            overrides[key] = scalar_value
+
+        if unknown:
+            raise ValueError(
+                "FSPSBackend received parameter(s) that are neither tabular-SFH controls nor valid python-fsps "
+                f"parameters: {', '.join(sorted(unknown))}."
+            )
+
+        for key, value in overrides.items():
+            sp.params[key] = value
+        self._last_sp_overrides.update(overrides)
 
     def _get_redshift(self, params: Mapping[str, Any]) -> float:
         ordered_keys = (self.default_z_key,) + tuple(key for key in REDSHIFT_KEYS if key != self.default_z_key)

@@ -19,6 +19,7 @@ from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
 from composed.units import MassNormalization
+from composed.provenance import provenance_path_for
 
 
 @dataclass
@@ -240,9 +241,12 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.flux, grid.flux)
     assert np.allclose(loaded.log_prior, grid.log_prior)
     assert np.array_equal(loaded.valid, grid.valid)
+    assert provenance_path_for(path).exists()
+    locked = load_photometric_model_grid(path, require_provenance_sidecar=True)
+    assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
 
 
-def test_mass_grid_allows_upper_limit_only_object_where_profile_is_undefined():
+def test_mass_grid_profiles_complete_upper_limit_likelihood():
     backend = PerMassTemplateBackend()
     space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
     dataset = SEDDataset(
@@ -263,9 +267,59 @@ def test_mass_grid_allows_upper_limit_only_object_where_profile_is_undefined():
         mass_chunk_size=16,
     )
 
-    assert np.all(~np.isfinite(result.profile_logp[0]))
+    assert np.all(np.isfinite(result.profile_logp[0]))
     assert np.all(np.isfinite(result.marginal_logp[0]))
     assert np.isclose(np.sum(result.marginal_weights_norm[0]), 1.0)
+    assert np.allclose(result.log10_mass_profile[0], -3.0)
+
+
+def test_profile_mass_with_upper_limits_requires_explicit_mass_grid():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("u", "g"),
+        flux=np.asarray([1.0, np.nan]),
+        sigma=np.asarray([0.1, 0.2]),
+        upper_limit=np.asarray([0.0, 0.5]),
+        upper_limit_mask=np.asarray([False, True]),
+    )
+    grid = build_photometric_model_grid(backend, space, filters=("u", "g"), band_names=("u", "g"))
+
+    with pytest.raises(ValueError, match="requires an explicit log10_mass_grid"):
+        evaluate_catalog_model_grid_likelihood(grid, [dataset], log10_mass_bounds=(-3.0, 1.0))
+
+
+def test_censored_profile_matches_brute_force_scalar_likelihood_on_mass_grid():
+    backend = PerMassTemplateBackend()
+    template_space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("u", "g"),
+        flux=np.asarray([0.7, np.nan]),
+        sigma=np.asarray([0.15, 0.1]),
+        upper_limit=np.asarray([0.0, 0.5]),
+        upper_limit_mask=np.asarray([False, True]),
+    )
+    mass_grid = np.linspace(-2.0, 0.5, 251)
+    grid = build_photometric_model_grid(
+        backend,
+        template_space,
+        filters=("u", "g"),
+        band_names=("u", "g"),
+    )
+    result = evaluate_catalog_model_grid_likelihood(grid, [dataset], log10_mass_grid=mass_grid)
+
+    full_space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={"log10_mass": UniformPrior(-2.0, 0.5), "template": ChoicePrior([0.0])},
+    )
+    scalar = GaussianPhotometricLikelihood(backend, dataset, full_space, filters=("u", "g"))
+    scalar_log_like = np.asarray([scalar.log_likelihood([mass, 0.0]) for mass in mass_grid])
+    expected_index = int(np.argmax(scalar_log_like))
+
+    assert result.log10_mass_profile[0, 0] == pytest.approx(mass_grid[expected_index])
+    # The cached profile includes only the non-mass template prior, while this
+    # comparison uses the likelihood term only; both are zero constants here.
+    assert result.profile_logp[0, 0] == pytest.approx(scalar_log_like[expected_index])
 
 
 def test_profile_grid_requires_per_solar_mass_models():

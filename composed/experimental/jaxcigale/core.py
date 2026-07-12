@@ -364,9 +364,15 @@ class JaxSedModel:
         # the same scientific convention: mass is applied exactly once here.
         return state._replace(flux_lambda_cgs=state.flux_lambda_cgs * mass)
 
-    def log_prob(self, theta, data):
+    def log_prior(self, theta):
+        """Evaluate only the differentiable parameter prior."""
+
+        return self.parameter_space.log_prior(theta)
+
+    def log_likelihood(self, theta, data):
+        """Evaluate only the differentiable photometric/spectral data term."""
+
         _, jnp = require_jax()
-        log_prior = self.parameter_space.log_prior(theta)
         state = self.run_modules_mass_scaled(theta)
 
         if isinstance(data, GaussianSpectroPhotometricData):
@@ -375,10 +381,20 @@ class JaxSedModel:
                 log_like = log_like + self._photometric_log_likelihood_from_state(state, data.photometry)
             if data.spectrum is not None:
                 log_like = log_like + self._spectral_log_likelihood_from_state(state, data.spectrum)
-            return log_prior + log_like
+            return log_like
         if isinstance(data, GaussianSpectralData):
-            return log_prior + self._spectral_log_likelihood_from_state(state, data)
-        return log_prior + self._photometric_log_likelihood_from_state(state, data)
+            return self._spectral_log_likelihood_from_state(state, data)
+        return self._photometric_log_likelihood_from_state(state, data)
+
+    def log_posterior(self, theta, data):
+        """Evaluate prior plus data likelihood exactly once."""
+
+        return self.log_prior(theta) + self.log_likelihood(theta, data)
+
+    def log_prob(self, theta, data):
+        """Compatibility alias for :meth:`log_posterior`."""
+
+        return self.log_posterior(theta, data)
 
     def _photometric_log_likelihood_from_state(self, state: SEDState, data: GaussianPhotometricData):
         _, jnp = require_jax()

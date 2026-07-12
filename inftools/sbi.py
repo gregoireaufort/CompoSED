@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib
 import multiprocessing as mp
 from typing import Any, Callable, Literal
+import warnings
 
 import numpy as np
 
@@ -19,6 +21,59 @@ def _require_sbi_dependencies():
             "inftools.sbi requires optional dependencies torch and nflows. "
             "Install them with, for example: pip install torch nflows"
         ) from exc
+
+
+def resolve_torch_device(
+    torch,
+    device: str | None = "auto",
+    *,
+    validate: bool = True,
+    allow_fallback: bool = True,
+):
+    """Return a usable torch device for SBI neural estimators.
+
+    ``device="auto"`` tries CUDA, then Apple MPS, then CPU.  When validation is
+    enabled, a tiny float32 forward/backward smoke test is run before training
+    starts.  This catches common accelerator problems early, especially MPS
+    float64/default-dtype surprises.
+    """
+
+    requested = "auto" if device is None else str(device).lower()
+    if requested == "auto":
+        candidates: list[str] = []
+        if torch.cuda.is_available():
+            candidates.append("cuda")
+        if hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            candidates.append("mps")
+        candidates.append("cpu")
+    else:
+        candidates = [requested]
+        if allow_fallback and requested != "cpu":
+            candidates.append("cpu")
+
+    failures: list[str] = []
+    for candidate in candidates:
+        try:
+            candidate_device = torch.device(candidate)
+            if validate:
+                _validate_float32_device(torch, candidate_device)
+            if candidate != requested and requested != "auto":
+                warnings.warn(
+                    f"Requested torch device {requested!r} failed validation; "
+                    f"falling back to {candidate!r}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            return candidate_device
+        except Exception as exc:
+            failures.append(f"{candidate}: {exc!r}")
+            if requested != "auto" and not allow_fallback:
+                raise RuntimeError(
+                    f"Requested torch device {requested!r} is not usable for SBI float32 workloads. "
+                    f"Validation failure: {exc!r}"
+                ) from exc
+
+    raise RuntimeError("No usable torch device found. Validation failures: " + "; ".join(failures))
 
 
 @dataclass
@@ -85,7 +140,9 @@ class MAFPosteriorEstimator:
         num_transforms: int = 5,
         num_blocks: int = 2,
         learning_rate: float = 1e-3,
-        device: str | None = None,
+        device: str | None = "auto",
+        validate_device: bool = True,
+        allow_device_fallback: bool = True,
         standardize: bool = True,
         max_grad_norm: float | None = None,
         restore_best: bool = True,
@@ -98,7 +155,12 @@ class MAFPosteriorEstimator:
         self.standardize = bool(standardize)
         self.max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
         self.restore_best = bool(restore_best)
-        self.device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = resolve_torch_device(
+            torch,
+            device=device,
+            validate=bool(validate_device),
+            allow_fallback=bool(allow_device_fallback),
+        )
         flow = build_maf(
             theta_dim=self.theta_dim,
             x_dim=self.x_dim,
@@ -121,15 +183,29 @@ class MAFPosteriorEstimator:
         seed: int | None = None,
         verbose: bool = False,
     ) -> dict[str, list[float]]:
-        del validation_split
         torch = self.torch
         theta_train = _as_2d(theta_train, self.theta_dim, "theta_train")
         x_train = _as_2d(x_train, self.x_dim, "x_train")
         if theta_train.shape[0] != x_train.shape[0]:
             raise ValueError("theta_train and x_train must have the same number of rows.")
+        epochs = int(epochs)
+        batch_size = int(batch_size)
+        if epochs <= 0 or batch_size <= 0:
+            raise ValueError("epochs and batch_size must be positive.")
+        validation_split = float(validation_split)
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must lie in [0, 1).")
+        n_total = theta_train.shape[0]
+        n_validation = int(round(validation_split * n_total))
+        if n_validation >= n_total:
+            raise ValueError("validation_split must leave at least one training row.")
+        permutation = np.random.default_rng(seed).permutation(n_total)
+        validation_indices = permutation[:n_validation]
+        training_indices = permutation[n_validation:]
+
         if self.standardize:
-            self.theta_standardizer = Standardizer.fit(theta_train)
-            self.x_standardizer = Standardizer.fit(x_train)
+            self.theta_standardizer = Standardizer.fit(theta_train[training_indices])
+            self.x_standardizer = Standardizer.fit(x_train[training_indices])
             theta_fit = self.theta_standardizer.transform(theta_train)
             x_fit = self.x_standardizer.transform(x_train)
         else:
@@ -142,18 +218,40 @@ class MAFPosteriorEstimator:
             torch.manual_seed(int(seed))
         theta_t = torch.as_tensor(theta_fit, dtype=torch.float32, device=self.device)
         x_t = torch.as_tensor(x_fit, dtype=torch.float32, device=self.device)
-        dataset = torch.utils.data.TensorDataset(theta_t, x_t)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=int(batch_size), shuffle=True)
+        training_index_t = torch.as_tensor(training_indices, dtype=torch.long, device=self.device)
+        dataset = torch.utils.data.TensorDataset(
+            theta_t.index_select(0, training_index_t),
+            x_t.index_select(0, training_index_t),
+        )
+        loader_generator = torch.Generator()
+        if seed is not None:
+            loader_generator.manual_seed(int(seed))
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=loader_generator,
+        )
+        if n_validation > 0:
+            validation_index_t = torch.as_tensor(validation_indices, dtype=torch.long, device=self.device)
+            theta_validation = theta_t.index_select(0, validation_index_t)
+            x_validation = x_t.index_select(0, validation_index_t)
+        else:
+            theta_validation = None
+            x_validation = None
         opt = torch.optim.Adam(self.flow.parameters(), lr=self.learning_rate)
         self.history = {"train_loss": []}
+        if n_validation > 0:
+            self.history["val_loss"] = []
         self.flow.train()
         best_loss = float("inf")
         best_state = None
-        for epoch in range(int(epochs)):
+        for epoch in range(epochs):
             losses = []
             saw_nonfinite_loss = False
             for theta_b, x_b in loader:
-                loss = -self.flow.log_prob(inputs=theta_b, context=x_b).mean()
+                with _temporary_default_dtype(torch, torch.float32):
+                    loss = -self.flow.log_prob(inputs=theta_b, context=x_b).mean()
                 if not bool(torch.isfinite(loss).detach().cpu().item()):
                     saw_nonfinite_loss = True
                     losses.append(np.nan)
@@ -166,19 +264,37 @@ class MAFPosteriorEstimator:
                 losses.append(float(loss.detach().cpu().item()))
             mean_loss = float(np.mean(losses)) if losses else np.nan
             self.history["train_loss"].append(mean_loss)
-            if np.isfinite(mean_loss) and mean_loss < best_loss:
-                best_loss = mean_loss
+            if theta_validation is not None:
+                self.flow.eval()
+                with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
+                    validation_loss = -self.flow.log_prob(
+                        inputs=theta_validation,
+                        context=x_validation,
+                    ).mean()
+                validation_loss_value = float(validation_loss.detach().cpu().item())
+                self.history["val_loss"].append(validation_loss_value)
+                self.flow.train()
+                selection_loss = validation_loss_value
+            else:
+                selection_loss = mean_loss
+            if np.isfinite(selection_loss) and selection_loss < best_loss:
+                best_loss = selection_loss
                 best_state = {key: value.detach().clone() for key, value in self.flow.state_dict().items()}
             if verbose:
-                print(f"epoch {epoch + 1}/{epochs}: loss={mean_loss:.6g}")
+                message = f"epoch {epoch + 1}/{epochs}: train_loss={mean_loss:.6g}"
+                if theta_validation is not None:
+                    message += f", val_loss={validation_loss_value:.6g}"
+                print(message)
             if saw_nonfinite_loss:
                 self.history["stopped_early_nonfinite_loss"] = [float(epoch + 1)]
                 if verbose:
                     print(f"stopping early after non-finite loss at epoch {epoch + 1}")
                 break
+        if best_state is None:
+            raise FloatingPointError("MAF training produced no finite epoch loss.")
         if self.restore_best and best_state is not None:
             self.flow.load_state_dict(best_state)
-            self.history["best_train_loss"] = [best_loss]
+            self.history["best_selection_loss"] = [best_loss]
         return self.history
 
     def sample(self, x_obs: np.ndarray, num_samples: int = 10000) -> np.ndarray:
@@ -188,7 +304,7 @@ class MAFPosteriorEstimator:
         x_std = self.x_standardizer.transform(x)
         context = torch.as_tensor(x_std, dtype=torch.float32, device=self.device)
         self.flow.eval()
-        with torch.no_grad():
+        with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
             samples_std = self.flow.sample(int(num_samples), context=context)
         samples_np = samples_std.detach().cpu().numpy()
         if samples_np.ndim == 3 and samples_np.shape[0] == 1:
@@ -209,7 +325,7 @@ class MAFPosteriorEstimator:
         theta_std = self.theta_standardizer.transform(theta_arr)
         x_std = self.x_standardizer.transform(x_arr)
         self.flow.eval()
-        with torch.no_grad():
+        with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
             lp_std = self.flow.log_prob(
                 inputs=torch.as_tensor(theta_std, dtype=torch.float32, device=self.device),
                 context=torch.as_tensor(x_std, dtype=torch.float32, device=self.device),
@@ -445,7 +561,11 @@ def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) 
             "num_blocks",
             "learning_rate",
             "device",
+            "validate_device",
+            "allow_device_fallback",
             "standardize",
+            "max_grad_norm",
+            "restore_best",
         }
     }
     estimator = MAFPosteriorEstimator(theta_dim=theta_train.shape[1], x_dim=x_train.shape[1], **estimator_kwargs)
@@ -469,6 +589,41 @@ def _prepare_flow_for_device(flow, torch, device):
 
     flow = flow.to(dtype=torch.float32)
     return flow.to(device=device)
+
+
+def _validate_float32_device(torch, device) -> None:
+    """Exercise the float32 operations needed before launching a long SBI run."""
+
+    x = torch.randn((4, 3), dtype=torch.float32, device=device, requires_grad=True)
+    weight = torch.randn((3, 2), dtype=torch.float32, device=device)
+    y = (x @ weight).pow(2).mean()
+    y.backward()
+    if not bool(torch.isfinite(y.detach()).cpu().item()):
+        raise FloatingPointError("float32 smoke test produced a non-finite value.")
+    if x.grad is None or not bool(torch.all(torch.isfinite(x.grad)).detach().cpu().item()):
+        raise FloatingPointError("float32 smoke test produced non-finite gradients.")
+    _synchronize_device(torch, device)
+
+
+def _synchronize_device(torch, device) -> None:
+    device_type = getattr(device, "type", str(device).split(":")[0])
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device_type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+
+
+@contextmanager
+def _temporary_default_dtype(torch, dtype):
+    old_dtype = torch.get_default_dtype()
+    if old_dtype == dtype:
+        yield
+        return
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def _prepare_precomputed_training_pairs(

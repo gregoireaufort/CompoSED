@@ -8,16 +8,12 @@ expected, suspicious, or still unresolved.
 The staged design is deliberate because the local Python environments differ:
 
     # CIGALE + python-FSPS environment
-    SPS_HOME=/Users/gregoire/Work/FSPS \
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
-    /Users/gregoire/opt/anaconda3/envs/sbi_candide/bin/python \
+    SPS_HOME=/path/to/FSPS python \
         examples/validation_backend_cross_validation.py --stage references --n-draws 80
 
     # JAX + DSPS + Cue environment
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
     DSPS_CONTINUUM_SSP_FILE="outputs/experimental_dsps_fsps_clock_diagnostic/fsps_continuum_ssp_data.h5" \
-    CUE_DATA_DIR=/private/tmp/cue/src/cue/data \
-    /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
+    CUE_DATA_DIR=/path/to/cue/src/cue/data python \
         examples/validation_backend_cross_validation.py --stage cue --n-draws 80
 
     # Either environment with numpy/matplotlib
@@ -134,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cue-data-dir",
         type=Path,
-        default=Path(os.environ.get("CUE_DATA_DIR", "/private/tmp/cue/src/cue/data")),
+        default=Path(os.environ["CUE_DATA_DIR"]) if os.environ.get("CUE_DATA_DIR") else None,
     )
     return parser.parse_args()
 
@@ -147,6 +143,8 @@ def main() -> None:
     if args.stage in {"all", "references"}:
         run_reference_stage(draws, args)
     if args.stage in {"all", "cue"}:
+        if args.cue_data_dir is None:
+            raise ValueError("Set CUE_DATA_DIR or pass --cue-data-dir for the Cue validation stage.")
         run_cue_stage(
             draws,
             args,
@@ -322,6 +320,7 @@ def run_cue_stage(
     # unambiguous: no DSPS/FSPS stellar calculation enters this hybrid model.
     reference_path = output_dir / "reference_spectra.npz"
     if reference_path.exists():
+        require_provenance(reference_path)
         reference = np.load(reference_path, allow_pickle=True)
         if "spectrum_cigale_bc03_stellar" in reference.files:
             bc03_stellar_w_per_nm = reference["spectrum_cigale_bc03_stellar"]

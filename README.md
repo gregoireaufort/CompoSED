@@ -161,7 +161,7 @@ backend, space = build_cigale_backend_and_parameter_space(
     additional_priors={"log10_mass": UniformPrior(8.0, 12.0)},
 )
 
-filters = FilterSet(["sdss.u", "sdss.g", "sdss.r"])
+filters = FilterSet(["sdss.up", "sdss.gp", "sdss.rp"])
 phot_per_msun = backend.predict_photometry(
     {"tau_main": 2000.0, "age_main": 3000, "metallicity": 0.02, "z": 0.5},
     filters,
@@ -204,6 +204,10 @@ FSPS, sedpy, or `SPS_HOME` are unavailable.
 using `torch` and `nflows`. These dependencies are not required for importing
 `composed` or the rest of `inftools`; constructing the estimator will raise a
 helpful `ImportError` if they are missing.
+
+Most analyses should use the `Problem`-based interface in the next section.
+The functions below are the lower-level array/simulator API retained for custom
+workflows and method development.
 
 Backend-generated simulation pipeline:
 
@@ -249,35 +253,38 @@ estimator = train_maf_posterior_from_dataset(
 samples = estimator.sample(x_obs, num_samples=10000)
 ```
 
-If the training pairs already exist, skip the CompoSED simulator entirely:
+If the training pairs already exist, the high-level standalone declaration is:
 
 ```python
-from inftools.sbi import train_maf_posterior_from_dataset
+from composed import MAF, SBITrainingSet, train_sbi
 
 # theta_train[i] and x_train[i] must describe the same object or simulation.
 # x_train must use the same feature convention as x_obs: same bands, units,
 # masks/cuts, and optional concatenated errors.
-estimator, meta = train_maf_posterior_from_dataset(
-    theta_train,          # shape (n, n_parameters)
-    x_train,              # shape (n, n_features)
+training = SBITrainingSet.from_arrays(
+    theta_train,
+    x_train,
     theta_names=["z", "log10_mass"],
     x_names=["u", "g", "r", "i", "z", "y", "j", "h"],
     source="empirical_catalog_labels",
     finite="drop",
-    shuffle=True,
-    rng=np.random.default_rng(7),
-    return_metadata=True,
-    hidden_features=128,
-    num_transforms=6,
-    epochs=200,
-    batch_size=1024,
-    device="mps",
+)
+posterior = train_sbi(
+    training,
+    MAF(hidden_features=128, num_transforms=6, epochs=200, batch_size=1024, device="auto"),
+    seed=7,
 )
 ```
 
 SBI quality depends strongly on prior coverage, simulator fidelity, noise
 modeling, and diagnostic checks. The simulator produces the same active-band
 flux vector convention consumed by the Gaussian likelihood.
+
+For MAF training and sampling, `device="auto"` tries CUDA, then MPS, then CPU.
+The selected device is validated with a tiny float32 workload before training,
+and the nflows model is converted to float32 before moving to an accelerator.
+This avoids the common Apple MPS failure mode where float64 buffers leak in
+from a changed PyTorch default dtype.
 
 For expensive forward models such as FSPS, `simulate_training_set` can split
 prior draws into chunks and evaluate them in worker processes. Each worker keeps
@@ -288,6 +295,159 @@ define those at top level or run from a small script.
 
 See `notebooks/cosmos2020_sbi_fsps_gpu_timing.ipynb` for a COSMOS2020 +
 FSPS + MAF setup focused on GPU/MPS posterior-sampling timing.
+
+## Short photometric SBI pipeline
+
+For a backend-generated SBI run, bind the observed SED and the simulator into
+one `Problem`. The training simulations then cannot drift away from the model,
+parameter mapping, units, masks, or mass normalization used for inference:
+
+```python
+from composed import (
+    Diffusion, Gaussian, ParameterSpace, Problem, SEDDataset, Simulate,
+    UniformPrior, fit, load_filter_set,
+)
+
+filters = load_filter_set(["sdss_u0", "sdss_g0", "sdss_r0", "sdss_i0", "sdss_z0"])
+
+priors = ParameterSpace(
+    names=["zred", "log10_mass", "dust2", "logzsol"],
+    priors={
+        "zred": UniformPrior(0.05, 1.5),
+        "log10_mass": UniformPrior(8.0, 11.5),
+        "dust2": UniformPrior(0.0, 0.8),
+        "logzsol": UniformPrior(-1.0, 0.2),
+    },
+)
+
+def noise_fn(flux):
+    return 0.08 * abs(flux)
+
+data = SEDDataset(filters.names, observed_flux, observed_sigma, flux_unit="maggies")
+problem = Problem(
+    backend=backend,
+    parameters=priors,
+    data=data,
+    likelihood=Gaussian(),
+    filters=filters,
+)
+
+result = fit(
+    problem,
+    method=Diffusion(epochs=200, batch_size=2048, num_samples=512, steps=64, device="auto"),
+    training=Simulate(
+        n=100_000,
+        noise_fn=noise_fn,
+        infer=["zred", "log10_mass"],
+        feature_transform="abmag",
+    ),
+    seed=7,
+)
+
+samples = result.samples
+```
+
+For a presampled forward model, simulation, or empirical labeled catalog, do
+not declare a fictitious `Problem`:
+
+```python
+from composed import MAF, SBITrainingSet, train_sbi
+
+training = SBITrainingSet.from_arrays(
+    theta_train,
+    x_train,
+    theta_names=["zred", "log10_mass"],
+    x_names=list(filters.names),
+    source="presampled_forward_model_v2",
+)
+posterior = train_sbi(training, MAF(epochs=200, batch_size=2048, device="auto"), seed=7)
+samples = posterior.sample(x_obs, num_samples=512)
+```
+
+See `docs/photometric_sbi_quickstart.md` and
+`examples/minimal_photometric_diffusion_sbi.py`. Sample-only methods such as
+diffusion return `InferenceResult.logp=None` and do not invent a MAP estimate.
+
+## SBI diagnostics
+
+`inftools.diagnostics` provides estimator-agnostic checks for posterior samples.
+It expects samples in object-first order:
+
+```python
+samples.shape == (n_objects, n_samples, n_parameters)
+```
+
+The diagnostics compute posterior summaries, rank statistics, marginal coverage
+curves, and prediction-vs-truth plots.  They can sample any estimator exposing
+`sample(x_obs, num_samples=...)`, or they can consume precomputed posterior
+samples directly.
+
+```python
+from inftools.diagnostics import run_sbi_diagnostics
+
+diagnostics = run_sbi_diagnostics(
+    posterior_samples=samples,
+    theta_true=theta_true,
+    theta_names=["z", "log10_mass"],
+    output_dir="runs/sbi_check",
+)
+```
+
+TARP diagnostics are optional and require the external `tarp` package.  Normal
+rank and coverage diagnostics do not require torch, nflows, or TARP.  See
+`docs/sbi_diagnostics.md` and `examples/sbi_diagnostics_demo.py`.
+
+## Experimental conditional diffusion SBI
+
+`inftools.experimental.diffusion` ports the masked conditional diffusion idea
+used in the development notebooks into a generic array-based estimator.  It
+learns a joint feature vector such as:
+
+```text
+[magnitudes, optional magnitude_errors, physical_parameters]
+```
+
+The mask convention is:
+
+```python
+mask == True   # known / conditioned / clamped
+mask == False  # unknown / sampled
+```
+
+Known entries are reclamped at every reverse-diffusion step.  This lets the
+same trained model sample `parameters | photometry`, `photometry | parameters`,
+or mixed inpainting problems.
+
+```python
+import numpy as np
+
+from inftools.experimental.diffusion import ConditionalDiffusionEstimator, FeatureMetadata
+
+meta = FeatureMetadata.from_groups({
+    "mags": ["g", "r"],
+    "params": ["z", "log10_mass"],
+})
+
+estimator = ConditionalDiffusionEstimator(meta, model="mlp", hidden_features=64, device="auto")
+estimator.fit(
+    x_train,
+    mask_config={"unknown_fraction": {"mags": 0.0, "params": 1.0}},
+    epochs=20,
+    batch_size=128,
+)
+
+known = np.array([[g_obs, r_obs, np.nan, np.nan]])
+mask = np.array([[True, True, False, False]])
+samples = estimator.sample(known, mask, num_samples=512, steps=50)
+```
+
+This path requires torch and is explicitly experimental.  It does not call
+CompoSED backends by itself; feed it a precomputed training table from a
+forward model, simulation campaign, or empirical labeled dataset.  See
+`docs/experimental_diffusion_sbi.md` and
+`examples/experimental_diffusion_sbi_demo.py`.  `device="auto"` tries CUDA,
+then MPS, then CPU, validates a tiny float32 workload before training, and keeps
+diffusion tensors in float32 to avoid Apple MPS float64 failures.
 
 ## Catalog-scale fitting
 
@@ -315,30 +475,63 @@ single-object fitting function across a catalog with serial, thread, or process
 execution. For process execution, build fragile backend state such as FSPS or
 CIGALE inside the worker function rather than trying to pickle a live backend.
 
-## Saving and plotting inference runs
+## One fitting workflow
 
-The intended fitting pipeline is:
-
-1. declare a backend, parameter space, and likelihood;
-2. declare the observed `SEDDataset` and/or `SpectrumDataset`;
-3. run a sampler;
-4. normalize the sampler output;
-5. save the result;
-6. make diagnostic plots.
+The public fitting path composes backend, ordered priors, data, likelihood, and
+sampler in one explicit `Problem`. The object exposes the three statistical
+quantities separately: `log_prior`, `log_likelihood`, and `log_posterior`.
 
 ```python
-from composed import normalize_sampling_result, save_inference_result
-from composed.plot import (
-    plot_corner_hexbin,
-    plot_posterior_predictive_sed,
-    plot_traces,
+import numpy as np
+
+from composed import (
+    Emcee,
+    Gaussian,
+    ParameterSpace,
+    Problem,
+    SEDDataset,
+    UniformPrior,
+    MassNormalization,
+    fit,
+    save_inference_result,
+)
+from composed.backends.base import ModelPhotometry, SEDBackend
+from composed.filters import FilterSet
+from composed.plot import plot_corner_hexbin, plot_posterior_predictive_sed, plot_traces
+
+class LinearBackend(SEDBackend):
+    mass_normalization = MassNormalization.ABSOLUTE
+
+    def predict_photometry(self, params, filters):
+        amplitude = params["amplitude"]
+        return ModelPhotometry(filters.names, np.asarray([amplitude, 2.0 * amplitude]))
+
+filters = FilterSet(("g", "r"))
+backend = LinearBackend()
+parameters = ParameterSpace(
+    names=("amplitude",),
+    priors={"amplitude": UniformPrior(0.0, 5.0)},
+)
+data = SEDDataset(
+    band_names=filters.names,
+    flux=np.asarray([1.0, 2.0]),
+    sigma=np.asarray([0.1, 0.2]),
+    flux_unit="maggies",
+    metadata={"filters": filters},
+)
+problem = Problem(
+    backend=backend,
+    parameters=parameters,
+    data=data,
+    filters=filters,
+    likelihood=Gaussian(),
 )
 
-raw = run_mixed_tamis(posterior, parameter_space, ...)
-result = normalize_sampling_result(
-    raw,
-    parameter_space,
-    sampler_name="mixed_tamis",
+result = fit(
+    problem,
+    sampler=Emcee(nwalkers=32, nsteps=1000, burnin=200),
+    x0=np.asarray([1.0]),
+    seed=42,
 )
 save_inference_result(result, "runs/object_001")
 
@@ -347,11 +540,15 @@ plot_traces(result)
 plot_posterior_predictive_sed(
     result,
     backend,
-    parameter_space,
-    photometry=dataset,
+    parameters,
+    photometry=data,
     filters=filters,
 )
 ```
+
+`parameter_transform` is the auditable physical bridge from sampled values to
+backend inputs, for example from `tau_gyr` and an age fraction to FSPS tabular
+SFH arrays. It may be omitted when parameter names already match the backend.
 
 `InferenceResult.weights` are always normalized. MCMC-like outputs use uniform
 weights by default, while grid/TAMIS-style outputs use `weights_norm` from the

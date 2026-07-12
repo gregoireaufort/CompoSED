@@ -48,6 +48,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed.provenance import require_provenance, save_npz_with_provenance
+
 from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
@@ -109,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cue-data-dir",
         type=Path,
-        default=Path(os.environ.get("CUE_DATA_DIR", "/private/tmp/cue/src/cue/data")),
+        default=(Path(os.environ["CUE_DATA_DIR"]) if os.environ.get("CUE_DATA_DIR") else None),
     )
     parser.add_argument("--jax-platform", choices=("auto", "cpu", "cuda", "gpu", "mps", "metal"), default="auto")
     parser.add_argument("--precision", choices=("auto", "float64", "float32"), default="auto")
@@ -119,6 +121,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.stage in {"fit", "benchmark", "all"} and args.cue_data_dir is None:
+        raise ValueError("Cue stages require --cue-data-dir or the CUE_DATA_DIR environment variable.")
 
     if args.stage in {"mock", "all"}:
         generate_cigale_mock(args)
@@ -162,8 +167,10 @@ def generate_cigale_mock(args: argparse.Namespace) -> None:
     check_sigma_vector(sigma)
 
     output_path = args.output_dir / MOCK_FILE
-    np.savez(
+    save_npz_with_provenance(
         output_path,
+        seed=args.seed,
+        extra={"stage": "mock", "generator": "CIGALE BC03 + nebular + dust"},
         rest_wave_a=wave_rest_a,
         rest_luminosity_lsun_per_a=luminosity_lsun_per_a,
         noiseless_flux_maggies=noiseless_flux,
@@ -245,7 +252,9 @@ def fit_with_jaxcigale_cue(args: argparse.Namespace) -> None:
     from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
-    mock = np.load(args.output_dir / MOCK_FILE, allow_pickle=True)
+    mock_path = args.output_dir / MOCK_FILE
+    require_provenance(mock_path)
+    mock = np.load(mock_path, allow_pickle=True)
     filters = make_jax_filter_set(JaxFilterSet)
     parameter_space = make_fit_parameter_space(JaxParameterSpace, UniformJaxPrior)
     fixed_parameters = fixed_jaxcigale_parameters()
@@ -332,8 +341,11 @@ def fit_with_jaxcigale_cue(args: argparse.Namespace) -> None:
     summary = summarize_samples(reported_samples, reported_names, reported_truth)
 
     output_path = args.output_dir / FIT_FILE
-    np.savez(
+    save_npz_with_provenance(
         output_path,
+        seed=args.seed + 100,
+        provenance_paths={"mock_photometry": args.output_dir / MOCK_FILE},
+        extra={"stage": "fit", "fitter": "JAX-CIGALE DSPS + Cue + NumPyro NUTS"},
         samples=reported_samples,
         theta_names=np.asarray(reported_names),
         true_theta=reported_truth,
@@ -423,7 +435,9 @@ def benchmark_jaxcigale_timing(args: argparse.Namespace) -> None:
     from composed.experimental.jaxcigale.dependencies import require_jax
 
     jax, jnp = require_jax()
-    mock = np.load(args.output_dir / MOCK_FILE, allow_pickle=True)
+    mock_path = args.output_dir / MOCK_FILE
+    require_provenance(mock_path)
+    mock = np.load(mock_path, allow_pickle=True)
     data = GaussianPhotometricData(mock["observed_flux_maggies"], mock["sigma_maggies"])
     theta = jnp.asarray(np.asarray(mock["true_theta_for_fit"], dtype=float))
     filters = make_jax_filter_set(JaxFilterSet)
@@ -882,10 +896,12 @@ def make_audit_plots(output_dir: Path) -> None:
     if not mock_path.exists():
         raise FileNotFoundError(f"Missing mock file: {mock_path}")
 
+    require_provenance(mock_path)
     mock = np.load(mock_path, allow_pickle=True)
     plot_mock_spectrum(output_dir, mock)
 
     if fit_path.exists():
+        require_provenance(fit_path)
         fit = np.load(fit_path, allow_pickle=True)
         plot_photometry_fit(output_dir, mock, fit)
         plot_posterior_summary(output_dir, fit)
@@ -977,6 +993,7 @@ def maggies_to_ab(flux_maggies: np.ndarray) -> np.ndarray:
 
 
 def output_path_to_np(path: Path):
+    require_provenance(path)
     return np.load(path, allow_pickle=True)
 
 

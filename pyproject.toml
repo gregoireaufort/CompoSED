@@ -62,6 +62,13 @@ sbi = [
   "nflows",
   "scikit-learn",
 ]
+diffusion = [
+  "torch",
+]
+diagnostics-extra = [
+  "matplotlib",
+  "tarp",
+]
 jaxcigale = [
   "jax==0.4.38",
   "jaxlib==0.4.38",
@@ -77,6 +84,7 @@ all = [
   "torch",
   "nflows",
   "scikit-learn",
+  "tarp",
   "jax==0.4.38",
   "jaxlib==0.4.38",
   "dsps",

@@ -45,6 +45,7 @@ from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
 )
+from composed.provenance import require_provenance, save_npz_with_provenance
 
 LSUN_CGS = 3.828e33
 LSUN_W = 3.828e26
@@ -98,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cue-data-dir",
         type=Path,
-        default=Path(os.environ.get("CUE_DATA_DIR", "/private/tmp/cue/src/cue/data")),
+        default=Path(os.environ["CUE_DATA_DIR"]) if os.environ.get("CUE_DATA_DIR") else None,
     )
     return parser.parse_args()
 
@@ -110,6 +111,8 @@ def main() -> None:
     draws = load_or_create_draws(args.output_dir / "parameter_draws.json")
 
     if args.stage in {"all", "dsps-cue"}:
+        if args.cue_data_dir is None:
+            raise ValueError("Set CUE_DATA_DIR or pass --cue-data-dir for the DSPS+Cue stage.")
         run_dsps_cue_stage(draws, args)
     if args.stage in {"all", "references"}:
         run_reference_stage(draws, args)
@@ -193,8 +196,10 @@ def run_dsps_cue_stage(draws: list[dict[str, float]], args: argparse.Namespace) 
         phot.append(photometry_from_rest_spectrum(REST_WAVE_A, total_lum * mass, draw["z"]))
         print(f"  DSPS+Cue {draw['label']}")
 
-    np.savez(
+    save_npz_with_provenance(
         args.output_dir / "dsps_cue_spectra.npz",
+        provenance_paths={"ssp_file": ssp_file, "cue_data_dir": args.cue_data_dir},
+        extra={"validation": "dsps_plus_cue_nebular_spectra"},
         rest_wave_nm=REST_WAVE_NM,
         stellar_lsun_per_a=np.asarray(stellar),
         nebular_lsun_per_a=np.asarray(nebular),
@@ -255,8 +260,9 @@ def run_reference_stage(draws: list[dict[str, float]], args: argparse.Namespace)
     except Exception as exc:
         print("Direct FSPS reference skipped:", repr(exc))
 
-    np.savez(
+    save_npz_with_provenance(
         args.output_dir / "reference_spectra.npz",
+        extra={"validation": "cigale_fsps_nebular_reference_spectra"},
         rest_wave_nm=REST_WAVE_NM,
         cigale_stellar_lsun_per_a=cigale_stellar,
         cigale_total_lsun_per_a=cigale_total,
@@ -271,9 +277,15 @@ def run_reference_stage(draws: list[dict[str, float]], args: argparse.Namespace)
 
 def make_plots_and_summary(output_dir: Path) -> None:
     draws = json.loads((output_dir / "parameter_draws.json").read_text())
-    dsps = np.load(output_dir / "dsps_cue_spectra.npz", allow_pickle=True)
+    dsps_path = output_dir / "dsps_cue_spectra.npz"
+    require_provenance(dsps_path)
+    dsps = np.load(dsps_path, allow_pickle=True)
     ref_path = output_dir / "reference_spectra.npz"
-    ref = np.load(ref_path, allow_pickle=True) if ref_path.exists() else None
+    if ref_path.exists():
+        require_provenance(ref_path)
+        ref = np.load(ref_path, allow_pickle=True)
+    else:
+        ref = None
 
     rest_wave_nm = dsps["rest_wave_nm"]
     dsps_total = dsps["total_lsun_per_a"]

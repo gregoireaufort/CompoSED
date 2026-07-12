@@ -39,7 +39,7 @@ MODULE_PARAMETERS = {
     },
 }
 
-FILTER_NAMES = ["sdss.u", "sdss.g", "sdss.r"]
+FILTER_NAMES = ["sdss.up", "sdss.gp", "sdss.rp"]
 
 GALAXY_PARAMETERS = {
     "log10_mass": 10.0,

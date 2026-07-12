@@ -115,8 +115,17 @@ def collect_run_provenance(
     """
 
     root = _find_repo_root(Path(repo_root).resolve() if repo_root is not None else Path.cwd())
+    normalized_paths = _normalize_paths(paths)
+    # These resources directly define the DSPS+Cue model and are small enough
+    # to hash. SPS_HOME is recorded as an environment value but is not hashed
+    # recursively because a full FSPS installation can contain many files.
+    for env_name in ("DSPS_CONTINUUM_SSP_FILE", "CUE_DATA_DIR"):
+        env_path = os.environ.get(env_name)
+        if env_path and env_name not in normalized_paths:
+            normalized_paths[env_name] = Path(env_path)
+
     artifacts = {}
-    for label, path in _normalize_paths(paths).items():
+    for label, path in normalized_paths.items():
         artifacts[label] = artifact_provenance(path, max_files=max_directory_files)
 
     return {
@@ -183,13 +192,15 @@ def save_npz_with_provenance(
     seed: int | None = None,
     command_args: Sequence[str] | Mapping[str, Any] | None = None,
     extra: Mapping[str, Any] | None = None,
+    compressed: bool = False,
     **arrays,
 ) -> tuple[Path, Path]:
     """Save a NumPy archive and a provenance sidecar next to it."""
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(path, **arrays)
+    save = np.savez_compressed if compressed else np.savez
+    save(path, **arrays)
     if provenance is None:
         provenance = collect_run_provenance(
             paths=provenance_paths,

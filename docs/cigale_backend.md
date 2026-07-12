@@ -27,7 +27,8 @@ redshifting the spectrum.
 Two photometry modes are supported:
 
 - `photometry_mode="cigale"`: `filters` should contain native CIGALE filter
-  names such as `"sdss.u"`; the backend calls `sed.compute_fnu`.
+  names such as `"sdss.up"`; the backend calls `sed.compute_fnu`. CIGALE
+  v2022.0 uses the primed SDSS names `sdss.up/gp/rp/ip/zp`.
 - `photometry_mode="sedpy"`: `filters` should contain sedpy filter objects;
   the backend converts CIGALE `fnu` to `f_lambda` and integrates with sedpy.
 - `photometry_mode="auto"` chooses native CIGALE mode when all filters are

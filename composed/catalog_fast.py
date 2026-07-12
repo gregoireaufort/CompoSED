@@ -17,9 +17,12 @@ from composed.catalog import (
 )
 from composed.data import SEDDataset
 from composed.filters import FilterSet
+from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import MassNormalization
 
 MJY_PER_MAGGIE = 3631.0e3
+AB_ZERO_FNU_W_M2_HZ = 3631.0e-26
+C_NM_PER_S = 299_792_458.0e9
 PARSEC_M = 3.085677581491367e16
 
 
@@ -58,8 +61,11 @@ def save_restframe_spectral_grid(grid: RestFrameSpectralGrid, path: str | Path) 
     """
 
     path = Path(path)
-    np.savez_compressed(
+    save_npz_with_provenance(
         path,
+        compressed=True,
+        provenance_paths=grid.meta.get("provenance_paths"),
+        extra={"artifact_type": "RestFrameSpectralGrid", "grid_meta": grid.meta},
         wavelength_nm=np.asarray(grid.wavelength_nm, dtype=float),
         luminosity_w_per_nm=np.asarray(grid.luminosity_w_per_nm, dtype=float),
         samples=np.asarray(grid.samples, dtype=float),
@@ -71,10 +77,23 @@ def save_restframe_spectral_grid(grid: RestFrameSpectralGrid, path: str | Path) 
     )
 
 
-def load_restframe_spectral_grid(path: str | Path) -> RestFrameSpectralGrid:
+def load_restframe_spectral_grid(
+    path: str | Path,
+    *,
+    require_provenance_sidecar: bool = False,
+) -> RestFrameSpectralGrid:
     """Load a rest-frame spectral grid saved by ``save_restframe_spectral_grid``."""
 
-    data = np.load(Path(path), allow_pickle=True)
+    path = Path(path)
+    provenance = None
+    if require_provenance_sidecar:
+        provenance = require_provenance(path)
+    elif provenance_path_for(path).exists():
+        provenance = read_provenance(provenance_path_for(path))
+    data = np.load(path, allow_pickle=True)
+    meta = _decode_saved_meta(data["meta"].item()) if "meta" in data.files else {}
+    if provenance is not None:
+        meta["provenance"] = provenance
     return RestFrameSpectralGrid(
         wavelength_nm=np.asarray(data["wavelength_nm"], dtype=float),
         luminosity_w_per_nm=np.asarray(data["luminosity_w_per_nm"], dtype=float),
@@ -83,7 +102,7 @@ def load_restframe_spectral_grid(path: str | Path) -> RestFrameSpectralGrid:
         valid=np.asarray(data["valid"], dtype=bool),
         parameter_names=tuple(str(name) for name in data["parameter_names"]),
         mass_normalization=MassNormalization(str(data["mass_normalization"].item())),
-        meta=_decode_saved_meta(data["meta"].item()) if "meta" in data.files else {},
+        meta=meta,
     )
 
 
@@ -116,6 +135,7 @@ class NativeCatalogFitResult:
     rest_grid: RestFrameSpectralGrid
     redshifts: np.ndarray
     redshift_values: np.ndarray
+    evaluated_redshifts: np.ndarray
     profile_logp: np.ndarray
     profile_weights_norm: np.ndarray
     profile_map_indices: np.ndarray
@@ -208,14 +228,22 @@ def build_redshift_filter_operator(
     *,
     igm_model: str | Callable[[np.ndarray, float], np.ndarray] | None = "cigale",
     luminosity_distance_m: float | None = None,
+    cosmology=None,
 ) -> RedshiftFilterOperator:
     """Build one linear redshift/filter operator.
 
-    For CIGALE filter names, CIGALE's own filter database and luminosity
-    distance convention are used.  For tabulated filter objects, the object must
-    expose ``wavelength_nm``/``transmission`` or CIGALE-like ``wl``/``tr``
-    arrays.  Tabulated transmissions are interpreted with the same CIGALE-style
-    normalization convention as native filters.
+    CIGALE filter names and CIGALE ``wl``/``tr`` objects contain a kernel that
+    is already normalized to produce mJy when integrated against ``f_lambda``.
+    Ordinary tabulated transmission curves are instead integrated with the AB
+    photon-counting convention
+
+    ``<f_nu> = integral(lambda T f_lambda d lambda) /
+    (c integral(T / lambda d lambda))``.
+
+    Generic ``wavelength`` arrays must declare ``wavelength_unit``.  Sedpy
+    filters are recognized as Angstrom-valued photon-response curves.  The
+    default cosmology is Astropy Planck18 and never depends on whether CIGALE
+    happens to be importable.
     """
 
     wave_rest = _validate_wavelength_nm(wavelength_nm)
@@ -223,22 +251,54 @@ def build_redshift_filter_operator(
     if not np.isfinite(z) or z < 0.0:
         raise ValueError("redshift must be finite and non-negative.")
     filter_set = filters if isinstance(filters, FilterSet) else FilterSet(tuple(filters))
-    d_l_m = _luminosity_distance_m(z) if luminosity_distance_m is None else float(luminosity_distance_m)
+    d_l_m = (
+        _luminosity_distance_m(z, cosmology=cosmology)
+        if luminosity_distance_m is None
+        else float(luminosity_distance_m)
+    )
     if not np.isfinite(d_l_m) or d_l_m <= 0.0:
         raise ValueError("luminosity_distance_m must be finite and positive.")
 
     wave_obs = wave_rest * (1.0 + z)
     igm = _igm_transmission(wave_obs, z, igm_model)
     trapz_weights = _trapezoid_weights(wave_rest)
+    observed_trapz_weights = (1.0 + z) * trapz_weights
 
     matrix = np.full((len(filter_set), wave_rest.size), np.nan, dtype=float)
     valid_bands = np.zeros(len(filter_set), dtype=bool)
     for i, filter_obj in enumerate(filter_set.filters):
-        filt_wave, filt_trans = _filter_curve_nm(filter_obj)
+        filt_wave, filt_trans, response_kind = _filter_curve_nm(filter_obj)
         if wave_obs[0] > filt_wave[0] or wave_obs[-1] < filt_wave[-1]:
             continue
         trans_on_model = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
-        row = trapz_weights * trans_on_model * igm / (4.0 * np.pi * d_l_m**2) / MJY_PER_MAGGIE
+        if response_kind == "cigale_mjy_kernel":
+            row = trapz_weights * trans_on_model * igm / (4.0 * np.pi * d_l_m**2) / MJY_PER_MAGGIE
+        elif response_kind == "photon":
+            # Use the same quadrature grid for numerator and denominator. This
+            # makes a flat f_nu spectrum exactly invariant under the operator
+            # up to floating-point precision, including on coarse model grids.
+            denominator = C_NM_PER_S * np.sum(observed_trapz_weights * trans_on_model / wave_obs)
+            if not np.isfinite(denominator) or denominator <= 0.0:
+                raise ValueError(f"Filter {filter_set.names[i]!r} has zero or invalid AB normalization.")
+            row = (
+                trapz_weights
+                * wave_obs
+                * trans_on_model
+                * igm
+                / (4.0 * np.pi * d_l_m**2 * denominator * AB_ZERO_FNU_W_M2_HZ)
+            )
+        elif response_kind == "energy":
+            denominator = C_NM_PER_S * np.sum(observed_trapz_weights * trans_on_model / wave_obs**2)
+            if not np.isfinite(denominator) or denominator <= 0.0:
+                raise ValueError(f"Filter {filter_set.names[i]!r} has zero or invalid AB normalization.")
+            row = (
+                trapz_weights
+                * trans_on_model
+                * igm
+                / (4.0 * np.pi * d_l_m**2 * denominator * AB_ZERO_FNU_W_M2_HZ)
+            )
+        else:  # pragma: no cover - guarded by _filter_curve_nm.
+            raise ValueError(f"Unsupported filter response kind {response_kind!r}.")
         if np.all(np.isfinite(row)):
             matrix[i] = row
             valid_bands[i] = True
@@ -253,6 +313,7 @@ def build_redshift_filter_operator(
             "output_unit": "maggies",
             "igm_model": None if igm_model is None else str(igm_model),
             "luminosity_distance_m": d_l_m,
+            "cosmology": _cosmology_label(cosmology),
         },
     )
 
@@ -264,6 +325,7 @@ def project_rest_grid_to_photometric_grid(
     age_parameter: str | None = "age",
     age_unit: str = "Myr",
     reject_older_than_universe: bool = True,
+    cosmology=None,
 ) -> PhotometricModelGrid:
     """Project a rest-frame spectral grid into observed photometry at one z."""
 
@@ -282,6 +344,7 @@ def project_rest_grid_to_photometric_grid(
         age_parameter=age_parameter,
         age_unit=age_unit,
         reject=reject_older_than_universe,
+        cosmology=cosmology,
     )
     return PhotometricModelGrid(
         samples=rest_grid.samples,
@@ -305,8 +368,9 @@ def fit_catalog_with_restframe_grid(
     redshifts: Sequence[float],
     filters: FilterSet | Sequence[object],
     *,
-    redshift_decimals: int | None = 2,
+    redshift_decimals: int | None = None,
     igm_model: str | Callable[[np.ndarray, float], np.ndarray] | None = "cigale",
+    cosmology=None,
     sigma_floor: float | None = None,
     log10_mass_grid: Sequence[float] | None = None,
     log10_mass_bounds: tuple[float, float] | None = None,
@@ -329,6 +393,13 @@ def fit_catalog_with_restframe_grid(
     if not np.all(np.isfinite(z)) or np.any(z < 0.0):
         raise ValueError("redshifts must be finite and non-negative.")
     z_eval = np.round(z, int(redshift_decimals)) if redshift_decimals is not None else z
+    rounded_to_zero = (z > 0.0) & (z_eval <= 0.0)
+    if np.any(rounded_to_zero):
+        bad = np.where(rounded_to_zero)[0]
+        raise ValueError(
+            "Redshift rounding mapped positive observed redshift(s) to zero, which would invoke the 10 pc convention. "
+            f"Use redshift_decimals=None or more precision. Object indices: {bad.tolist()}"
+        )
 
     n_objects = len(datasets)
     n_models = rest_grid.samples.shape[0]
@@ -346,7 +417,13 @@ def fit_catalog_with_restframe_grid(
     operators = {}
     for z_value in np.unique(z_eval):
         rows = np.where(z_eval == z_value)[0]
-        operator = build_redshift_filter_operator(rest_grid.wavelength_nm, filters, float(z_value), igm_model=igm_model)
+        operator = build_redshift_filter_operator(
+            rest_grid.wavelength_nm,
+            filters,
+            float(z_value),
+            igm_model=igm_model,
+            cosmology=cosmology,
+        )
         operators[float(z_value)] = operator
         phot_grid = project_rest_grid_to_photometric_grid(
             rest_grid,
@@ -354,6 +431,7 @@ def fit_catalog_with_restframe_grid(
             age_parameter=age_parameter,
             age_unit=age_unit,
             reject_older_than_universe=reject_older_than_universe,
+            cosmology=cosmology,
         )
         result = evaluate_catalog_model_grid_likelihood(
             phot_grid,
@@ -395,8 +473,9 @@ def fit_catalog_with_restframe_grid(
 
     return NativeCatalogFitResult(
         rest_grid=rest_grid,
-        redshifts=z_eval,
+        redshifts=z,
         redshift_values=np.unique(z_eval),
+        evaluated_redshifts=z_eval,
         profile_logp=profile_logp,
         profile_weights_norm=profile_weights,
         profile_map_indices=profile_map_indices,
@@ -414,6 +493,9 @@ def fit_catalog_with_restframe_grid(
         meta={
             "mode": "native_rest_grid_projection",
             "redshift_decimals": redshift_decimals,
+            "input_redshifts": z.copy(),
+            "evaluated_redshifts": z_eval.copy(),
+            "cosmology": _cosmology_label(cosmology),
             "operators_by_redshift": operators,
             "sigma_floor": sigma_floor,
         },
@@ -466,7 +548,7 @@ def _coerce_rest_spectrum_to_w_per_nm(model: ModelSpectrum) -> tuple[np.ndarray,
     return wave, lum
 
 
-def _filter_curve_nm(filter_obj) -> tuple[np.ndarray, np.ndarray]:
+def _filter_curve_nm(filter_obj) -> tuple[np.ndarray, np.ndarray, str]:
     if isinstance(filter_obj, str):
         if filter_obj.startswith("line."):
             raise NotImplementedError(
@@ -478,17 +560,31 @@ def _filter_curve_nm(filter_obj) -> tuple[np.ndarray, np.ndarray]:
             raise ImportError("CIGALE filter names require pcigale to be installed.") from exc
         with Database("filters") as db:
             filt = db.get(name=filter_obj)
-        return _validate_wavelength_nm(filt.wl), np.asarray(filt.tr, dtype=float)
+        return _validate_wavelength_nm(filt.wl), np.asarray(filt.tr, dtype=float), "cigale_mjy_kernel"
 
     if hasattr(filter_obj, "wavelength_nm"):
         wave = np.asarray(filter_obj.wavelength_nm, dtype=float)
+        response_kind = str(getattr(filter_obj, "response_type", "photon")).lower()
     elif hasattr(filter_obj, "wl"):
         wave = np.asarray(filter_obj.wl, dtype=float)
+        response_kind = "cigale_mjy_kernel"
     elif hasattr(filter_obj, "wavelength"):
         wave = np.asarray(filter_obj.wavelength, dtype=float)
-        unit = str(getattr(filter_obj, "wavelength_unit", "nm")).lower()
+        module_name = type(filter_obj).__module__
+        if hasattr(filter_obj, "wavelength_unit"):
+            unit = str(filter_obj.wavelength_unit).lower()
+        elif module_name.startswith("sedpy.") or hasattr(filter_obj, "ab_zero_counts"):
+            unit = "angstrom"
+        else:
+            raise ValueError(
+                "Generic filter objects exposing wavelength must also declare wavelength_unit; "
+                "use wavelength_nm for an unambiguous nm curve."
+            )
         if unit in {"angstrom", "a", "aa"}:
             wave = wave / 10.0
+        elif unit != "nm":
+            raise ValueError(f"Unsupported filter wavelength unit {unit!r}; expected nm or Angstrom.")
+        response_kind = str(getattr(filter_obj, "response_type", "photon")).lower()
     else:
         raise ValueError("Filter objects must expose wavelength_nm, wavelength, or wl.")
 
@@ -502,7 +598,11 @@ def _filter_curve_nm(filter_obj) -> tuple[np.ndarray, np.ndarray]:
     wave = _validate_wavelength_nm(wave)
     if trans.shape != wave.shape or not np.all(np.isfinite(trans)):
         raise ValueError("Filter transmission must be finite and match the wavelength shape.")
-    return wave, trans
+    if np.any(trans < 0.0):
+        raise ValueError("Filter transmission must be non-negative.")
+    if response_kind not in {"photon", "energy", "cigale_mjy_kernel"}:
+        raise ValueError("Filter response_type must be 'photon' or 'energy'.")
+    return wave, trans, response_kind
 
 
 def _trapezoid_weights(x: np.ndarray) -> np.ndarray:
@@ -535,17 +635,28 @@ def _igm_transmission(
     return trans
 
 
-def _luminosity_distance_m(redshift: float) -> float:
+def _default_cosmology():
+    try:
+        from astropy.cosmology import Planck18
+    except ImportError as exc:  # pragma: no cover - astropy is a core dependency.
+        raise ImportError("Fast catalog projection requires astropy for its default Planck18 cosmology.") from exc
+    return Planck18
+
+
+def _cosmology_label(cosmology) -> str:
+    cosmo = _default_cosmology() if cosmology is None else cosmology
+    return str(getattr(cosmo, "name", type(cosmo).__name__))
+
+
+def _luminosity_distance_m(redshift: float, *, cosmology=None) -> float:
     if redshift <= 0.0:
         return 10.0 * PARSEC_M
+    cosmo = _default_cosmology() if cosmology is None else cosmology
+    distance = cosmo.luminosity_distance(float(redshift))
     try:
-        from pcigale.utils.cosmology import luminosity_distance
-
-        return float(luminosity_distance(float(redshift)))
-    except ImportError:
-        from astropy.cosmology import Planck18
-
-        return float(Planck18.luminosity_distance(float(redshift)).to("m").value)
+        return float(distance.to("m").value)
+    except AttributeError:
+        return float(distance)
 
 
 def _age_validity_mask(
@@ -555,6 +666,7 @@ def _age_validity_mask(
     age_parameter: str | None,
     age_unit: str,
     reject: bool,
+    cosmology=None,
 ) -> np.ndarray:
     if not reject or age_parameter is None or age_parameter not in rest_grid.parameter_names:
         return np.ones(rest_grid.samples.shape[0], dtype=bool)
@@ -566,18 +678,16 @@ def _age_validity_mask(
         age_myr = 1000.0 * age
     else:
         raise ValueError("age_unit must be 'Myr' or 'Gyr'.")
-    return age_myr <= _age_universe_myr(redshift)
+    return age_myr <= _age_universe_myr(redshift, cosmology=cosmology)
 
 
-def _age_universe_myr(redshift: float) -> float:
+def _age_universe_myr(redshift: float, *, cosmology=None) -> float:
+    cosmo = _default_cosmology() if cosmology is None else cosmology
+    age = cosmo.age(float(redshift))
     try:
-        from pcigale.utils.cosmology import age
-
-        return float(age(float(redshift)))
-    except ImportError:
-        from astropy.cosmology import Planck18
-
-        return float(Planck18.age(float(redshift)).to("Myr").value)
+        return float(age.to("Myr").value)
+    except AttributeError:
+        return float(age)
 
 
 __all__ = [

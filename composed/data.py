@@ -5,6 +5,12 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from composed.units import (
+    canonical_photometric_flux_unit,
+    canonical_spectral_flux_unit,
+    canonical_wavelength_unit,
+)
+
 
 @dataclass
 class SEDDataset:
@@ -37,6 +43,7 @@ class SEDDataset:
     upper_limit: np.ndarray | None = None
     upper_limit_mask: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    flux_unit: str = "maggies"
 
     def __post_init__(self) -> None:
         self.band_names = tuple(str(name) for name in self.band_names)
@@ -48,6 +55,8 @@ class SEDDataset:
             raise ValueError("flux and sigma must be one-dimensional arrays.")
         if len(self.band_names) != self.flux.size:
             raise ValueError("band_names length must match flux length.")
+        if len(set(self.band_names)) != len(self.band_names):
+            raise ValueError("SEDDataset band_names must be unique; duplicate bands would be counted twice.")
         if self.mask is not None:
             self.mask = np.asarray(self.mask, dtype=bool)
             if self.mask.shape != self.flux.shape:
@@ -69,6 +78,7 @@ class SEDDataset:
         if not np.all(np.isfinite(self.upper_limit[self.upper_limit_mask])):
             raise ValueError("Active upper_limit values must be finite.")
         self.metadata = dict(self.metadata)
+        self.flux_unit = canonical_photometric_flux_unit(self.flux_unit)
         if not np.any(self.active_mask):
             raise ValueError(
                 "SEDDataset requires at least one active band: a finite detection or finite upper limit "
@@ -162,8 +172,13 @@ class SpectrumDataset:
             self.mask = np.asarray(self.mask, dtype=bool)
             if self.mask.shape != self.flux.shape:
                 raise ValueError("mask must have the same shape as flux.")
-        self.wavelength_unit = str(self.wavelength_unit)
-        self.flux_unit = str(self.flux_unit)
+        self.wavelength_unit = canonical_wavelength_unit(self.wavelength_unit)
+        self.flux_unit = canonical_spectral_flux_unit(self.flux_unit)
+        if self.wavelength_unit != "angstrom" or self.flux_unit != "erg/s/cm^2/angstrom":
+            raise ValueError(
+                "SpectrumDataset currently requires observed wavelength in Angstrom and f_lambda in "
+                "erg/s/cm^2/angstrom; convert explicitly before likelihood evaluation."
+            )
         self.metadata = dict(self.metadata)
         if not np.any(self.active_mask):
             raise ValueError(
@@ -196,3 +211,17 @@ class SpectrumDataset:
     def active_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         idx = self.active_indices
         return self.wavelength[idx], self.flux[idx], self.sigma[idx], idx
+
+
+@dataclass(frozen=True)
+class SpectroPhotometricDataset:
+    """Photometry, spectroscopy, or both for one physical object."""
+
+    photometry: SEDDataset | None = None
+    spectrum: SpectrumDataset | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.photometry is None and self.spectrum is None:
+            raise ValueError("SpectroPhotometricDataset requires photometry, spectrum, or both.")
+        object.__setattr__(self, "metadata", dict(self.metadata))

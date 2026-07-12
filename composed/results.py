@@ -6,8 +6,11 @@ from typing import Any, Mapping, Sequence
 import json
 
 import numpy as np
-
 from composed.provenance import collect_run_provenance
+
+
+class InferenceFailure(RuntimeError):
+    """Raised when a sampler produced no scientifically usable posterior state."""
 
 
 @dataclass
@@ -16,11 +19,15 @@ class InferenceResult:
 
     ``weights`` are always stored as a normalized one-dimensional array. MCMC
     runs normally use uniform weights; grid and importance-sampling runs should
-    pass their posterior weights explicitly.
+    pass their posterior weights explicitly. ``logp`` may be ``None`` for
+    sample-only approximations such as conditional diffusion. In that case no
+    MAP estimate is invented. ``inference_state`` can hold an in-memory trained
+    guide or neural estimator and is intentionally not serialized by the
+    generic result writer.
     """
 
     samples: np.ndarray
-    logp: np.ndarray
+    logp: np.ndarray | None
     weights: np.ndarray
     parameter_names: Sequence[str]
     sampler_name: str = "unknown"
@@ -28,23 +35,35 @@ class InferenceResult:
     posterior_median: np.ndarray | None = None
     chain: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    inference_state: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         samples = np.asarray(self.samples, dtype=float)
         if samples.ndim != 2:
             raise ValueError("InferenceResult.samples must have shape (n_sample, n_parameter).")
-        logp = np.asarray(self.logp, dtype=float)
-        if logp.shape != (samples.shape[0],):
+        logp = None if self.logp is None else np.asarray(self.logp, dtype=float)
+        if logp is not None and logp.shape != (samples.shape[0],):
             raise ValueError(f"logp has shape {logp.shape}; expected {(samples.shape[0],)}.")
         weights = _normalize_weights(self.weights, samples.shape[0])
         names = tuple(str(name) for name in self.parameter_names)
         if len(names) != samples.shape[1]:
             raise ValueError("parameter_names length must match samples.shape[1].")
 
-        if self.map_estimate is None:
-            finite = np.isfinite(logp)
-            map_estimate = samples[int(np.nanargmax(np.where(finite, logp, -np.inf)))]
+        if logp is None:
+            map_estimate = None
         else:
+            finite = np.isfinite(logp)
+            if not np.any(finite):
+                raise InferenceFailure(
+                    "Inference produced no finite log-probability sample; MAP and summaries are undefined."
+                )
+            if np.any(np.isnan(logp)) or np.any(np.isposinf(logp)):
+                raise ValueError("logp may contain finite values or -inf, but not NaN or +inf.")
+            if np.any((~finite) & (weights > 0.0)):
+                raise ValueError("Samples with non-finite logp must have zero posterior weight.")
+            map_estimate = samples[int(np.nanargmax(np.where(finite, logp, -np.inf)))]
+
+        if self.map_estimate is not None:
             map_estimate = np.asarray(self.map_estimate, dtype=float)
             if map_estimate.shape != (samples.shape[1],):
                 raise ValueError("map_estimate must have shape (n_parameter,).")
@@ -130,7 +149,10 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, quantiles) -> np.
     return out
 
 
-def posterior_summary(result: InferenceResult, credible_interval: float = 0.68) -> dict[str, dict[str, float]]:
+def posterior_summary(
+    result: InferenceResult,
+    credible_interval: float = 0.68,
+) -> dict[str, dict[str, float | None]]:
     """Return weighted median and central credible interval per parameter."""
 
     if not 0.0 < credible_interval < 1.0:
@@ -144,7 +166,7 @@ def posterior_summary(result: InferenceResult, credible_interval: float = 0.68) 
             "q_lo": float(q[j, 0]),
             "median": float(q[j, 1]),
             "q_hi": float(q[j, 2]),
-            "map": float(result.map_estimate[j]),
+            "map": None if result.map_estimate is None else float(result.map_estimate[j]),
         }
     return summary
 
@@ -166,12 +188,14 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
     )
     arrays = {
         "samples": result.samples,
-        "logp": result.logp,
         "weights": result.weights,
         "parameter_names": np.asarray(result.parameter_names, dtype=str),
-        "map_estimate": result.map_estimate,
         "posterior_median": result.posterior_median,
     }
+    if result.logp is not None:
+        arrays["logp"] = result.logp
+    if result.map_estimate is not None:
+        arrays["map_estimate"] = result.map_estimate
     if result.chain is not None:
         arrays["chain"] = result.chain
     npz_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +223,7 @@ def load_inference_result(path: str | Path) -> InferenceResult:
     payload = json.loads(json_path.read_text()) if json_path.exists() else {}
     return InferenceResult(
         samples=arrays["samples"],
-        logp=arrays["logp"],
+        logp=arrays.get("logp"),
         weights=arrays["weights"],
         parameter_names=tuple(str(name) for name in arrays["parameter_names"]),
         sampler_name=payload.get("sampler_name", "unknown"),
@@ -228,8 +252,15 @@ def _weighted_quantile_1d(values: np.ndarray, weights: np.ndarray, quantiles: np
     order = np.argsort(values)
     values = values[order]
     weights = weights[order]
-    cdf = np.cumsum(weights)
-    return np.interp(np.atleast_1d(quantiles), cdf, values)
+    positive = weights > 0.0
+    values = values[positive]
+    weights = weights[positive]
+    if values.size == 0:
+        raise ValueError("Weighted quantile requires at least one positive weight.")
+    if values.size == 1:
+        return np.full(np.atleast_1d(quantiles).shape, values[0], dtype=float)
+    cdf = (np.cumsum(weights) - 0.5 * weights) / np.sum(weights)
+    return np.interp(np.atleast_1d(quantiles), cdf, values, left=values[0], right=values[-1])
 
 
 def _result_paths(path: str | Path) -> tuple[Path, Path]:

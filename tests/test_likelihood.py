@@ -5,7 +5,7 @@ from composed.backends.mock import MockBackend
 from composed.data import SEDDataset
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
-from composed.priors import DeltaPrior, UniformPrior
+from composed.priors import DeltaPrior, NormalPrior, UniformPrior
 from composed.units import MassNormalization
 
 
@@ -24,6 +24,20 @@ def test_gaussian_likelihood_value_for_mock_backend():
     resid = np.array([-1.0, 1.0])
     expected = -0.5 * (np.sum(resid**2) + np.sum(np.log(2.0 * np.pi * data.sigma**2)))
     assert np.isclose(like.log_prob(theta), expected)
+
+
+def test_prior_likelihood_and_posterior_are_separate_terms():
+    data = SEDDataset(["g"], flux=np.asarray([1.0]), sigma=np.asarray([0.2]))
+    backend = MockBackend([1.0], band_names=["g"])
+    space = ParameterSpace(["z"], {"z": NormalPrior(0.0, 2.0)})
+    model = GaussianPhotometricLikelihood(backend, data, space)
+
+    log_like = loglike_no_residual([0.2])
+    log_prior = NormalPrior(0.0, 2.0).logpdf(0.0)
+    assert model.log_likelihood([0.0]) == pytest.approx(log_like)
+    assert model.log_prior([0.0]) == pytest.approx(log_prior)
+    assert model.log_posterior([0.0]) == pytest.approx(log_like + log_prior)
+    assert model.log_prob([0.0]) == pytest.approx(model.log_posterior([0.0]))
 
 
 def test_mass_scaling_only_for_per_solar_mass_backend():
@@ -85,6 +99,26 @@ def test_masked_bands_excluded_from_flux_and_sigma():
     assert np.allclose(sigma, [2.0])
     assert np.allclose(idx, [1])
     assert bands == ("g",)
+
+
+def test_duplicate_observed_band_names_are_rejected():
+    with pytest.raises(ValueError, match="unique"):
+        SEDDataset(["g", "g"], flux=np.asarray([1.0, 1.0]), sigma=np.asarray([0.1, 0.1]))
+
+
+def test_photometric_units_are_converted_to_dataset_units():
+    data = SEDDataset(["g"], flux=np.asarray([3631.0]), sigma=np.asarray([1.0]), flux_unit="jy")
+    backend = MockBackend([1.0], band_names=["g"])
+    space = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+
+    assert GaussianPhotometricLikelihood(backend, data, space).log_likelihood([0.0]) == pytest.approx(
+        loglike_no_residual([1.0])
+    )
+
+
+def test_unknown_photometric_unit_is_rejected():
+    with pytest.raises(ValueError, match="Unsupported photometric flux unit"):
+        SEDDataset(["g"], flux=np.asarray([1.0]), sigma=np.asarray([0.1]), flux_unit="bananas")
 
 
 def test_all_masked_photometry_raises_clear_error():

@@ -33,12 +33,12 @@ def run_pocomc(
     run_kwargs: Optional[Dict[str, Any]] = None,
 ) -> SamplingResult:
     """
-    Run pocoMC on a Posterior and return a SamplingResult.
+    Run pocoMC using a separately declared likelihood and sampler prior.
 
     Parameters
     ----------
     posterior : Posterior
-        Contains log_prob_fn(theta) -> log p(theta | data), and dim.
+        Must provide ``log_likelihood_fn`` in addition to ``log_prob_fn``.
     bounds : sequence of (low, high), optional
         If `prior` is not provided, build a uniform prior over these bounds for
         each dimension using scipy.stats.uniform.
@@ -56,7 +56,8 @@ def run_pocomc(
     * If you pass `bounds`, this uses a **flat prior** in that box. The
       resulting evidence is then for that uniform prior, which is usually fine
       for toy problems.
-    * The posterior shape is correct up to a constant either way.
+    ``posterior.log_prob_fn`` is never passed as the likelihood: doing so would
+    apply the prior twice and corrupt both posterior shape and evidence.
     """
     if not _HAS_POCOMC:
         raise ImportError(
@@ -70,6 +71,11 @@ def run_pocomc(
         run_kwargs = {}
 
     dim = posterior.dim
+    if posterior.log_likelihood_fn is None:
+        raise ValueError(
+            "run_pocomc requires Posterior.log_likelihood_fn so the sampler prior is applied exactly once. "
+            "Build the Posterior with composed.runners.build_inftools_posterior or provide the callback explicitly."
+        )
 
     # 1) Build prior if not provided
     if prior is None:
@@ -85,10 +91,11 @@ def run_pocomc(
 
         prior = pc.Prior(dists)
 
-    # 2) Vectorized log-likelihood wrapper around Posterior.log_prob_fn
+    # 2) Vectorized data likelihood. The pc.Prior supplied above is the sole
+    # prior used by pocoMC.
     def log_likelihood(x: np.ndarray) -> np.ndarray:
         x = np.atleast_2d(x)
-        return np.array([posterior.log_prob_fn(theta) for theta in x])
+        return np.array([posterior.log_likelihood_fn(theta) for theta in x])
 
     # 3) Build and run the pocoMC sampler
     sampler = pc.Sampler(
@@ -110,8 +117,8 @@ def run_pocomc(
     w = weights / np.sum(weights)
     ess = 1.0 / np.sum(w**2)
 
-    # MAP in IS sense: max weight
-    map_idx = np.argmax(w)
+    # MAP is maximum posterior density, not maximum importance weight.
+    map_idx = np.argmax(logpost)
     theta_map = samples[map_idx]
 
     cov = _weighted_cov(samples, w)

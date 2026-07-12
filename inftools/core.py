@@ -27,6 +27,8 @@ class Posterior:
     dim: int
     theta_names: Optional[Sequence[str]] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+    log_likelihood_fn: Optional[LogProbFn] = None
+    log_prior_fn: Optional[LogProbFn] = None
 
 
 @dataclass

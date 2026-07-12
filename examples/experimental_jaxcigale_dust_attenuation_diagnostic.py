@@ -11,9 +11,7 @@ bookkeeping:
 
 The intended run environment is the JAX/DSPS environment:
 
-    PYTHONPATH=/Users/gregoire/Documents/Sedfitting/CompoSED \
-    /Users/gregoire/miniforge3/envs/dsps_nuts/bin/python \
-        examples/experimental_jaxcigale_dust_attenuation_diagnostic.py
+    python examples/experimental_jaxcigale_dust_attenuation_diagnostic.py
 """
 
 from __future__ import annotations

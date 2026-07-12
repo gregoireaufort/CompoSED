@@ -179,6 +179,68 @@ def test_sedpy_shape_mismatch_raises_clear_error(monkeypatch):
         )
 
 
+def test_per_call_fsps_parameters_reset_to_constructor_baseline(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    reused_population = FakeStellarPopulation()
+    backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
+    backend._sp = reused_population
+    common = {
+        "z": 0.0,
+        "tabular_time_gyr": [0.0, 1.0],
+        "tabular_sfr_msun_per_yr": [1.0, 1.0],
+    }
+
+    backend.predict_rest_spectrum({**common, "dust2": 2.0})
+    after_omission = backend.predict_rest_spectrum(common)
+
+    fresh = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
+    fresh._sp = FakeStellarPopulation()
+    fresh_result = fresh.predict_rest_spectrum(common)
+
+    assert np.allclose(after_omission.flux, fresh_result.flux)
+    assert reused_population.params["dust2"] == 0.0
+
+
+def test_any_valid_python_fsps_parameter_is_forwarded(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
+    backend._sp = FakeStellarPopulation()
+    backend.predict_rest_spectrum(
+        {
+            "z": 0.0,
+            "imf_type": 1,
+            "dust_type": 2,
+            "tabular_time_gyr": [0.0, 1.0],
+            "tabular_sfr_msun_per_yr": [1.0, 1.0],
+        }
+    )
+
+    assert backend._sp.params["imf_type"] == 1
+    assert backend._sp.params["dust_type"] == 2
+
+
+def test_unknown_fsps_parameter_raises_instead_of_being_ignored(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(mass_normalization=MassNormalization.ABSOLUTE, cosmology=FakeCosmology(age_gyr=20.0))
+    backend._sp = FakeStellarPopulation()
+
+    with pytest.raises(ValueError, match="valid python-fsps parameters"):
+        backend.predict_rest_spectrum(
+            {
+                "z": 0.0,
+                "parameter_that_fsps_does_not_have": 1.0,
+                "tabular_time_gyr": [0.0, 1.0],
+                "tabular_sfr_msun_per_yr": [1.0, 1.0],
+            }
+        )
+
+
 @pytest.mark.fsps
 def test_real_fsps_integration_smoke():
     if not os.environ.get("SPS_HOME"):
@@ -203,9 +265,45 @@ def test_real_fsps_integration_smoke():
     assert np.all(np.isfinite(phot.flux))
 
 
+@pytest.mark.fsps
+def test_real_fsps_reused_backend_matches_fresh_backend_after_parameter_omission():
+    if not os.environ.get("SPS_HOME"):
+        pytest.skip("SPS_HOME is not configured.")
+    pytest.importorskip("fsps")
+    pytest.importorskip("sedpy")
+    from sedpy.observate import load_filters
+
+    filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
+    common = {
+        "zred": 0.1,
+        "tabular_time_gyr": [0.01, 1.0, 5.0],
+        "tabular_sfr_msun_per_yr": [1.0, 1.0, 0.2],
+    }
+    reused = FSPSBackend(sp_kwargs={"add_neb_emission": False})
+    reused.predict_photometry({**common, "dust2": 1.5}, filters)
+    after_omission = reused.predict_photometry(common, filters)
+    fresh = FSPSBackend(sp_kwargs={"add_neb_emission": False}).predict_photometry(common, filters)
+
+    assert np.allclose(after_omission.flux, fresh.flux, rtol=1.0e-12, atol=0.0)
+
+
 class FakeStellarPopulation:
     def __init__(self):
-        self.params = {}
+        self.params = FakeParameterSet(
+            {
+                "zred": 0.0,
+                "logzsol": 0.0,
+                "dust2": 0.0,
+                "dust1": 0.0,
+                "dust_index": 0.0,
+                "gas_logz": 0.0,
+                "gas_logu": -2.0,
+                "fagn": 0.0,
+                "agn_tau": 10.0,
+                "imf_type": 2,
+                "dust_type": 0,
+            }
+        )
         self.tabular_sfh = None
 
     def set_tabular_sfh(self, time_gyr, sfr):
@@ -214,7 +312,14 @@ class FakeStellarPopulation:
     def get_spectrum(self, tage, peraa=True):
         assert peraa is True
         assert tage > 0.0
-        return np.array([1000.0, 2000.0, 3000.0]), np.array([1.0, 2.0, 1.0])
+        amplitude = 1.0 + float(self.params["dust2"])
+        return np.array([1000.0, 2000.0, 3000.0]), amplitude * np.array([1.0, 2.0, 1.0])
+
+
+class FakeParameterSet(dict):
+    @property
+    def all_params(self):
+        return list(self.keys())
 
 
 class FakeQuantity:
