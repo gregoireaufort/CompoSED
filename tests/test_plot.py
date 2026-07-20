@@ -42,6 +42,60 @@ def test_corner_hexbin_and_trace_plots_return_figures():
     fig2.canvas.draw()
 
 
+def test_corner_hexbin_handles_sparse_importance_weights():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_corner_hexbin
+
+    result = _toy_result()
+    result.weights = np.asarray([1.0, 0.0, 0.0, 0.0])
+    fig, axes = plot_corner_hexbin(result, max_points=4)
+
+    assert axes.shape == (2, 2)
+    fig.canvas.draw()
+
+
+def test_corner_hexbin_overlays_weighted_comparison_on_shared_axes():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_corner_hexbin
+
+    rng = np.random.default_rng(12)
+    primary_samples = rng.normal(size=(500, 2))
+    comparison_samples = rng.normal(loc=(0.4, -0.3), scale=(0.7, 1.2), size=(600, 2))
+    primary = InferenceResult(
+        samples=primary_samples,
+        logp=None,
+        weights=np.ones(500),
+        parameter_names=("z", "log10_mass"),
+        sampler_name="maf",
+    )
+    comparison = InferenceResult(
+        samples=comparison_samples,
+        logp=None,
+        weights=np.linspace(1.0, 2.0, 600),
+        parameter_names=("z", "log10_mass"),
+        sampler_name="reference",
+    )
+
+    fig, axes = plot_corner_hexbin(
+        primary,
+        comparison_result=comparison,
+        result_label="MAF",
+        comparison_label="reference MC",
+        max_points=500,
+        gridsize=20,
+    )
+
+    assert axes.shape == (2, 2)
+    assert axes[0, 0].get_xlim() == pytest.approx(axes[1, 0].get_xlim())
+    assert {"MAF", "reference MC"} <= set(axes[0, 0].get_legend_handles_labels()[1])
+    assert len(axes[1, 0].collections) >= 2
+    fig.canvas.draw()
+
+
 def test_posterior_predictive_sed_plots_photometry_and_spectrum():
     import matplotlib
 

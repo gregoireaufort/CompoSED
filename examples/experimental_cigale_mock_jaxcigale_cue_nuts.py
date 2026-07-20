@@ -48,6 +48,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.provenance import require_provenance, save_npz_with_provenance
 
 from composed.experimental.jaxcigale.ssp_data import (
@@ -1018,7 +1019,7 @@ def check_sigma_vector(sigma: np.ndarray) -> None:
 def trapezoid(y, x):
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
-    return np.trapz(y, x)
+    return trapezoid(y, x)
 
 
 if __name__ == "__main__":

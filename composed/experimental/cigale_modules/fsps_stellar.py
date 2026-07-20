@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from composed._numerics import trapezoid
 from pcigale.sed_modules import SedModule
 
 from composed.experimental.cigale_fsps_stellar_conventions import (
@@ -247,7 +248,7 @@ def _integrated_luminosity(spec_w_per_nm, wave_nm, max_wave_nm=None):
             return 0.0
         wave_nm = wave_nm[use]
         spec_w_per_nm = spec_w_per_nm[use]
-    return float(np.trapz(spec_w_per_nm, wave_nm))
+    return float(trapezoid(spec_w_per_nm, wave_nm))
 
 
 def _ionizing_photon_rate(wave_nm, spec_w_per_nm):
@@ -258,7 +259,7 @@ def _ionizing_photon_rate(wave_nm, spec_w_per_nm):
         return 0.0
     wave_m = wave_nm[use] * 1.0e-9
     photons_per_s_per_nm = spec_w_per_nm[use] * wave_m / (H_J_S * C_M_S)
-    return float(np.trapz(photons_per_s_per_nm, wave_nm[use]))
+    return float(trapezoid(photons_per_s_per_nm, wave_nm[use]))
 
 
 def _formed_mass_weighted_age_myr(sfh_msun_per_yr):

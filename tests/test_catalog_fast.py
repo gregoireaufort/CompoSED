@@ -23,7 +23,7 @@ from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
 from composed.provenance import provenance_path_for
-from composed.units import MassNormalization
+from composed.units import MassNormalization, MassReference
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,7 @@ class FixedDistanceCosmology:
 @dataclass
 class ToyRestBackend(SEDBackend):
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
 
     def predict_rest_spectrum(self, params, wavelengths=None, wavelength_range=None):
         template = int(round(float(params["template"])))
@@ -202,6 +203,7 @@ def test_restframe_grid_save_load_roundtrip(tmp_path):
 
     assert loaded.parameter_names == rest_grid.parameter_names
     assert loaded.mass_normalization == rest_grid.mass_normalization
+    assert loaded.mass_reference == MassReference.SURVIVING_STELLAR_MASS
     assert loaded.meta["purpose"] == "roundtrip test"
     assert np.allclose(loaded.wavelength_nm, rest_grid.wavelength_nm)
     assert np.allclose(loaded.luminosity_w_per_nm, rest_grid.luminosity_w_per_nm)
@@ -211,6 +213,25 @@ def test_restframe_grid_save_load_roundtrip(tmp_path):
     assert provenance_path_for(path).exists()
     locked = load_restframe_spectral_grid(path, require_provenance_sidecar=True)
     assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
+    assert locked.meta["provenance"]["extra"]["mass_convention"] == "composed.mass.surviving_stellar.v1"
+
+
+def test_legacy_formed_mass_rest_grid_is_rejected(tmp_path):
+    path = tmp_path / "legacy_rest_grid.npz"
+    np.savez(
+        path,
+        wavelength_nm=np.asarray([400.0, 500.0]),
+        luminosity_w_per_nm=np.ones((1, 2)),
+        samples=np.zeros((1, 1)),
+        log_prior=np.zeros(1),
+        valid=np.ones(1, dtype=bool),
+        parameter_names=np.asarray(["template"], dtype=object),
+        mass_normalization=np.asarray(MassNormalization.PER_SOLAR_MASS.value, dtype=object),
+        meta=np.asarray("{}", dtype=object),
+    )
+
+    with pytest.raises(ValueError, match="Legacy rest-frame spectral grid"):
+        load_restframe_spectral_grid(path)
 
 
 @pytest.mark.cigale

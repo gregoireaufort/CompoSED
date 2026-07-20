@@ -6,8 +6,62 @@ import numpy as np
 
 
 class MassNormalization(str, Enum):
+    """Whether backend outputs still require an explicit mass amplitude.
+
+    ``PER_SOLAR_MASS`` means per one solar mass of present-day surviving
+    stellar mass. Backends may use formed mass internally, but must convert
+    their output to this reference before returning it.
+    """
+
     PER_SOLAR_MASS = "per_solar_mass"
     ABSOLUTE = "absolute"
+
+
+class MassReference(str, Enum):
+    """Physical mass represented by a per-solar-mass model normalization."""
+
+    SURVIVING_STELLAR_MASS = "surviving_stellar_mass"
+    FORMED_MASS = "formed_mass"
+
+
+MASS_CONVENTION_SCHEMA = "composed.mass.surviving_stellar.v1"
+
+
+def validate_mass_reference(
+    mass_normalization: MassNormalization | str,
+    mass_reference: MassReference | str | None,
+) -> MassReference | None:
+    """Validate the public mass-amplitude convention.
+
+    Absolute model outputs have no separate mass reference. Per-mass outputs
+    must be normalized by surviving stellar mass; formed-mass outputs are
+    deliberately rejected so ``log10_mass`` cannot silently change meaning.
+    """
+
+    normalization = MassNormalization(mass_normalization)
+    if normalization == MassNormalization.ABSOLUTE:
+        return None
+    if mass_reference is None:
+        raise ValueError(
+            "A PER_SOLAR_MASS backend or model grid must declare mass_reference="
+            "MassReference.SURVIVING_STELLAR_MASS."
+        )
+    reference = MassReference(mass_reference)
+    if reference != MassReference.SURVIVING_STELLAR_MASS:
+        raise ValueError(
+            "CompoSED log10_mass denotes present-day surviving stellar mass, but "
+            f"the model declares mass_reference={reference.value!r}."
+        )
+    return reference
+
+
+def backend_mass_reference(backend: object) -> MassReference | None:
+    """Return and validate the mass reference declared by a backend."""
+
+    normalization = getattr(backend, "mass_normalization", None)
+    if normalization is None:
+        raise ValueError("Backend must declare mass_normalization.")
+    return validate_mass_reference(normalization, getattr(backend, "mass_reference", None))
 
 
 LSUN_CGS = 3.828e33

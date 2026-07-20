@@ -6,7 +6,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
-from composed.units import MassNormalization
+from composed.units import MassNormalization, MassReference
 
 
 @dataclass
@@ -18,6 +18,7 @@ class MockBackend(SEDBackend):
     spectrum_wavelength: Sequence[float] | None = None
     spectrum_flux: Sequence[float] | None = None
     mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+    mass_reference: MassReference | None = MassReference.SURVIVING_STELLAR_MASS
     fail_on_call: bool = False
 
     def predict_photometry(self, params: Mapping[str, float], filters) -> ModelPhotometry:

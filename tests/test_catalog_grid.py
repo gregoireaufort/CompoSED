@@ -18,7 +18,7 @@ from composed.backends.base import ModelPhotometry, SEDBackend
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
-from composed.units import MassNormalization
+from composed.units import MassNormalization, MassReference
 from composed.provenance import provenance_path_for
 
 
@@ -38,6 +38,7 @@ class TemplateBackend(SEDBackend):
 @dataclass
 class PerMassBackend(SEDBackend):
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
 
     def predict_photometry(self, params, filters):
         del params, filters
@@ -47,6 +48,7 @@ class PerMassBackend(SEDBackend):
 @dataclass
 class PerMassTemplateBackend(SEDBackend):
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
 
     def predict_photometry(self, params, filters):
         del filters
@@ -237,6 +239,7 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert loaded.parameter_names == grid.parameter_names
     assert loaded.band_names == grid.band_names
     assert loaded.mass_normalization == MassNormalization.PER_SOLAR_MASS
+    assert loaded.mass_reference == MassReference.SURVIVING_STELLAR_MASS
     assert np.allclose(loaded.samples, grid.samples)
     assert np.allclose(loaded.flux, grid.flux)
     assert np.allclose(loaded.log_prior, grid.log_prior)
@@ -244,6 +247,26 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert provenance_path_for(path).exists()
     locked = load_photometric_model_grid(path, require_provenance_sidecar=True)
     assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
+    assert locked.meta["provenance"]["extra"]["mass_convention"] == "composed.mass.surviving_stellar.v1"
+
+
+def test_legacy_formed_mass_photometric_grid_is_rejected(tmp_path):
+    path = tmp_path / "legacy_grid.npz"
+    np.savez(
+        path,
+        samples=np.zeros((1, 1)),
+        flux=np.ones((1, 1)),
+        log_prior=np.zeros(1),
+        valid=np.ones(1, dtype=bool),
+        parameter_names=np.asarray(["template"], dtype=object),
+        band_names=np.asarray(["g"], dtype=object),
+        mass_normalization=np.asarray(MassNormalization.PER_SOLAR_MASS.value, dtype=object),
+        flux_unit=np.asarray("maggies", dtype=object),
+        meta=np.asarray("{}", dtype=object),
+    )
+
+    with pytest.raises(ValueError, match="Legacy photometric model grid"):
+        load_photometric_model_grid(path)
 
 
 def test_mass_grid_profiles_complete_upper_limit_likelihood():

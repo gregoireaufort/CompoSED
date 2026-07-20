@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from composed.parameters import ParameterSpace
+from composed.priors import LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
 from inftools.core import Posterior
 import inftools.pocomc_adapter as adapter
 
@@ -51,3 +53,26 @@ def test_pocomc_rejects_posterior_without_separate_likelihood(monkeypatch):
 
     with pytest.raises(ValueError, match="log_likelihood_fn"):
         adapter.run_pocomc(posterior, prior=object())
+
+
+def test_pocomc_prior_translates_continuous_parameter_space(monkeypatch):
+    if adapter.uniform is None:
+        pytest.skip("pocomc/scipy prior distributions are not installed.")
+    monkeypatch.setattr(adapter, "_HAS_POCOMC", True)
+    monkeypatch.setattr(adapter, "pc", SimpleNamespace(Prior=lambda distributions: distributions))
+    parameter_space = ParameterSpace(
+        ["u", "logu", "normal", "student"],
+        {
+            "u": UniformPrior(-1.0, 2.0),
+            "logu": LogUniformPrior(0.1, 10.0),
+            "normal": NormalPrior(3.0, 0.5),
+            "student": StudentTPrior(2.0, 0.0, 0.3),
+        },
+    )
+
+    distributions = adapter.pocomc_prior_from_parameter_space(parameter_space)
+    assert len(distributions) == 4
+    assert np.isfinite(distributions[0].logpdf(0.0))
+    assert np.isfinite(distributions[1].logpdf(1.0))
+    assert np.isclose(distributions[2].mean(), 3.0)
+    assert np.isfinite(distributions[3].logpdf(0.0))

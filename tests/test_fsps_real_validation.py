@@ -30,3 +30,5 @@ def test_validate_fsps_backend_against_direct_calculation():
     result = run_validation(DEFAULT_FILTER_NAMES)
     assert result["max_relative_flux_difference"] <= 1e-10
     assert result["max_ab_magnitude_difference"] <= 1e-8
+    assert 0.0 < result["photometry"].metadata["surviving_stellar_mass_fraction"] <= 1.0
+    assert result["photometry"].metadata["mass_reference"] == "surviving_stellar_mass"

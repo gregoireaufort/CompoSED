@@ -1,55 +1,78 @@
-# Photometric SBI Quickstart
+# Photometric MAF SBI Quickstart
 
-This is the short experiment pattern for a catalog-scale photometric SBI run.
-The point is not to hide the model; it is to keep the notebook organized around
-scientific steps.
+The stable CompoSED `0.1` SBI path trains a conditional masked autoregressive
+flow for physical parameters given measured photometry and its uncertainty:
 
-## Minimal Pipeline
+```text
+q(theta | measured flux, sigma)
+```
+
+The training simulator and observed object use the same `Problem`, active-band
+mask, flux units, mass normalization, and context encoding.
+
+## Simulate And Fit One Problem
 
 ```python
 from composed import (
-    Diffusion, Gaussian, ParameterSpace, Problem, SEDDataset, Simulate,
-    UniformPrior, fit, load_filter_set,
+    Gaussian,
+    MAF,
+    ParameterSpace,
+    PhotometricContext,
+    Problem,
+    SEDDataset,
+    Simulate,
+    UniformPrior,
+    fit,
 )
 
-filters = load_filter_set(["sdss_u0", "sdss_g0", "sdss_r0", "sdss_i0", "sdss_z0"])
-
-priors = ParameterSpace(
+parameters = ParameterSpace(
     names=["zred", "log10_mass", "dust2", "logzsol"],
     priors={
-        "zred": UniformPrior(0.05, 1.5),
-        "log10_mass": UniformPrior(8.0, 11.5),
-        "dust2": UniformPrior(0.0, 0.8),
+        "zred": UniformPrior(0.05, 2.0),
+        "log10_mass": UniformPrior(8.0, 12.0),
+        "dust2": UniformPrior(0.0, 1.0),
         "logzsol": UniformPrior(-1.0, 0.2),
     },
 )
 
-def noise_fn(flux):
-    return 0.08 * abs(flux)
-
 data = SEDDataset(
     band_names=filters.names,
-    flux=observed_flux,
-    sigma=observed_sigma,
+    flux=observed_flux_maggies,
+    sigma=observed_sigma_maggies,
     flux_unit="maggies",
 )
 
 problem = Problem(
     backend=backend,
-    parameters=priors,
+    parameters=parameters,
     data=data,
     likelihood=Gaussian(),
     filters=filters,
 )
 
+def noise_fn(noiseless_flux):
+    sigma_floor = 1.0e-12
+    fractional_error = 0.08
+    return sigma_floor + fractional_error * abs(noiseless_flux)
+
 result = fit(
     problem,
-    method=Diffusion(epochs=200, batch_size=2048, num_samples=512, steps=64, device="auto"),
+    method=MAF(
+        hidden_features=128,
+        num_transforms=6,
+        epochs=200,
+        batch_size=2048,
+        validation_split=0.1,
+        patience=20,
+        num_samples=512,
+        inference_batch_size=8192,
+        device="auto",
+    ),
     training=Simulate(
         n=100_000,
         noise_fn=noise_fn,
         infer=["zred", "log10_mass"],
-        feature_transform="abmag",
+        context=PhotometricContext("snr_logsigma"),
         n_workers=8,
         batch_size=256,
         executor="process",
@@ -58,72 +81,135 @@ result = fit(
 )
 
 samples = result.samples
+posterior = result.inference_state
+posterior.save("runs/fsps_photoz_maf")
 ```
 
-This route always simulates from the declared `Problem`. It cannot accept an
-unrelated pre-existing training table.
+`samples` has shape `(num_samples, n_parameters)` for the observed object.
+The fitted `UniformPrior` and `LogUniformPrior` bounds are encoded through
+invertible transforms, so the MAF produces physical samples inside prior
+support rather than relying on post-hoc rejection.
 
-## Pre-existing Training Pairs
+## Why The Default Context Uses S/N And Sigma
+
+`PhotometricContext("snr_logsigma")` supplies, in deterministic band order:
+
+```text
+[flux / sigma, log10(sigma / reference_flux)]
+```
+
+Both terms are needed. Signal-to-noise alone loses the absolute flux scale;
+adding sigma makes the original measured flux recoverable. This representation
+also accepts negative noisy fluxes, unlike AB magnitudes or logarithmic flux.
+The default `reference_flux=1` is expressed in the declared dataset flux unit
+and is recorded in the checkpoint schema.
+
+The simulator stores the exact sigma returned by `noise_fn` for every training
+realization. At inference, passing an `SEDDataset` makes the trained posterior
+use `data.active_flux`, `data.active_sigma`, `data.active_band_names`, and
+`data.flux_unit` after checking them against the training schema.
+
+## Reuse On A Catalog
+
+```python
+posterior_samples = posterior.sample(
+    catalog_flux_maggies,
+    sigma=catalog_sigma_maggies,
+    input_units="native",
+    num_samples=128,
+    batch_size=8192,
+    seed=8,
+)
+```
+
+The output shape is `(n_objects, 128, n_parameters)`. Batching occurs over
+objects inside `nflows`; CompoSED does not loop over individual SEDs.
+
+After reloading a checkpoint, the same call is available:
+
+```python
+from composed import TrainedMAFSBI
+
+posterior = TrainedMAFSBI.load("runs/fsps_photoz_maf", device="auto")
+samples = posterior.sample(
+    catalog_flux_maggies,
+    sigma=catalog_sigma_maggies,
+    input_units="native",
+    num_samples=128,
+    batch_size=8192,
+    seed=8,
+)
+```
+
+The checkpoint directory contains:
+
+- `manifest.json`: architecture, parameter and band order, context convention,
+  prior transforms, training history, package versions, and metadata;
+- `standardizers.npz`: theta and context standardization arrays;
+- `weights.pt`: tensor-only nflows state.
+
+The training table is deliberately not copied into the checkpoint.
+
+## Pre-existing Photometry And Labels
 
 A presampled forward model, numerical simulation, or empirical labeled catalog
-is complete in itself and should not be wrapped in a fictitious `Problem`:
+does not require a fictitious backend:
 
 ```python
 from composed import MAF, SBITrainingSet, train_sbi
 
-training = SBITrainingSet.from_arrays(
+training = SBITrainingSet.from_photometry(
     theta_train,
-    x_train,
+    flux_train,
+    sigma_train,
     theta_names=["zred", "log10_mass"],
-    x_names=list(filters.names),
+    band_names=list(filters.names),
     source="presampled_forward_model_v2",
-    finite="drop",
+    parameter_space=parameters,
 )
 
 posterior = train_sbi(
     training,
-    MAF(epochs=200, batch_size=2048, device="auto"),
+    MAF(epochs=200, batch_size=2048, validation_split=0.1, device="auto"),
     seed=7,
 )
-samples = posterior.sample(x_obs, num_samples=512)
+samples = posterior.sample(
+    observed_flux,
+    sigma=observed_sigma,
+    input_units="native",
+    num_samples=512,
+    seed=8,
+)
 ```
 
-## What Happens Scientifically
+Use `SBITrainingSet.from_arrays` instead when `x_train` is already a complete,
+pre-encoded context table.
 
-1. `Problem.parameters` draws physical parameters from the declared priors.
-2. `Problem.simulate` calls the same backend and likelihood simulation path
-   used by deterministic inference, including parameter mapping.
-3. `noise_fn(flux)` defines the Gaussian observational noise in the same flux
-   units as the backend photometry.
-4. The generated active-band fluxes are converted to the selected feature
-   convention, for example `flux`, `log10_flux`, or `abmag`.
-5. The diffusion model trains on the joint vector
-   `[photometry_features, inferred_parameters]`.
-6. For the observed `Problem.data`, photometry coordinates are clamped known
-   and parameter coordinates are sampled.
+## Masks, Upper Limits, And Diagnostics
 
-## Where Masks Enter
+Masked bands are removed consistently from simulated flux, simulated sigma,
+observed flux, and observed sigma. A trained posterior rejects a dataset with a
+different active-band order or flux unit.
 
-The Problem training-set generator uses its `SEDDataset` active-band
-convention. Masked bands are excluded before training. Upper limits require an
-explicit SBI feature encoding and are currently rejected by this convenience
-route rather than silently treated as detections.
+Censored upper limits do not yet have a stable SBI context encoding in `0.1`.
+Problem-driven MAF training and `SEDDataset` posterior sampling reject them
+explicitly rather than treating limits as detections.
 
-The diffusion mask is a different object: it controls which entries in the
-joint vector are known during score-model training and posterior sampling.  The
-default curriculum emphasizes `parameters | photometry`, but also includes
-forward and mixed masks so the model learns more of the joint distribution.
+Run simulation-based calibration on held-out simulations:
 
-## Important Audit Points
+```python
+diagnostics = posterior.diagnostics(
+    posterior_samples,
+    theta_true,
+    x_test=context_test,
+    output_dir="runs/fsps_photoz_maf/diagnostics",
+)
+```
 
-- `problem.specification()` records the backend, priors, mapping, and data model.
-- `backend.predict_photometry(params, filters)` defines the physics.
-- `noise_fn(flux)` defines the training noise model.
-- `feature_transform` defines the units passed to the neural estimator.
-- `infer=[...]` controls which parameters are sampled at inference time.
-- `result.inference_state` is the reusable trained MAF or diffusion estimator.
-- SBI `InferenceResult.logp` and `map_estimate` remain `None` when the method
-  provides samples but no posterior density.
+Prior coverage, simulator fidelity, the training noise distribution, and
+held-out rank/coverage diagnostics are part of the scientific model, not merely
+neural-network tuning details.
 
-For a runnable no-FSPS example, see
-`examples/minimal_photometric_diffusion_sbi.py`.
+For a complete known-posterior regression test, see
+[`maf_validation.md`](maf_validation.md) and run
+`examples/validate_maf_photometric_sbi.py`.

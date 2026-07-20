@@ -6,7 +6,7 @@ from composed.data import SEDDataset
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
 from composed.priors import DeltaPrior, NormalPrior, UniformPrior
-from composed.units import MassNormalization
+from composed.units import MassNormalization, MassReference
 
 
 def loglike_no_residual(sigma):
@@ -71,6 +71,30 @@ def test_missing_log10_mass_for_per_solar_mass_raises_clear_error():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
     with pytest.raises(ValueError, match="log10_mass"):
         GaussianPhotometricLikelihood(backend, data, ps).log_prob([0.5])
+
+
+def test_formed_mass_reference_is_rejected():
+    data = SEDDataset(["g"], flux=np.array([1.0]), sigma=np.array([0.1]))
+    backend = MockBackend([1.0], band_names=["g"], mass_normalization=MassNormalization.PER_SOLAR_MASS)
+    backend.mass_reference = MassReference.FORMED_MASS
+    ps = ParameterSpace(["log10_mass"], {"log10_mass": DeltaPrior(0.0)})
+
+    with pytest.raises(ValueError, match="surviving stellar mass"):
+        GaussianPhotometricLikelihood(backend, data, ps).log_prob([0.0])
+
+
+def test_missing_mass_reference_is_rejected():
+    class UndeclaredPerMassBackend:
+        mass_normalization = MassNormalization.PER_SOLAR_MASS
+
+        def predict_photometry(self, params, filters):
+            del params, filters
+            raise AssertionError("Backend prediction must not run before contract validation.")
+
+    data = SEDDataset(["g"], flux=np.array([1.0]), sigma=np.array([0.1]))
+    ps = ParameterSpace(["log10_mass"], {"log10_mass": DeltaPrior(0.0)})
+    with pytest.raises(ValueError, match="must declare mass_reference"):
+        GaussianPhotometricLikelihood(UndeclaredPerMassBackend(), data, ps).log_prob([0.0])
 
 
 def test_masked_bands_are_ignored():
@@ -278,6 +302,21 @@ def test_simulate_supports_single_and_batched_theta_shapes():
     assert batch.shape == (2, 2)
     assert np.allclose(one, [1.0, 2.0])
     assert np.allclose(batch, [[1.0, 2.0], [1.0, 2.0]])
+
+
+def test_simulator_returns_exact_sigma_when_requested():
+    data = SEDDataset(["g", "r"], flux=[0.0, 0.0], sigma=[1.0, 1.0])
+    backend = MockBackend([1.0, 2.0], band_names=["g", "r"])
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+    like = GaussianPhotometricLikelihood(backend, data, ps)
+
+    flux, sigma = like.simulate_with_uncertainty(
+        [0.5],
+        lambda model_flux: 0.2 * model_flux,
+        rng=np.random.default_rng(4),
+    )
+    assert flux.shape == sigma.shape == (2,)
+    assert np.allclose(sigma, [0.2, 0.4])
 
 
 def test_simulate_uses_noise_fn_and_active_mask():

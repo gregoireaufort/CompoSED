@@ -3,14 +3,15 @@ from __future__ import annotations
 import importlib.util
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, ClassVar, Mapping, Sequence
 
 import numpy as np
 
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.filters import FilterSet
+from composed.sfh import SFHModel, TabularSFH, coerce_sfh_model
 from composed.transforms.sfh import normalize_sfh_to_formed_mass
-from composed.units import LSUN_CGS, MassNormalization, PARSEC_CM
+from composed.units import MASS_CONVENTION_SCHEMA, LSUN_CGS, MassNormalization, MassReference, PARSEC_CM
 
 REDSHIFT_KEYS = ("z", "zred", "redshift")
 FSPS_CONTROL_PARAMETER_KEYS = {
@@ -40,9 +41,13 @@ class FSPSBackend(SEDBackend):
     - ``sedpy.observate.getSED`` integrates that observed spectrum through the
       supplied filters and returns AB magnitudes, which are converted to maggies.
 
-    If ``mass_normalization`` is ``PER_SOLAR_MASS``, the tabular SFH is
-    normalized to one solar mass formed before evaluating FSPS. If it is
-    ``ABSOLUTE``, the SFH normalization is passed through unchanged.
+    If ``mass_normalization`` is ``PER_SOLAR_MASS``, the tabular SFH is first
+    normalized to one solar mass formed. After evaluating FSPS, the spectrum
+    is divided by ``sp.stellar_mass`` for that unit-formed-mass population.
+    Returned fluxes therefore correspond to one solar mass of present-day
+    surviving stellar mass, which is the public meaning of ``log10_mass``.
+    If normalization is ``ABSOLUTE``, the input SFH normalization and FSPS
+    spectrum are passed through unchanged.
 
     The default cosmology is Astropy ``Planck18``. It is used for luminosity
     distances and for rejecting tabular SFH ages that exceed the age of the
@@ -50,8 +55,10 @@ class FSPSBackend(SEDBackend):
     """
 
     sp_kwargs: Mapping[str, Any] | None = None
+    sfh: SFHModel | str | None = None
     cosmology: Any | None = None
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: ClassVar[MassReference] = MassReference.SURVIVING_STELLAR_MASS
     default_z_key: str = "zred"
     age_tolerance_gyr: float = 1e-6
     _sp: Any = field(default=None, init=False, repr=False)
@@ -60,6 +67,16 @@ class FSPSBackend(SEDBackend):
 
     def __post_init__(self) -> None:
         self.mass_normalization = MassNormalization(self.mass_normalization)
+        self.sfh = coerce_sfh_model(self.sfh, backend="fsps")
+        if (
+            self.sfh is not None
+            and not isinstance(self.sfh, TabularSFH)
+            and self.mass_normalization != MassNormalization.PER_SOLAR_MASS
+        ):
+            raise ValueError(
+                "Named parametric FSPS SFHs require MassNormalization.PER_SOLAR_MASS. "
+                "Use TabularSFH or raw tabular parameters for absolute SFH amplitudes."
+            )
         if self.default_z_key not in REDSHIFT_KEYS:
             raise ValueError(f"default_z_key must be one of {REDSHIFT_KEYS}.")
         if float(self.age_tolerance_gyr) < 0.0:
@@ -161,7 +178,7 @@ class FSPSBackend(SEDBackend):
     def _rest_spectrum_from_params(self, params: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         params = dict(params)
         z = self._get_redshift(params)
-        t_gyr, sfr = self._get_tabular_sfh(params)
+        t_gyr, sfr, sfh_metadata = self._get_tabular_sfh(params, z)
         self._validate_tabular_sfh(t_gyr, sfr, z)
 
         if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
@@ -172,6 +189,16 @@ class FSPSBackend(SEDBackend):
 
         sp.set_tabular_sfh(t_gyr, sfr)
         wave_rest_a, llam_lsun_per_a = sp.get_spectrum(tage=float(t_gyr[-1]), peraa=True)
+        mass_metadata = _fsps_population_mass_metadata(
+            sp,
+            required=self.mass_normalization == MassNormalization.PER_SOLAR_MASS,
+        )
+        llam_lsun_per_a = np.asarray(llam_lsun_per_a, dtype=float)
+        if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
+            # The FSPS call above is normalized by formed mass. Dividing by
+            # the surviving mass of that same population changes only the
+            # amplitude reference; the spectral shape is untouched.
+            llam_lsun_per_a = llam_lsun_per_a / mass_metadata["surviving_stellar_mass_msun"]
         metadata = {
             "backend": "fsps",
             "redshift": z,
@@ -179,8 +206,16 @@ class FSPSBackend(SEDBackend):
             "flux_unit": "Lsun/angstrom",
             "spectrum_frame": "rest",
             "mass_normalization": self.mass_normalization.value,
+            "mass_convention": MASS_CONVENTION_SCHEMA,
+            "mass_reference": (
+                self.mass_reference.value
+                if self.mass_normalization == MassNormalization.PER_SOLAR_MASS
+                else None
+            ),
+            "sfh_model": sfh_metadata,
+            **mass_metadata,
         }
-        return wave_rest_a, llam_lsun_per_a, metadata
+        return np.asarray(wave_rest_a, dtype=float), llam_lsun_per_a, metadata
 
     def _stellar_population(self):
         if self._sp is None:
@@ -223,6 +258,8 @@ class FSPSBackend(SEDBackend):
             self._baseline_sp_params = self._snapshot_stellar_population_params(sp)
         baseline = self._baseline_sp_params
         valid_names = set(baseline)
+        sfh_parameter_names = set() if self.sfh is None else set(self.sfh.required_parameters)
+        control_parameter_names = FSPS_CONTROL_PARAMETER_KEYS | sfh_parameter_names
 
         for key in self._last_sp_overrides:
             sp.params[key] = baseline[key]
@@ -232,7 +269,7 @@ class FSPSBackend(SEDBackend):
         overrides = {}
         unknown = []
         for key, value in params.items():
-            if key in FSPS_CONTROL_PARAMETER_KEYS:
+            if key in control_parameter_names:
                 continue
             if key not in valid_names:
                 unknown.append(key)
@@ -265,15 +302,46 @@ class FSPSBackend(SEDBackend):
                 return z
         raise ValueError("Missing redshift parameter. Provide one of: z, zred, redshift.")
 
-    @staticmethod
-    def _get_tabular_sfh(params: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    def _get_tabular_sfh(
+        self,
+        params: Mapping[str, Any],
+        redshift: float,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+        if self.sfh is not None:
+            raw_tabular_keys = {"tabular_time_gyr", "tabular_sfr_msun_per_yr"}
+            unexpected_raw = raw_tabular_keys.intersection(params) - set(self.sfh.required_parameters)
+            if unexpected_raw:
+                names = ", ".join(sorted(unexpected_raw))
+                raise ValueError(
+                    f"FSPSBackend received named SFH {self.sfh.name!r} together with raw "
+                    f"tabular parameter(s): {names}. Use one SFH declaration only."
+                )
+            history = self.sfh.evaluate(
+                params,
+                redshift=float(redshift),
+                cosmology=self._cosmology(),
+            )
+            return (
+                history.time_gyr,
+                history.sfr_msun_per_yr,
+                {**self.sfh.specification(), **history.metadata},
+            )
+
         has_time = "tabular_time_gyr" in params
         has_sfr = "tabular_sfr_msun_per_yr" in params
         if not (has_time and has_sfr):
-            raise ValueError("FSPSBackend requires tabular_time_gyr and tabular_sfr_msun_per_yr parameters.")
+            raise ValueError(
+                "FSPSBackend requires either sfh=<named model> or both "
+                "tabular_time_gyr and tabular_sfr_msun_per_yr parameters."
+            )
         return (
             np.asarray(params["tabular_time_gyr"], dtype=float),
             np.asarray(params["tabular_sfr_msun_per_yr"], dtype=float),
+            {
+                "name": "tabular_parameters",
+                "time_parameter": "tabular_time_gyr",
+                "sfr_parameter": "tabular_sfr_msun_per_yr",
+            },
         )
 
     def _validate_tabular_sfh(self, time_gyr: np.ndarray, sfr_msun_per_yr: np.ndarray, z: float) -> None:
@@ -332,6 +400,42 @@ class FSPSBackend(SEDBackend):
         wave_obs_a = wave_rest_a * (1.0 + z)
         flam_obs = (llam_lsun_per_a * LSUN_CGS) / (4.0 * np.pi * d_l_cm**2 * (1.0 + z))
         return wave_obs_a, flam_obs
+
+
+def _fsps_population_mass_metadata(sp, *, required: bool) -> dict[str, object]:
+    """Read the formed and surviving masses associated with the last FSPS call.
+
+    FSPS spectra inherit the normalization of the input SFH. These values make
+    the internal formed-mass calculation and the public surviving-mass output
+    independently auditable. Whether remnants are included follows the FSPS
+    ``add_stellar_remnants`` setting and is recorded when available.
+    """
+
+    if not hasattr(sp, "formed_mass") or not hasattr(sp, "stellar_mass"):
+        if required:
+            raise FloatingPointError(
+                "FSPS did not expose formed_mass and stellar_mass; cannot normalize "
+                "PER_SOLAR_MASS output by surviving stellar mass."
+            )
+        return {}
+    formed_mass = float(sp.formed_mass)
+    stellar_mass = float(sp.stellar_mass)
+    if not np.isfinite(formed_mass) or formed_mass <= 0.0:
+        raise FloatingPointError("FSPS returned an invalid formed_mass value.")
+    if not np.isfinite(stellar_mass) or stellar_mass <= 0.0:
+        raise FloatingPointError("FSPS returned a non-positive or non-finite stellar_mass value.")
+    includes_remnants = None
+    try:
+        includes_remnants = bool(sp.params["add_stellar_remnants"])
+    except (KeyError, TypeError, AttributeError):
+        pass
+    return {
+        "formed_mass_msun": formed_mass,
+        "surviving_stellar_mass_msun": stellar_mass,
+        "surviving_stellar_mass_fraction": stellar_mass / formed_mass,
+        "output_normalization_divisor_msun": stellar_mass,
+        "stellar_mass_includes_remnants": includes_remnants,
+    }
 
 
 def coerce_filter_set(filters: FilterSet | Sequence[object]) -> FilterSet:

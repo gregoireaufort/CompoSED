@@ -59,3 +59,14 @@ def test_missing_optional_path_is_warning():
 
     assert not check.ok
     assert check.status == "WARN"
+
+
+def test_cigale_check_reports_constant_sfh_numpy_compatibility(monkeypatch):
+    checker = load_checker_module()
+    monkeypatch.setattr(checker, "import_check", lambda *args, **kwargs: checker.Check("pcigale", True, "fake"))
+
+    checks = checker.check_cigale()
+    constant_check = next(check for check in checks if check.name == "CIGALE constant SFH")
+
+    assert constant_check.required is False
+    assert "NumPy" in constant_check.message

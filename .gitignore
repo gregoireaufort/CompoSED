@@ -8,6 +8,8 @@ __pycache__/
 .coverage
 htmlcov/
 *.egg-info/
+build/
+dist/
 
 .venv/
 venv/
@@ -34,6 +36,7 @@ popcosmos_*/
 outputs/
 results/
 external/
+notebooks/tutorials/data/*.provenance.json
 
 # Local manuscript / export scratch artifacts.
 paper/

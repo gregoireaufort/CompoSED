@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,15 @@ version = "0.1.0"
 description = "Composable Bayesian SED fitting and photo-z inference."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["astronomy", "SED fitting", "Bayesian inference", "photometric redshift", "SBI"]
 authors = [
-  { name = "Gregoire" }
+  { name = "Gregoire Aufort" }
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -26,6 +27,12 @@ dependencies = [
   "numpy",
   "astropy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/gregoireaufort/CompoSED"
+Documentation = "https://github.com/gregoireaufort/CompoSED/tree/main/docs"
+Repository = "https://github.com/gregoireaufort/CompoSED"
+Issues = "https://github.com/gregoireaufort/CompoSED/issues"
 
 [project.optional-dependencies]
 dev = [

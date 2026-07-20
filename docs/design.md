@@ -10,7 +10,8 @@
 - `backends/` contains forward-model implementations behind a common interface.
 - `likelihood.py` evaluates backend-agnostic photometric and spectral likelihoods.
 - `problem.py` composes backend, parameter transform, data, likelihood, and sampler-facing callbacks.
-- `transforms/` contains physical or catalog-specific parameter transforms, such as SFH utilities.
+- `sfh.py` contains named, backend-independent SFH equations and their explicit backend adapters.
+- `transforms/` contains lower-level physical or catalog-specific transforms, such as Pop-COSMOS utilities.
 - `runners.py` provides light glue to inference tools.
 
 The likelihood and parameter-space layers should stay small and deterministic. Backend-specific physics belongs in backends or transforms.
@@ -44,19 +45,22 @@ The first-pass spectral contract is intentionally simple and auditable:
   `resolution` raises `NotImplementedError` in the current FSPS and CIGALE
   backends.
 
-Backends must also declare:
+Backends must declare `mass_normalization`. A per-mass backend must additionally
+declare `mass_reference` explicitly; the base class does not supply a default:
 
 ```python
 mass_normalization: MassNormalization
+mass_reference: MassReference
 ```
 
 Backends may use any internal physics library, but they should raise ordinary Python numerical exceptions for invalid model states and return finite model fluxes for valid states.
 
 FSPS and CIGALE are both backend implementations of this same contract. FSPS
-accepts FSPS-ready parameters such as tabular SFHs and forwards ordinary FSPS
-parameters into `python-fsps`. CIGALE accepts an ordered CIGALE module list plus
-module-parameter specifications and calls `pcigale.warehouse.SedWarehouse`.
-Neither backend owns the likelihood.
+accepts either a named CompoSED SFH or explicit tabular arrays and forwards
+ordinary FSPS parameters into `python-fsps`. CIGALE accepts either a supported
+named SFH plus an ordered list of non-SFH modules, or the original complete
+native module list. It calls `pcigale.warehouse.SedWarehouse`. Neither backend
+owns the likelihood or the priors.
 
 The production FSPS backend reuses one mutable `StellarPopulation` for speed,
 but resets every parameter overridden by the preceding call before evaluating
@@ -65,21 +69,39 @@ the next object. Valid per-call FSPS parameters are discovered from
 
 ## Mass Normalization
 
-Mass scaling is explicit. A backend must choose one of:
+Mass scaling is explicit. In the stable public API, `log10_mass` always means
+the present-day surviving stellar mass. A backend must choose one of:
 
-- `MassNormalization.PER_SOLAR_MASS`: model fluxes are per solar mass formed. The likelihood requires a `log10_mass` parameter and multiplies model flux by `10**log10_mass`.
+- `MassNormalization.PER_SOLAR_MASS`: model fluxes are per one solar mass of surviving stars. The backend declares `MassReference.SURVIVING_STELLAR_MASS`; the likelihood requires `log10_mass` and multiplies model flux by `10**log10_mass`.
 - `MassNormalization.ABSOLUTE`: model fluxes are already absolute. The likelihood never applies `log10_mass`, even if that parameter exists.
 
-The likelihood never infers this behavior from parameter names, backend class names, or flux magnitudes.
+The likelihood never infers this behavior from parameter names, backend class
+names, or flux magnitudes. A backend declaring a formed-mass reference is
+rejected rather than allowing `log10_mass` to change scientific meaning.
 
-The CIGALE backend currently exposes only `PER_SOLAR_MASS`: SFH module
-`normalise=True` is enforced and verified through `sfh.integrated` when
-available. This mirrors the FSPS convention that the backend returns normalized
-photometry and the likelihood applies the explicit `log10_mass`.
+FSPS and CIGALE still use formed mass internally. FSPS normalizes its tabular
+SFH to one solar mass formed, evaluates the population, and divides the
+spectrum by `sp.stellar_mass`. CIGALE enforces `normalise=True`, verifies
+`sfh.integrated == 1`, and divides by `stellar.m_star`. Both backends record the
+formed mass, surviving mass, surviving fraction, and public mass reference in
+model metadata before the likelihood applies the fitted amplitude.
+
+Cached model grids serialize `mass_reference` and the mass-convention schema.
+Grids written before the surviving-mass convention are rejected and must be
+rebuilt; they cannot be safely relabeled because their flux amplitudes differ.
 
 ## Physical Transforms
 
-Physical transforms live under `composed/transforms/`. For example, Pop-COSMOS continuity-SFH utilities convert catalog theta rows into FSPS-ready tabular SFHs.
+Stable named SFHs live in `composed/sfh.py`. They consume scalar named values,
+produce a canonical increasing time-since-onset grid in Gyr and SFR in solar
+masses per year, and record their conventions in metadata. Priors remain in
+`ParameterSpace`. Backend-specific translations are explicit: FSPS receives a
+tabular history, while the supported CIGALE subset maps to native v2022.0 SFH
+modules.
+
+Lower-level physical transforms live under `composed/transforms/`. For
+example, Pop-COSMOS continuity-SFH utilities convert catalog theta rows into
+FSPS-ready tabular SFHs.
 
 Transforms should be pure functions where possible. They should not own backend instances, caches, multiprocessing pools, or global state.
 
@@ -112,6 +134,7 @@ problem.log_prior(theta)
 problem.log_likelihood(theta)
 problem.log_posterior(theta)
 problem.simulate(theta, noise_fn, rng)
+problem.simulate_with_uncertainty(theta, noise_fn, rng)
 ```
 
 Photometry and spectroscopy can be combined with
@@ -119,18 +142,50 @@ Photometry and spectroscopy can be combined with
 added once. `fit(problem, method, seed=...)` performs inference-method
 capability checks and normalizes outputs to `InferenceResult`.
 
-Problem-driven SBI is explicit:
+For photometric SBI, ``simulate_with_uncertainty`` returns the same active-band
+flux vector as the likelihood plus the exact Gaussian sigma used to draw it.
+The stable MAF context therefore conditions on both the measured flux and its
+uncertainty. It does not estimate sigma by inspecting a noisy realization.
+
+Problem-driven MAF SBI is explicit:
 
 ```python
 fit(problem, MAF(...), training=Simulate(n=100_000, noise_fn=noise_fn))
 ```
 
 Those training pairs are sampled from `problem.parameters` and generated by
-`problem.simulate`, so they share the deterministic fit's backend parameter
-mapping, units, masks, and mass normalization. Pre-existing paired arrays use
-`SBITrainingSet.from_arrays` plus `train_sbi` without declaring an unrelated
-Problem. Sample-only methods may return `InferenceResult.logp=None`; no MAP is
+the Problem simulator, so they share the deterministic fit's backend parameter
+mapping, units, masks, and mass normalization. The default
+``PhotometricContext("snr_logsigma")`` encodes, in active-band order,
+``[flux / sigma, log10(sigma / reference_flux)]``. This is invertible given the
+recorded reference flux, accepts negative noisy flux, and makes heterogeneous
+catalog depths explicit.
+
+Uniform and log-uniform inferred parameters are mapped to an unconstrained
+neural target space before MAF training and mapped back after sampling. This
+prevents out-of-prior samples without rejection. Normal-prior parameters use an
+identity target transform. Other prior classes are rejected by the stable MAF
+path rather than assigned an implicit transform.
+
+Pre-existing photometric pairs use ``SBITrainingSet.from_photometry`` and the
+same context encoder. Already encoded generic arrays use
+``SBITrainingSet.from_arrays`` plus ``train_sbi`` without declaring an unrelated
+Problem. Sample-only methods may return ``InferenceResult.logp=None``; no MAP is
 invented in that case.
+
+Trained MAF checkpoints contain tensor weights, standardization arrays, ordered
+parameter/band/context schema, prior transforms, package versions, and training
+history. They deliberately do not duplicate the simulation table. Loading a
+checkpoint reconstructs the same physical parameter bounds and native
+photometry encoding. Catalog sampling batches objects inside nflows.
+The high-level fit seed controls prior/noise simulation, MAF weight
+initialization, minibatch order, and the initial posterior draw. Reused catalog
+sampling accepts its own explicit seed.
+
+Censored upper limits do not yet have a stable SBI context in version 0.1 and
+are rejected explicitly. Experimental conditional diffusion remains under
+``inftools.experimental`` and is not exported from the stable ``composed``
+namespace.
 
 ## Fast Catalog Projection
 

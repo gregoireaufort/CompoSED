@@ -4,19 +4,17 @@ This is a real-backend SBI validation rung.  It deliberately stays inside the
 "CompoSED user" workflow:
 
 1. declare scalar priors in a ``ParameterSpace``;
-2. declare an FSPS backend;
-3. wrap FSPS with a small scalar-SFH adapter that translates ``tau_gyr`` and
-   ``age_fraction`` into the tabular SFH arrays expected by FSPS;
-4. bind backend, priors, filters, units, and active bands into a ``Problem``;
-5. call ``simulate_sbi_training_set`` to draw theta and noisy model fluxes;
-7. convert the generated active-band flux vectors to AB magnitudes for the
+2. choose CompoSED's named delayed-tau SFH and declare an FSPS backend;
+3. bind backend, priors, filters, units, and active bands into a ``Problem``;
+4. call ``simulate_sbi_training_set`` to draw theta and noisy model fluxes;
+5. convert the generated active-band flux vectors to AB magnitudes for the
    neural estimator;
-8. train a conditional diffusion joint sampler and run generic SBI diagnostics.
+6. train a conditional diffusion joint sampler and run generic SBI diagnostics.
 
 The key point is that FSPS photometry, active-band masking, and explicit mass
-normalization all go through ``Problem.simulate`` and the bound photometric likelihood. This
-script does not manually call ``backend.predict_photometry`` and does not
-manually multiply by ``10**log10_mass``.
+normalization all go through ``Problem.simulate`` and the bound photometric
+likelihood. This script does not manually call ``backend.predict_photometry``
+and does not manually multiply by ``10**log10_mass``.
 """
 
 from __future__ import annotations
@@ -36,14 +34,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from composed import Diffusion, Gaussian, Problem, SBITrainingSet, Simulate
+from composed import Gaussian, Problem, SBITrainingSet, Simulate
 from composed.backends.fsps import FSPSBackend
 from composed.data import SEDDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
 from composed.provenance import require_provenance, save_npz_with_provenance
-from composed.sbi import simulate_sbi_training_set, train_sbi
+from composed.sbi import Diffusion, simulate_sbi_training_set, train_sbi
+from composed.sfh import DelayedTauSFH
 from inftools.diagnostics import run_sbi_diagnostics
 
 
@@ -71,39 +70,6 @@ PARAMETER_PRIORS = {
 # to a local fractional flux sigma before simulation.
 MAG_SIGMA = np.array([0.12, 0.08, 0.07, 0.07, 0.08])
 FRACTIONAL_FLUX_SIGMA = (np.log(10.0) / 2.5) * MAG_SIGMA
-
-
-class DelayedTauFSPSBackend:
-    """Scalar-parameter adapter in front of ``FSPSBackend``.
-
-    FSPS itself requires ``tabular_time_gyr`` and ``tabular_sfr_msun_per_yr``.
-    A normal CompoSED user does not want array-valued priors, so this adapter
-    exposes scalar delayed-tau SFH parameters and delegates the actual
-    photometry call to ``FSPSBackend``.
-    """
-
-    def __init__(self, base_backend: FSPSBackend, n_time: int = 64) -> None:
-        self.base_backend = base_backend
-        self.n_time = int(n_time)
-
-    @property
-    def mass_normalization(self):
-        return self.base_backend.mass_normalization
-
-    def predict_photometry(self, params, filters):
-        params = dict(params)
-        zred = float(params["zred"])
-        tau_gyr = float(params.pop("tau_gyr"))
-        age_fraction = float(params.pop("age_fraction"))
-        time_gyr, sfr = delayed_exponential_sfh(
-            zred=zred,
-            tau_gyr=tau_gyr,
-            age_fraction=age_fraction,
-            n_time=self.n_time,
-        )
-        params["tabular_time_gyr"] = time_gyr
-        params["tabular_sfr_msun_per_yr"] = sfr
-        return self.base_backend.predict_photometry(params, filters)
 
 
 def check_runtime_requirements() -> None:
@@ -136,7 +102,15 @@ def build_problem() -> Problem:
     from sedpy.observate import load_filters
 
     filters = FilterSet(load_filters(FILTER_NAMES), names=FILTER_NAMES)
-    backend = DelayedTauFSPSBackend(FSPSBackend(sp_kwargs={"add_igm_absorption": True}))
+    backend = FSPSBackend(
+        sfh=DelayedTauSFH(
+            age="age_fraction",
+            age_kind="fraction_of_universe",
+            tau="tau_gyr",
+            n_time=64,
+        ),
+        sp_kwargs={"add_igm_absorption": True},
+    )
 
     # The dataset defines band order and active masks.  Its flux/sigma values
     # are placeholders for simulation; no observed object is being fitted here.
@@ -153,30 +127,6 @@ def build_problem() -> Problem:
         likelihood=Gaussian(),
         filters=filters,
     )
-
-
-def delayed_exponential_sfh(
-    *,
-    zred: float,
-    tau_gyr: float,
-    age_fraction: float,
-    n_time: int = 64,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Convert scalar SFH parameters into FSPS tabular SFH arrays.
-
-    ``time_gyr`` is age since star-formation onset.  The final age is a fitted
-    fraction of the Universe age at ``zred`` so FSPSBackend's age validation
-    stays physically meaningful.
-    """
-
-    from astropy.cosmology import Planck18
-
-    age_universe_gyr = float(Planck18.age(float(zred)).to("Gyr").value)
-    final_age_gyr = np.clip(float(age_fraction), 0.05, 0.98) * age_universe_gyr
-    time_gyr = np.linspace(0.01, final_age_gyr, int(n_time))
-    tau_gyr = max(float(tau_gyr), 0.05)
-    sfr_msun_per_yr = time_gyr * np.exp(-time_gyr / tau_gyr)
-    return time_gyr, np.maximum(sfr_msun_per_yr, 0.0)
 
 
 def fsps_flux_noise_sigma(flux_maggies: np.ndarray) -> np.ndarray:
@@ -221,6 +171,7 @@ def generate_fsps_mock_catalog(
             n=n_total,
             noise_fn=fsps_flux_noise_sigma,
             infer=INFERRED_THETA_NAMES,
+            context="flux",
             feature_transform=flux_to_abmag_features,
             max_retries=max_retries,
             batch_size=simulation_batch_size,

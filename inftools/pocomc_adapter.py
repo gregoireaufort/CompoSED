@@ -6,10 +6,13 @@ from .core import Posterior, SamplingResult, Array
 
 try:
     import pocomc as pc
-    from scipy.stats import uniform
+    from scipy.stats import loguniform, norm, t as student_t, uniform
     _HAS_POCOMC = True
 except ImportError:  # if pocomc or scipy not installed in some env
     pc = None
+    loguniform = None
+    norm = None
+    student_t = None
     uniform = None
     _HAS_POCOMC = False
 
@@ -22,6 +25,33 @@ def _weighted_cov(samples: np.ndarray, w: np.ndarray) -> np.ndarray:
     xm = samples - mean
     cov = np.cov(xm.T, aweights=w, bias=False)
     return cov
+
+
+def pocomc_prior_from_parameter_space(parameter_space):
+    """Translate continuous CompoSED priors into one ``pocomc.Prior``."""
+
+    if not _HAS_POCOMC:
+        raise ImportError("pocomc and scipy are required to build a PocoMC prior.")
+    from composed.priors import LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
+
+    distributions = []
+    for name in parameter_space.names:
+        prior = parameter_space.priors[name]
+        if isinstance(prior, UniformPrior):
+            distribution = uniform(loc=float(prior.low), scale=float(prior.high - prior.low))
+        elif isinstance(prior, LogUniformPrior):
+            distribution = loguniform(float(prior.low), float(prior.high))
+        elif isinstance(prior, NormalPrior):
+            distribution = norm(loc=float(prior.mu), scale=float(prior.sigma))
+        elif isinstance(prior, StudentTPrior):
+            distribution = student_t(df=float(prior.df), loc=float(prior.loc), scale=float(prior.scale))
+        else:
+            raise TypeError(
+                f"PocoMC cannot translate prior {type(prior).__name__} for parameter {name!r}. "
+                "Pass PocoMC(prior=...) explicitly for a custom continuous prior."
+            )
+        distributions.append(distribution)
+    return pc.Prior(distributions)
 
 
 def run_pocomc(

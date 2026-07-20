@@ -9,7 +9,7 @@ import numpy as np
 
 from composed.data import SEDDataset, SpectrumDataset
 from composed.parameters import ParameterSpace
-from composed.units import MassNormalization, convert_photometric_flux
+from composed.units import MassNormalization, backend_mass_reference, convert_photometric_flux
 
 
 class PhotometricSimulationError(RuntimeError):
@@ -29,7 +29,9 @@ class GaussianPhotometricLikelihood:
     ``log_prob`` remains a compatibility alias for ``log_posterior``.
     The likelihood aligns model and observed photometry by band name, applies an
     optional uncertainty floor in quadrature, and applies ``10**log10_mass`` only
-    when the backend explicitly declares ``MassNormalization.PER_SOLAR_MASS``.
+    when the backend explicitly declares ``MassNormalization.PER_SOLAR_MASS``
+    with a surviving-stellar-mass reference. Thus ``log10_mass`` always denotes
+    present-day surviving stellar mass.
     Backend numerical failures and non-finite model fluxes return ``-inf``;
     configuration errors such as missing mass parameters or shape mismatches
     raise clear exceptions.
@@ -113,6 +115,32 @@ class GaussianPhotometricLikelihood:
         also supported.
         """
 
+        draws, _ = self._simulate_flux_and_sigma(theta, noise_fn=noise_fn, rng=rng)
+        return draws
+
+    def simulate_with_uncertainty(
+        self,
+        theta: Sequence[float],
+        noise_fn,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Simulate active-band flux and return the exact Gaussian sigma used.
+
+        This method follows the same model-flux, masking, unit-conversion, and
+        mass-normalization path as :meth:`simulate`.  It exists so an SBI model
+        can condition on heteroscedastic measurement uncertainty rather than
+        silently marginalizing over the training noise distribution.
+        """
+
+        return self._simulate_flux_and_sigma(theta, noise_fn=noise_fn, rng=rng)
+
+    def _simulate_flux_and_sigma(
+        self,
+        theta: Sequence[float],
+        *,
+        noise_fn,
+        rng: np.random.Generator | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         if rng is None:
             rng = np.random.default_rng()
         theta_arr = np.asarray(theta, dtype=float)
@@ -128,6 +156,7 @@ class GaussianPhotometricLikelihood:
         if idx.size == 0:
             raise ValueError("SEDDataset has no active photometric bands.")
         draws = []
+        sigma_rows = []
         for row in theta_batch:
             try:
                 flux = self._predict_active_model_flux(row, idx=idx, active_bands=active_bands)
@@ -141,9 +170,13 @@ class GaussianPhotometricLikelihood:
             if not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
                 raise ValueError("noise_fn must return finite non-negative sigma values.")
             draws.append(flux + rng.normal(loc=0.0, scale=sigma, size=flux.shape))
+            sigma_rows.append(sigma)
 
         out = np.stack(draws, axis=0)
-        return out[0] if single else out
+        sigma_out = np.stack(sigma_rows, axis=0)
+        if single:
+            return out[0], sigma_out[0]
+        return out, sigma_out
 
     rvs = simulate
 
@@ -333,6 +366,7 @@ def _backend_params_and_mass_scale(
     mass_norm = MassNormalization(mass_norm)
 
     if mass_norm == MassNormalization.PER_SOLAR_MASS:
+        backend_mass_reference(backend)
         if "log10_mass" not in params:
             raise ValueError(
                 f"Backend returns PER_SOLAR_MASS {quantity_name}, but ParameterSpace is missing 'log10_mass'."

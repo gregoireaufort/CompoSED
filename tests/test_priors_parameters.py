@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from composed.parameters import ParameterSpace
-from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
+from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
 
 
 def test_prior_sampling_and_logpdf():
@@ -17,6 +17,12 @@ def test_prior_sampling_and_logpdf():
     n = NormalPrior(1.0, 2.0)
     assert n.sample(rng, size=8).shape == (8,)
     assert np.isclose(n.logpdf(1.0), -np.log(2.0) - 0.5 * np.log(2.0 * np.pi))
+
+    student_t = StudentTPrior(df=2.0, loc=0.0, scale=0.3)
+    student_samples = student_t.sample(rng, size=1000)
+    assert np.all(np.isfinite(student_samples))
+    assert np.isclose(student_t.logpdf(0.0), np.log(1.0 / (2.0 * np.sqrt(2.0) * 0.3)))
+    assert not np.isfinite(student_t.logpdf(np.inf))
 
     lu = LogUniformPrior(1.0, 100.0)
     lus = lu.sample(rng, size=1000)
@@ -44,6 +50,9 @@ def test_prior_boundaries_are_inclusive_and_nonfinite_inputs_rejected():
 
     normal = NormalPrior(0.0, 1.0)
     assert not np.isfinite(normal.logpdf(np.nan))
+
+    student_t = StudentTPrior(2.0, scale=0.3)
+    assert not np.isfinite(student_t.logpdf(np.nan))
 
     delta = DeltaPrior(2.0)
     assert delta.logpdf(2.0) == 0.0
@@ -100,3 +109,12 @@ def test_parameter_space_requires_exactly_one_prior_per_name():
 
     with pytest.raises(ValueError, match="absent from names"):
         ParameterSpace(names=["z"], priors={"z": DeltaPrior(0.1), "unused": DeltaPrior(1.0)})
+
+
+def test_student_t_prior_rejects_invalid_parameters():
+    with pytest.raises(ValueError, match="df > 0"):
+        StudentTPrior(0.0)
+    with pytest.raises(ValueError, match="finite location"):
+        StudentTPrior(2.0, loc=np.inf)
+    with pytest.raises(ValueError, match="scale > 0"):
+        StudentTPrior(2.0, scale=0.0)

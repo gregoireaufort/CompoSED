@@ -1,104 +1,113 @@
-"""Train a tiny MAF posterior on a transparent toy photometry problem.
+"""Train and save a small uncertainty-conditioned MAF posterior.
 
-The mock backend is deliberately simple: two physical parameters, two bands,
-and a linear color response. That makes the example useful for checking the
-SBI plumbing without hiding any astronomy in the simulator.
+This transparent mock follows the same stable CompoSED path as an FSPS or
+CIGALE analysis: backend, priors, observed dataset, Problem, simulation noise,
+MAF training, posterior sampling, and checkpointing.
 
-Optional dependencies:
-
-    pip install torch nflows
+Optional dependencies: torch and nflows.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
-from inftools.sbi import simulate_training_set, train_maf_posterior
+from composed import (
+    Gaussian,
+    MAF,
+    ParameterSpace,
+    PhotometricContext,
+    Problem,
+    SEDDataset,
+    Simulate,
+    UniformPrior,
+    fit,
+)
 from composed.backends.base import ModelPhotometry, SEDBackend
-from composed.data import SEDDataset
-from composed.likelihood import GaussianPhotometricLikelihood
-from composed.parameters import ParameterSpace
-from composed.priors import UniformPrior
+from composed.filters import FilterSet
 from composed.units import MassNormalization
 
 
 RNG_SEED = 123
-
-PARAMETER_PRIORS = {
-    "z": UniformPrior(0.0, 2.0),
-    "dust2": UniformPrior(0.0, 1.0),
-}
-
-N_TRAIN = 512
-N_POSTERIOR_SAMPLES = 2000
+BAND_NAMES = ["g", "r"]
+FILTERS = FilterSet([object(), object()], names=BAND_NAMES)
 
 
 class LinearColorBackend(SEDBackend):
-    """Toy backend with an exactly readable flux model.
-
-    This is not an astrophysical SED model. It just gives composed a backend
-    with the same interface as FSPS or CIGALE.
-    """
+    """Two-parameter linear flux model used only to expose the SBI plumbing."""
 
     mass_normalization = MassNormalization.ABSOLUTE
 
     def predict_photometry(self, params, filters):
-        del filters
         z = float(params["z"])
         dust = float(params["dust2"])
-        flux = np.array([1.0 + z - 0.2 * dust, 0.8 + 0.5 * z + dust], dtype=float)
-        return ModelPhotometry(band_names=["g", "r"], flux=flux)
+        flux = np.array([1.0 + z - 0.2 * dust, 0.8 + 0.5 * z + dust])
+        return ModelPhotometry(band_names=filters.names, flux=flux)
 
 
-def toy_noise_sigma(flux):
-    """Simple heteroscedastic Gaussian noise model in flux units."""
+def noise_sigma(noiseless_flux):
+    """Heteroscedastic Gaussian sigma in the same units as model flux."""
 
-    sigma_floor = 0.02
-    frac_error = 0.05
-    return sigma_floor + frac_error * np.abs(flux)
+    return 0.02 + 0.05 * np.abs(noiseless_flux)
 
 
 def main() -> None:
     rng = np.random.default_rng(RNG_SEED)
-
-    parameter_space = ParameterSpace(
-        names=list(PARAMETER_PRIORS),
-        priors=PARAMETER_PRIORS,
+    parameters = ParameterSpace(
+        names=["z", "dust2"],
+        priors={
+            "z": UniformPrior(0.0, 2.0),
+            "dust2": UniformPrior(0.0, 1.0),
+        },
     )
+    backend = LinearColorBackend()
 
-    # The dataset only defines band names and active-band masking here. The
-    # simulator below will generate the actual training fluxes.
-    dataset = SEDDataset(["g", "r"], flux=np.zeros(2), sigma=np.ones(2))
-    likelihood = GaussianPhotometricLikelihood(LinearColorBackend(), dataset, parameter_space)
+    truth = {"z": 0.8, "dust2": 0.3}
+    noiseless = backend.predict_photometry(truth, FILTERS).flux
+    observed_sigma = noise_sigma(noiseless)
+    observed_flux = noiseless + rng.normal(scale=observed_sigma)
+    data = SEDDataset(BAND_NAMES, observed_flux, observed_sigma)
 
-    theta_train, x_train = simulate_training_set(
-        parameter_space,
-        likelihood,
-        n=N_TRAIN,
-        noise_fn=toy_noise_sigma,
-        rng=rng,
+    problem = Problem(
+        backend=backend,
+        parameters=parameters,
+        data=data,
+        likelihood=Gaussian(),
+        filters=FILTERS,
     )
-
-    estimator = train_maf_posterior(
-        theta_train,
-        x_train,
-        hidden_features=32,
-        num_transforms=2,
-        num_blocks=1,
-        epochs=20,
-        batch_size=128,
-        device="cpu",
+    result = fit(
+        problem,
+        method=MAF(
+            hidden_features=32,
+            num_transforms=2,
+            num_blocks=1,
+            epochs=20,
+            batch_size=128,
+            validation_split=0.1,
+            patience=5,
+            num_samples=2_000,
+            device="auto",
+        ),
+        training=Simulate(
+            n=2_000,
+            noise_fn=noise_sigma,
+            infer=["z", "dust2"],
+            context=PhotometricContext("snr_logsigma"),
+        ),
         seed=RNG_SEED,
     )
 
-    theta_true = np.array([0.8, 0.3])
-    x_obs = likelihood.simulate(theta_true, noise_fn=toy_noise_sigma, rng=rng)
-    samples = estimator.sample(x_obs, num_samples=N_POSTERIOR_SAMPLES)
+    output = Path("outputs/sbi_mock_photometry_demo/maf")
+    result.inference_state.save(output, overwrite=True)
 
-    print("true theta:", theta_true)
-    print("observed flux:", x_obs)
-    print("posterior mean:", samples.mean(axis=0))
-    print("posterior std:", samples.std(axis=0))
+    print("device:", result.inference_state.estimator.device)
+    print("true theta:", np.asarray([truth[name] for name in result.parameter_names]))
+    print("observed flux:", observed_flux)
+    print("observed sigma:", observed_sigma)
+    print("posterior mean:", result.samples.mean(axis=0))
+    print("posterior std:", result.samples.std(axis=0))
+    print("checkpoint:", output)
 
 
 if __name__ == "__main__":

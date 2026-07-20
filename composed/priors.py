@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Sequence
 
 import numpy as np
@@ -58,6 +59,43 @@ class NormalPrior(Prior):
 
     def sample(self, rng: np.random.Generator, size=None):
         return rng.normal(self.mu, self.sigma, size=size)
+
+
+@dataclass(frozen=True)
+class StudentTPrior(Prior):
+    """Student-t prior with degrees of freedom, location, and scale.
+
+    The standard continuity-SFH prior is represented by
+    ``StudentTPrior(df=2, loc=0, scale=0.3)`` on adjacent log10 SFR ratios.
+    """
+
+    df: float
+    loc: float = 0.0
+    scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.df) or self.df <= 0.0:
+            raise ValueError("StudentTPrior requires finite df > 0.")
+        if not np.isfinite(self.loc):
+            raise ValueError("StudentTPrior requires a finite location.")
+        if not np.isfinite(self.scale) or self.scale <= 0.0:
+            raise ValueError("StudentTPrior requires finite scale > 0.")
+
+    def logpdf(self, x: float) -> float:
+        x = float(x)
+        if not np.isfinite(x):
+            return -np.inf
+        z = (x - self.loc) / self.scale
+        log_normalization = (
+            math.lgamma(0.5 * (self.df + 1.0))
+            - math.lgamma(0.5 * self.df)
+            - 0.5 * np.log(self.df * np.pi)
+            - np.log(self.scale)
+        )
+        return float(log_normalization - 0.5 * (self.df + 1.0) * np.log1p(z**2 / self.df))
+
+    def sample(self, rng: np.random.Generator, size=None):
+        return self.loc + self.scale * rng.standard_t(self.df, size=size)
 
 
 @dataclass(frozen=True)

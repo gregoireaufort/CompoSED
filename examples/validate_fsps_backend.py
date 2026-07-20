@@ -5,7 +5,8 @@ Run this in a local science environment with python-fsps, sedpy, astropy, and
 two ways:
 
 1. through ``composed.backends.FSPSBackend``;
-2. directly with ``fsps.StellarPopulation`` plus sedpy filter integration.
+2. directly with ``fsps.StellarPopulation`` plus sedpy filter integration,
+   including an independent division by ``sp.stellar_mass``.
 
 It fails loudly for non-finite fluxes, negative maggies, shape mismatches, or a
 numerical disagreement larger than the documented tolerances below.
@@ -20,6 +21,7 @@ from typing import Sequence
 
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.backends.fsps import FSPSBackend
 from composed.filters import FilterSet
 from composed.transforms.sfh import normalize_sfh_to_formed_mass
@@ -105,6 +107,17 @@ def direct_fsps_sedpy_photometry(
 
     sp.set_tabular_sfh(t_gyr, sfr)
     wave_rest_a, llam_lsun_per_a = sp.get_spectrum(tage=float(t_gyr[-1]), peraa=True)
+    formed_mass = float(sp.formed_mass)
+    surviving_stellar_mass = float(sp.stellar_mass)
+    if not np.isfinite(formed_mass) or formed_mass <= 0.0:
+        raise RuntimeError(f"Direct FSPS calculation returned invalid formed_mass={formed_mass!r}.")
+    if not np.isfinite(surviving_stellar_mass) or surviving_stellar_mass <= 0.0:
+        raise RuntimeError(
+            "Direct FSPS calculation returned invalid "
+            f"stellar_mass={surviving_stellar_mass!r}."
+        )
+    if mass_normalization == MassNormalization.PER_SOLAR_MASS:
+        llam_lsun_per_a = np.asarray(llam_lsun_per_a, dtype=float) / surviving_stellar_mass
 
     if z > 0.0:
         d_l_cm = Planck18.luminosity_distance(z).to("cm").value
@@ -116,7 +129,12 @@ def direct_fsps_sedpy_photometry(
     )
     mags = np.asarray(getSED(wave_obs_a, flam_obs, list(filters.filters), linear_flux=False), dtype=float)
     flux = 10.0 ** (-0.4 * mags)
-    return flux, mags, wave_obs_a, flam_obs
+    mass_metadata = {
+        "formed_mass_msun": formed_mass,
+        "surviving_stellar_mass_msun": surviving_stellar_mass,
+        "surviving_stellar_mass_fraction": surviving_stellar_mass / formed_mass,
+    }
+    return flux, mags, wave_obs_a, flam_obs, mass_metadata
 
 
 def ab_magnitudes_from_maggies(flux_maggies: np.ndarray) -> np.ndarray:
@@ -129,7 +147,7 @@ def trapz_numpy(y: np.ndarray, x: np.ndarray) -> float:
 
     if hasattr(np, "trapezoid"):
         return float(np.trapezoid(y, x))
-    return float(np.trapz(y, x))
+    return float(trapezoid(y, x))
 
 
 def flat_fnu_tophat_sanity_check() -> float:
@@ -202,13 +220,19 @@ def run_validation(filter_names: Sequence[str] = DEFAULT_FILTER_NAMES) -> dict[s
     params = default_params()
     backend = FSPSBackend(sp_kwargs=default_sp_kwargs(), mass_normalization=MassNormalization.PER_SOLAR_MASS)
     phot = backend.predict_photometry(params, filters)
-    reference_flux, reference_mag, wave_obs_a, flam_obs = direct_fsps_sedpy_photometry(
+    reference_flux, reference_mag, wave_obs_a, flam_obs, reference_mass = direct_fsps_sedpy_photometry(
         params,
         filters,
         mass_normalization=backend.mass_normalization,
         sp_kwargs=default_sp_kwargs(),
     )
     backend_mag, max_rel, max_mag_diff = validate_outputs(phot.flux, reference_flux, len(filters))
+    for key in ("formed_mass_msun", "surviving_stellar_mass_msun", "surviving_stellar_mass_fraction"):
+        if not np.isclose(float(phot.metadata[key]), float(reference_mass[key]), rtol=1e-12, atol=1e-12):
+            raise RuntimeError(
+                f"Backend and direct FSPS mass metadata disagree for {key}: "
+                f"{phot.metadata[key]!r} versus {reference_mass[key]!r}."
+            )
     return {
         "backend": backend,
         "filters": filters,
@@ -218,6 +242,7 @@ def run_validation(filter_names: Sequence[str] = DEFAULT_FILTER_NAMES) -> dict[s
         "reference_mag": reference_mag,
         "wave_obs_a": wave_obs_a,
         "flam_obs": flam_obs,
+        "reference_mass": reference_mass,
         "max_relative_flux_difference": max_rel,
         "max_ab_magnitude_difference": max_mag_diff,
         "flat_fnu_tophat_sanity_error": flat_fnu_error,
@@ -232,6 +257,11 @@ def main() -> None:
     wavelengths = filter_effective_wavelengths(filters)
 
     print(f"FSPSBackend mass normalization: {backend.mass_normalization.value}")
+    print(f"FSPSBackend mass reference: {phot.metadata['mass_reference']}")
+    print(
+        "Unit-formed-mass surviving fraction: "
+        f"{phot.metadata['surviving_stellar_mass_fraction']:.8f}"
+    )
     print(f"Flux tolerance: relative <= {FLUX_RTOL:.1e}")
     print(f"AB magnitude tolerance: absolute <= {MAG_ATOL:.1e}")
     print(f"Flat-fnu top-hat sanity error: {result['flat_fnu_tophat_sanity_error']:.3e}")

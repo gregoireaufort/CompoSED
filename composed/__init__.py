@@ -1,6 +1,9 @@
 """Composable Bayesian SED fitting and photo-z inference."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
+from composed.derived import DerivedSFHQuantities, derive_sfh_quantities
 from composed.catalog import CatalogGridResult, run_photometric_grid_catalog
 from composed.catalog_fast import (
     NativeCatalogFitResult,
@@ -16,7 +19,8 @@ from composed.catalog_fast import (
 from composed.likelihood import GaussianPhotometricLikelihood, GaussianSpectralLikelihood
 from composed.filters import FilterSet, load_filter_set
 from composed.parameters import ParameterSpace
-from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, UniformPrior
+from composed.noise import EmpiricalPhotometricNoise
+from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
 from composed.problem import (
     Emcee,
     Gaussian,
@@ -50,28 +54,51 @@ from composed.results import (
     save_inference_result,
 )
 from composed.sbi import (
-    Diffusion,
-    DiffusionPhotometricSBIResult,
     MAF,
+    MAFCatalogSummary,
     MAFPhotometricSBIResult,
+    PhotometricContext,
     PhotometricTrainingSet,
     SBITrainingSet,
     Simulate,
-    TrainedDiffusionSBI,
     TrainedMAFSBI,
-    default_photometric_diffusion_mask,
     simulate_photometric_training_set,
     simulate_sbi_training_set,
     train_sbi,
-    train_diffusion_photometric_sbi,
     train_maf_photometric_sbi,
     transform_photometry,
 )
-from composed.units import MassNormalization
+from composed.sfh import (
+    ConstantSFH,
+    ContinuitySFH,
+    DelayedTauSFH,
+    ExponentialSFH,
+    SFHHistory,
+    SFHModel,
+    TabularSFH,
+    available_sfh_models,
+    make_sfh,
+)
+from composed.units import MassNormalization, MassReference
+
+try:
+    __version__ = version("composed")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 
 __all__ = [
+    "__version__",
+    "ConstantSFH",
+    "ContinuitySFH",
+    "DelayedTauSFH",
+    "ExponentialSFH",
+    "SFHHistory",
+    "SFHModel",
+    "TabularSFH",
+    "available_sfh_models",
+    "make_sfh",
     "DeltaPrior",
-    "Diffusion",
+    "DerivedSFHQuantities",
     "CatalogGridResult",
     "GaussianPhotometricLikelihood",
     "GaussianSpectralLikelihood",
@@ -83,11 +110,15 @@ __all__ = [
     "FilterSet",
     "LogUniformPrior",
     "MassNormalization",
+    "MassReference",
     "MAF",
+    "MAFCatalogSummary",
     "MAFPhotometricSBIResult",
+    "PhotometricContext",
     "MixedGibbs",
     "MixedTAMIS",
     "NormalPrior",
+    "StudentTPrior",
     "NativeCatalogFitResult",
     "ParameterSpace",
     "PocoMC",
@@ -104,15 +135,15 @@ __all__ = [
     "SpectrumDataset",
     "RandomWalk",
     "TAMIS",
-    "TrainedDiffusionSBI",
     "TrainedMAFSBI",
     "Emcee",
+    "EmpiricalPhotometricNoise",
     "UniformPrior",
     "build_redshift_filter_operator",
     "build_restframe_spectral_grid",
     "collect_run_provenance",
-    "default_photometric_diffusion_mask",
     "fit_catalog_with_restframe_grid",
+    "derive_sfh_quantities",
     "fit",
     "load_restframe_spectral_grid",
     "load_inference_result",
@@ -130,10 +161,8 @@ __all__ = [
     "save_npz_with_provenance",
     "save_restframe_spectral_grid",
     "sha256_file",
-    "train_diffusion_photometric_sbi",
     "train_maf_photometric_sbi",
     "train_sbi",
     "transform_photometry",
     "write_provenance",
-    "DiffusionPhotometricSBIResult",
 ]

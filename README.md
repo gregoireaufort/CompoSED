@@ -9,7 +9,7 @@ CIGALE, DSPS, and Cue have their own upstream installation and data
 requirements.  Start with the install guide:
 
 ```bash
-python -m pip install -e ".[dev,plot,samplers,notebooks]"
+python -m pip install -e ".[dev,plot]"
 python scripts/check_environment.py --core
 ```
 
@@ -18,8 +18,31 @@ Then install only the backend stack you need.  FSPS users must configure
 users must provide `CUE_DATA_DIR`; JAX-CIGALE DSPS validation uses
 `DSPS_CONTINUUM_SSP_FILE`.
 
+Optional inference layers are installed independently:
+
+```bash
+python -m pip install -e ".[samplers]"  # emcee and PocoMC
+python -m pip install -e ".[sbi]"       # torch and nflows
+```
+
 See [`docs/install.md`](docs/install.md) for the supported environment recipes
 and backend checks.
+
+## COSMOS2020 tutorial suite
+
+The compact end-to-end tutorials in [`notebooks/tutorials`](notebooks/tutorials)
+all use the same selected COSMOS2020 ugrizYJH catalog and the same representative
+galaxy:
+
+- FSPS continuity-SFH + uncertainty-conditioned MAF for 100,000 objects;
+- CIGALE delayed-tau + uncertainty-conditioned MAF for 100,000 objects;
+- CIGALE delayed-tau + self-contained TAMIS for one object;
+- FSPS continuity-SFH + PocoMC for the same object.
+
+Run `00_prepare_cosmos2020_ugrizYJH.ipynb` once to create the ignored 6.7 MB
+tutorial artifact from the full FARMER FITS catalog. The remaining notebooks
+never parse the source catalog. Set `COMPOSED_TUTORIAL_QUICK=1` for a short MAF
+installation check; normal catalog runs use 300,000 prior simulations.
 
 ```python
 import numpy as np
@@ -44,7 +67,9 @@ print(like.log_prob(np.array([0.5])))
 Backends expose `predict_photometry(params, filters) -> ModelPhotometry` and
 may expose `predict_spectrum(params, wavelengths=...) -> ModelSpectrum`. They
 must declare their `MassNormalization`. The likelihood multiplies by
-`10**log10_mass` only for `MassNormalization.PER_SOLAR_MASS`.
+`10**log10_mass` only for `MassNormalization.PER_SOLAR_MASS`. In the public
+contract, `log10_mass` is the present-day surviving stellar mass and per-mass
+backend outputs are normalized by that same quantity.
 
 ## Acknowledgements and citations
 
@@ -95,23 +120,22 @@ grids, `sedpy`, and `astropy`. Configure `SPS_HOME` before constructing the
 backend.
 
 ```python
-import numpy as np
-
+from composed import DelayedTauSFH
 from composed.backends.fsps import FSPSBackend
 from composed.filters import FilterSet
 
 from sedpy.observate import load_filters
 
 filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
-backend = FSPSBackend()
+backend = FSPSBackend(sfh=DelayedTauSFH())
 
 phot = backend.predict_photometry(
     {
         "zred": 0.1,
         "logzsol": -0.3,
         "dust2": 0.2,
-        "tabular_time_gyr": np.array([0.01, 1.0, 5.0]),
-        "tabular_sfr_msun_per_yr": np.array([1.0, 1.0, 0.2]),
+        "tage_gyr": 5.0,
+        "tau_gyr": 1.5,
     },
     filters,
 )
@@ -120,8 +144,17 @@ print(dict(zip(phot.band_names, phot.flux)))
 
 The backend returns observed-frame photometry in maggies and observed-frame
 spectra in `f_lambda` cgs per Angstrom. With the default
-`MassNormalization.PER_SOLAR_MASS`, the tabular SFH is normalized to one solar
-mass formed and the likelihood is responsible for applying `10**log10_mass`.
+`MassNormalization.PER_SOLAR_MASS`, the tabular SFH is internally normalized
+to one solar mass formed. The backend then divides the FSPS spectrum by
+`sp.stellar_mass`, returning luminosity per one solar mass of surviving stars.
+The likelihood applies `10**log10_mass` once. Whether FSPS includes stellar
+remnants follows `add_stellar_remnants` and is recorded in model metadata.
+
+CompoSED supplies named `constant`, `exponential`, `delayed_tau`,
+`continuity`, and `tabular` SFHs for FSPS. Priors remain explicit in
+`ParameterSpace`; the SFH object only maps scalar parameters to the validated
+tabular history. See [`docs/sfh_models.md`](docs/sfh_models.md) for equations,
+age conventions, normalization, and backend support.
 
 ## CIGALE backend
 
@@ -131,21 +164,19 @@ photometry and observed-frame `f_lambda` cgs per Angstrom for spectra. Native
 CIGALE filter names can be passed as strings; sedpy filters are also supported
 via `photometry_mode="sedpy"`.
 
-In `composed`, CIGALE is deliberately treated as a per-solar-mass backend.
-SFH module `normalise=True` is enforced, and the Gaussian likelihood applies
-`10**log10_mass`.
+In `composed`, CIGALE is deliberately treated as a per-surviving-stellar-mass
+backend. SFH module `normalise=True` first gives a unit-formed-mass SED; the
+backend divides it by CIGALE's `stellar.m_star`, and the Gaussian likelihood
+then applies `10**log10_mass` once.
 
 ```python
+from composed import DelayedTauSFH
 from composed.backends.cigale import build_cigale_backend_and_parameter_space
 from composed.filters import FilterSet
 from composed.priors import UniformPrior
 
-modules = ["sfhdelayed", "bc03", "redshifting"]
+modules = ["bc03", "redshifting"]
 module_parameters = {
-    "sfhdelayed": {
-        "tau_main": {"range": [500.0, 5000.0]},
-        "age_main": {"values": [1000, 3000, 5000], "dtype": "int"},
-    },
     "bc03": {
         "imf": 1,
         "metallicity": {"values": [0.008, 0.02]},
@@ -158,17 +189,29 @@ module_parameters = {
 backend, space = build_cigale_backend_and_parameter_space(
     modules,
     module_parameters,
-    additional_priors={"log10_mass": UniformPrior(8.0, 12.0)},
+    additional_priors={
+        "log10_mass": UniformPrior(8.0, 12.0),
+        "tage_gyr": UniformPrior(0.1, 5.0),
+        "tau_gyr": UniformPrior(0.1, 5.0),
+    },
+    sfh=DelayedTauSFH(),
 )
 
 filters = FilterSet(["sdss.up", "sdss.gp", "sdss.rp"])
-phot_per_msun = backend.predict_photometry(
-    {"tau_main": 2000.0, "age_main": 3000, "metallicity": 0.02, "z": 0.5},
+phot_per_stellar_msun = backend.predict_photometry(
+    {"tau_gyr": 2.0, "tage_gyr": 3.0, "metallicity": 0.02, "z": 0.5},
     filters,
 )
 ```
 
-See `examples/cigale_photometry_demo.py` and `docs/cigale_backend.md`.
+Named CIGALE SFHs use native v2022.0 modules. The stable shared subset is
+constant, exponential, and delayed-tau; arbitrary native CIGALE SFH modules
+remain available through the original module-list API. See
+`examples/cigale_photometry_demo.py`, `docs/cigale_backend.md`, and
+[`docs/sfh_models.md`](docs/sfh_models.md).
+
+The dedicated CIGALE environment pins NumPy 1.23.5 because upstream v2022.0's
+exact constant-SFH module still uses the removed `np.float` alias.
 
 ## Running Real FSPS Validation Locally
 
@@ -200,133 +243,23 @@ FSPS, sedpy, or `SPS_HOME` are unavailable.
 
 ## Simulation-Based Inference / MAF Posterior Estimator
 
-`inftools.sbi` adds an optional Masked Autoregressive Flow posterior estimator
-using `torch` and `nflows`. These dependencies are not required for importing
-`composed` or the rest of `inftools`; constructing the estimator will raise a
-helpful `ImportError` if they are missing.
-
-Most analyses should use the `Problem`-based interface in the next section.
-The functions below are the lower-level array/simulator API retained for custom
-workflows and method development.
-
-Backend-generated simulation pipeline:
-
-1. Define a `ParameterSpace`.
-2. Wrap a backend with `GaussianPhotometricLikelihood`.
-3. Define a flux-noise function, for example
-   `sigma = sigma_floor + frac_error * abs(flux)`.
-4. Simulate `(theta, x)` training pairs.
-5. Train a conditional MAF estimator `q(theta | x)`.
-6. Condition on observed active-band fluxes and draw posterior samples.
-
-```python
-import numpy as np
-
-from inftools.sbi import simulate_training_set, train_maf_posterior_from_dataset
-
-def noise_fn(flux):
-    return 0.02 + 0.05 * np.abs(flux)
-
-theta_train, x_train = simulate_training_set(
-    parameter_space,
-    likelihood,
-    n=1000,
-    noise_fn=noise_fn,
-    rng=np.random.default_rng(1),
-    batch_size=16,
-    n_workers=4,
-    executor="process",
-)
-
-estimator = train_maf_posterior_from_dataset(
-    theta_train,
-    x_train,
-    theta_names=parameter_space.names,
-    x_names=dataset.active_band_names,
-    source="composed_forward_model",
-    hidden_features=64,
-    num_transforms=3,
-    epochs=50,
-    batch_size=128,
-)
-
-samples = estimator.sample(x_obs, num_samples=10000)
-```
-
-If the training pairs already exist, the high-level standalone declaration is:
-
-```python
-from composed import MAF, SBITrainingSet, train_sbi
-
-# theta_train[i] and x_train[i] must describe the same object or simulation.
-# x_train must use the same feature convention as x_obs: same bands, units,
-# masks/cuts, and optional concatenated errors.
-training = SBITrainingSet.from_arrays(
-    theta_train,
-    x_train,
-    theta_names=["z", "log10_mass"],
-    x_names=["u", "g", "r", "i", "z", "y", "j", "h"],
-    source="empirical_catalog_labels",
-    finite="drop",
-)
-posterior = train_sbi(
-    training,
-    MAF(hidden_features=128, num_transforms=6, epochs=200, batch_size=1024, device="auto"),
-    seed=7,
-)
-```
-
-SBI quality depends strongly on prior coverage, simulator fidelity, noise
-modeling, and diagnostic checks. The simulator produces the same active-band
-flux vector convention consumed by the Gaussian likelihood.
-
-For MAF training and sampling, `device="auto"` tries CUDA, then MPS, then CPU.
-The selected device is validated with a tiny float32 workload before training,
-and the nflows model is converted to float32 before moving to an accelerator.
-This avoids the common Apple MPS failure mode where float64 buffers leak in
-from a changed PyTorch default dtype.
-
-For expensive forward models such as FSPS, `simulate_training_set` can split
-prior draws into chunks and evaluate them in worker processes. Each worker keeps
-its own simulator/backend object alive across chunks, which avoids rebuilding
-the stellar population machinery for every object. Process mode requires the
-simulator and `noise_fn` to be pickleable; if you are calling it from a notebook,
-define those at top level or run from a small script.
-
-See `notebooks/cosmos2020_sbi_fsps_gpu_timing.ipynb` for a COSMOS2020 +
-FSPS + MAF setup focused on GPU/MPS posterior-sampling timing.
-
-## Short photometric SBI pipeline
-
-For a backend-generated SBI run, bind the observed SED and the simulator into
-one `Problem`. The training simulations then cannot drift away from the model,
-parameter mapping, units, masks, or mass normalization used for inference:
+The stable `0.1` SBI method is a conditional Masked Autoregressive Flow using
+optional `torch` and `nflows`. It learns
+`q(theta | measured flux, measurement sigma)`. The default context contains
+`flux/sigma` and `log10(sigma)` for every active band, so negative noisy fluxes
+are valid and heteroscedastic catalog depths are conditioned on explicitly.
 
 ```python
 from composed import (
-    Diffusion, Gaussian, ParameterSpace, Problem, SEDDataset, Simulate,
-    UniformPrior, fit, load_filter_set,
-)
-
-filters = load_filter_set(["sdss_u0", "sdss_g0", "sdss_r0", "sdss_i0", "sdss_z0"])
-
-priors = ParameterSpace(
-    names=["zred", "log10_mass", "dust2", "logzsol"],
-    priors={
-        "zred": UniformPrior(0.05, 1.5),
-        "log10_mass": UniformPrior(8.0, 11.5),
-        "dust2": UniformPrior(0.0, 0.8),
-        "logzsol": UniformPrior(-1.0, 0.2),
-    },
+    Gaussian, MAF, PhotometricContext, Problem, SEDDataset, Simulate, fit,
 )
 
 def noise_fn(flux):
-    return 0.08 * abs(flux)
+    return 1.0e-12 + 0.08 * abs(flux)
 
-data = SEDDataset(filters.names, observed_flux, observed_sigma, flux_unit="maggies")
 problem = Problem(
     backend=backend,
-    parameters=priors,
+    parameters=parameter_space,
     data=data,
     likelihood=Gaussian(),
     filters=filters,
@@ -334,39 +267,53 @@ problem = Problem(
 
 result = fit(
     problem,
-    method=Diffusion(epochs=200, batch_size=2048, num_samples=512, steps=64, device="auto"),
+    method=MAF(
+        epochs=200,
+        batch_size=2048,
+        validation_split=0.1,
+        patience=20,
+        num_samples=512,
+        inference_batch_size=8192,
+        device="auto",
+    ),
     training=Simulate(
         n=100_000,
         noise_fn=noise_fn,
         infer=["zred", "log10_mass"],
-        feature_transform="abmag",
+        context=PhotometricContext("snr_logsigma"),
     ),
     seed=7,
 )
 
 samples = result.samples
+posterior = result.inference_state
+posterior.save("runs/photoz_maf")
 ```
 
-For a presampled forward model, simulation, or empirical labeled catalog, do
-not declare a fictitious `Problem`:
+Uniform and log-uniform targets use invertible bounded transforms, so physical
+samples remain inside prior support without rejection. Catalog inference is
+batched inside nflows:
 
 ```python
-from composed import MAF, SBITrainingSet, train_sbi
-
-training = SBITrainingSet.from_arrays(
-    theta_train,
-    x_train,
-    theta_names=["zred", "log10_mass"],
-    x_names=list(filters.names),
-    source="presampled_forward_model_v2",
+catalog_samples = posterior.sample(
+    catalog_flux,
+    sigma=catalog_sigma,
+    input_units="native",
+    num_samples=128,
+    batch_size=8192,
+    seed=8,
 )
-posterior = train_sbi(training, MAF(epochs=200, batch_size=2048, device="auto"), seed=7)
-samples = posterior.sample(x_obs, num_samples=512)
 ```
 
-See `docs/photometric_sbi_quickstart.md` and
-`examples/minimal_photometric_diffusion_sbi.py`. Sample-only methods such as
-diffusion return `InferenceResult.logp=None` and do not invent a MAP estimate.
+`device="auto"` validates CUDA, then MPS, then CPU using float32. Checkpoints
+store tensor weights, standardizers, the ordered context schema, target prior
+transforms, versions, and training metadata without duplicating the simulation
+table. For pre-existing photometry use `SBITrainingSet.from_photometry`.
+
+See [`docs/photometric_sbi_quickstart.md`](docs/photometric_sbi_quickstart.md)
+and the COSMOS2020 tutorial suite above. The bounded-Gaussian
+calibration in [`docs/maf_validation.md`](docs/maf_validation.md) provides a
+known-posterior regression test for the complete MAF path.
 
 ## SBI diagnostics
 
@@ -400,8 +347,12 @@ rank and coverage diagnostics do not require torch, nflows, or TARP.  See
 ## Experimental conditional diffusion SBI
 
 `inftools.experimental.diffusion` ports the masked conditional diffusion idea
-used in the development notebooks into a generic array-based estimator.  It
-learns a joint feature vector such as:
+used in the development notebooks into a generic array-based estimator. This
+code is not part of the stable CompoSED `0.1` public API. Import it from
+the experimental namespace explicitly; no diffusion names are exported from
+`composed`.
+
+It learns a joint feature vector such as:
 
 ```text
 [magnitudes, optional magnitude_errors, physical_parameters]

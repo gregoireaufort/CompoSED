@@ -11,7 +11,15 @@ from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
-from composed.units import MassNormalization, canonical_photometric_flux_unit, convert_photometric_flux
+from composed.units import (
+    MASS_CONVENTION_SCHEMA,
+    MassNormalization,
+    MassReference,
+    backend_mass_reference,
+    canonical_photometric_flux_unit,
+    convert_photometric_flux,
+    validate_mass_reference,
+)
 
 
 @dataclass
@@ -38,8 +46,8 @@ class PhotometricModelGrid:
     """Mass-normalized photometric model grid cached independently of data.
 
     ``flux`` has shape ``(n_models, n_bands)`` and is stored in the backend's
-    output units, normally maggies for CompoSED photometric backends.  For the
-    CIGALE-like workflow this grid is explicitly per unit stellar mass:
+    output units, normally maggies for CompoSED photometric backends. For the
+    CIGALE-like workflow this grid is explicitly per unit surviving stellar mass:
     ``backend.mass_normalization == MassNormalization.PER_SOLAR_MASS`` and no
     ``log10_mass`` scale has been applied yet.
     """
@@ -51,8 +59,13 @@ class PhotometricModelGrid:
     parameter_names: tuple[str, ...]
     band_names: tuple[str, ...]
     mass_normalization: MassNormalization
+    mass_reference: MassReference | None = MassReference.SURVIVING_STELLAR_MASS
     flux_unit: str = "maggies"
     meta: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.mass_normalization = MassNormalization(self.mass_normalization)
+        self.mass_reference = validate_mass_reference(self.mass_normalization, self.mass_reference)
 
     def save(self, path: str | Path) -> None:
         """Save the cached grid to a NumPy ``.npz`` file."""
@@ -68,6 +81,7 @@ class CatalogProfileGridResult:
     the Gaussian likelihood evaluated at each model's analytic best mass scale.
     If a ``log10_mass_grid`` was supplied, ``marginal_logp`` stores the same
     quantity marginalized over that mass grid with the declared mass prior.
+    Every reported ``log10_mass`` is present-day surviving stellar mass.
     """
 
     model_grid: PhotometricModelGrid
@@ -125,6 +139,7 @@ def build_photometric_model_grid(
     band_names = tuple(str(name) for name in band_names)
 
     mass_norm = MassNormalization(getattr(backend, "mass_normalization", None))
+    mass_reference = backend_mass_reference(backend)
     model_flux = np.full((samples.shape[0], len(band_names)), np.nan, dtype=float)
     model_valid = np.zeros(samples.shape[0], dtype=bool)
     for i, row in enumerate(samples):
@@ -149,11 +164,14 @@ def build_photometric_model_grid(
         parameter_names=names,
         band_names=band_names,
         mass_normalization=mass_norm,
+        mass_reference=mass_reference,
         flux_unit="maggies",
         meta={
             "excluded_parameters": excluded,
             "units": "maggies",
             "mass_scale_applied": False,
+            "mass_reference": getattr(mass_reference, "value", None),
+            "mass_convention": MASS_CONVENTION_SCHEMA,
         },
     )
 
@@ -190,6 +208,7 @@ def evaluate_catalog_model_grid_likelihood(
             "evaluate_catalog_model_grid_likelihood expects a PER_SOLAR_MASS model grid. "
             f"Got {model_grid.mass_normalization}."
         )
+    validate_mass_reference(model_grid.mass_normalization, model_grid.mass_reference)
     if model_chunk_size <= 0 or object_chunk_size <= 0 or mass_chunk_size <= 0:
         raise ValueError("chunk sizes must be positive.")
     if sigma_floor is not None and float(sigma_floor) < 0.0:
@@ -288,6 +307,8 @@ def evaluate_catalog_model_grid_likelihood(
             "sigma_floor": sigma_floor,
             "log10_mass_bounds": mass_bounds,
             "mass_prior": "uniform over supplied log10_mass_grid" if log_mass_prior_weights is not None else None,
+            "mass_reference": model_grid.mass_reference.value,
+            "mass_convention": MASS_CONVENTION_SCHEMA,
         },
     )
 
@@ -300,7 +321,11 @@ def save_photometric_model_grid(grid: PhotometricModelGrid, path: str | Path) ->
         path,
         compressed=True,
         provenance_paths=grid.meta.get("provenance_paths"),
-        extra={"artifact_type": "PhotometricModelGrid", "grid_meta": grid.meta},
+        extra={
+            "artifact_type": "PhotometricModelGrid",
+            "mass_convention": MASS_CONVENTION_SCHEMA,
+            "grid_meta": grid.meta,
+        },
         samples=np.asarray(grid.samples, dtype=float),
         flux=np.asarray(grid.flux, dtype=float),
         log_prior=np.asarray(grid.log_prior, dtype=float),
@@ -308,6 +333,10 @@ def save_photometric_model_grid(grid: PhotometricModelGrid, path: str | Path) ->
         parameter_names=np.asarray(grid.parameter_names, dtype=object),
         band_names=np.asarray(grid.band_names, dtype=object),
         mass_normalization=np.asarray(grid.mass_normalization.value, dtype=object),
+        mass_reference=np.asarray(
+            "" if grid.mass_reference is None else grid.mass_reference.value,
+            dtype=object,
+        ),
         flux_unit=np.asarray(grid.flux_unit, dtype=object),
         meta=np.asarray(json.dumps(grid.meta, sort_keys=True, default=str), dtype=object),
     )
@@ -327,6 +356,11 @@ def load_photometric_model_grid(
     elif provenance_path_for(path).exists():
         provenance = read_provenance(provenance_path_for(path))
     data = np.load(path, allow_pickle=True)
+    if "mass_reference" not in data.files:
+        raise ValueError(
+            "Legacy photometric model grid has no mass_reference. Rebuild it with this "
+            "CompoSED version; older grids were normalized by formed mass."
+        )
     meta = json.loads(str(data["meta"].item())) if "meta" in data.files else {}
     if provenance is not None:
         meta["provenance"] = provenance
@@ -338,6 +372,11 @@ def load_photometric_model_grid(
         parameter_names=tuple(str(name) for name in data["parameter_names"]),
         band_names=tuple(str(name) for name in data["band_names"]),
         mass_normalization=MassNormalization(str(data["mass_normalization"].item())),
+        mass_reference=(
+            None
+            if str(data["mass_reference"].item()) == ""
+            else MassReference(str(data["mass_reference"].item()))
+        ),
         flux_unit=(str(data["flux_unit"].item()) if "flux_unit" in data.files else "maggies"),
         meta=meta,
     )

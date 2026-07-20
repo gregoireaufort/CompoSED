@@ -14,12 +14,23 @@ def plot_corner_hexbin(
     *,
     parameters: Sequence[str] | None = None,
     true_values: Mapping[str, float] | Sequence[float] | None = None,
+    comparison_result: InferenceResult | None = None,
+    result_label: str = "posterior",
+    comparison_label: str = "comparison",
+    comparison_color: str = "tab:orange",
     max_points: int = 50_000,
     gridsize: int = 35,
     bins: int = 40,
     seed: int | None = 0,
 ):
-    """Corner-style posterior plot using histograms and hexbins."""
+    """Corner-style posterior plot using histograms and hexbins.
+
+    When ``comparison_result`` is supplied, both posteriors use the same
+    parameter limits. The primary posterior remains a filled histogram/hexbin;
+    the comparison is overlaid as a density histogram and weighted
+    highest-density contours. This is useful for comparing an amortized
+    posterior against a reference Monte Carlo run.
+    """
 
     plt = _require_matplotlib()
     indices = _parameter_indices(result, parameters)
@@ -28,6 +39,15 @@ def plot_corner_hexbin(
     weights = result.weights
     draw = _resample_indices(weights, min(int(max_points), samples.shape[0]), seed=seed)
     shown = samples[draw]
+
+    comparison_samples = None
+    comparison_weights = None
+    limits = None
+    if comparison_result is not None:
+        comparison_indices = _parameter_indices(comparison_result, names)
+        comparison_samples = comparison_result.samples[:, comparison_indices]
+        comparison_weights = comparison_result.weights
+        limits = _shared_corner_limits(samples, comparison_samples)
 
     ndim = shown.shape[1]
     fig, axes = plt.subplots(ndim, ndim, figsize=(2.4 * ndim, 2.4 * ndim), squeeze=False)
@@ -40,11 +60,62 @@ def plot_corner_hexbin(
                 ax.axis("off")
                 continue
             if row == col:
-                ax.hist(shown[:, col], bins=bins, color="0.25", alpha=0.85)
+                histogram_kwargs = {}
+                if limits is not None:
+                    histogram_kwargs = {"range": limits[col], "density": True}
+                ax.hist(
+                    shown[:, col],
+                    bins=bins,
+                    color="0.25",
+                    alpha=0.75 if comparison_result is not None else 0.85,
+                    label=result_label if comparison_result is not None else None,
+                    **histogram_kwargs,
+                )
+                if comparison_result is not None:
+                    ax.hist(
+                        comparison_samples[:, col],
+                        bins=bins,
+                        range=limits[col],
+                        weights=comparison_weights,
+                        density=True,
+                        histtype="step",
+                        color=comparison_color,
+                        linewidth=1.8,
+                        label=comparison_label,
+                    )
+                    ax.set_xlim(*limits[col])
                 if truths is not None:
                     ax.axvline(truths[col], color="tab:red", lw=1.5)
             else:
-                hb = ax.hexbin(shown[:, col], shown[:, row], gridsize=gridsize, mincnt=1, cmap="viridis")
+                hexbin_kwargs = {}
+                if limits is not None:
+                    hexbin_kwargs["extent"] = (
+                        limits[col][0],
+                        limits[col][1],
+                        limits[row][0],
+                        limits[row][1],
+                    )
+                hb = ax.hexbin(
+                    shown[:, col],
+                    shown[:, row],
+                    gridsize=gridsize,
+                    mincnt=1,
+                    cmap="viridis",
+                    **hexbin_kwargs,
+                )
+                if comparison_result is not None:
+                    _plot_weighted_credible_contours(
+                        ax,
+                        comparison_samples[:, col],
+                        comparison_samples[:, row],
+                        comparison_weights,
+                        xlim=limits[col],
+                        ylim=limits[row],
+                        gridsize=gridsize,
+                        color=comparison_color,
+                    )
+                    ax.set_xlim(*limits[col])
+                    ax.set_ylim(*limits[row])
                 if truths is not None:
                     ax.plot(truths[col], truths[row], marker="*", color="tab:red", ms=9)
                 if row == ndim - 1 and col == 0:
@@ -58,6 +129,8 @@ def plot_corner_hexbin(
             elif col > 0:
                 ax.set_yticklabels([])
 
+    if comparison_result is not None:
+        axes[0, 0].legend(frameon=False, fontsize="small")
     fig.tight_layout()
     return fig, axes
 
@@ -265,12 +338,90 @@ def _truth_vector(true_values, parameter_names, indices):
     return values[indices]
 
 
+def _shared_corner_limits(primary_samples, comparison_samples, quantiles=(0.001, 0.999)):
+    """Return robust shared plotting limits for two posterior sample arrays."""
+
+    primary = np.asarray(primary_samples, dtype=float)
+    comparison = np.asarray(comparison_samples, dtype=float)
+    if primary.ndim != 2 or comparison.ndim != 2 or primary.shape[1] != comparison.shape[1]:
+        raise ValueError("Corner comparison samples must be two-dimensional with matching columns.")
+
+    limits = []
+    for column in range(primary.shape[1]):
+        values = np.concatenate([primary[:, column], comparison[:, column]])
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise ValueError("Corner comparison contains a parameter with no finite samples.")
+        low, high = np.quantile(values, quantiles)
+        if not np.isfinite(low) or not np.isfinite(high):
+            raise ValueError("Corner comparison limits are non-finite.")
+        if high <= low:
+            scale = max(abs(float(low)), 1.0)
+            low, high = float(low) - 0.05 * scale, float(high) + 0.05 * scale
+        padding = 0.03 * (high - low)
+        limits.append((float(low - padding), float(high + padding)))
+    return tuple(limits)
+
+
+def _plot_weighted_credible_contours(
+    ax,
+    x,
+    y,
+    weights,
+    *,
+    xlim,
+    ylim,
+    gridsize,
+    color,
+    credible_masses=(0.50, 0.80, 0.95),
+):
+    """Overlay weighted highest-density contours from one reference posterior."""
+
+    histogram, x_edges, y_edges = np.histogram2d(
+        np.asarray(x, dtype=float),
+        np.asarray(y, dtype=float),
+        bins=int(gridsize),
+        range=(xlim, ylim),
+        weights=np.asarray(weights, dtype=float),
+    )
+    total = float(np.sum(histogram))
+    maximum = float(np.max(histogram))
+    if not np.isfinite(total) or total <= 0.0 or maximum <= 0.0:
+        return
+
+    ordered = np.sort(histogram.ravel())[::-1]
+    cumulative = np.cumsum(ordered) / total
+    thresholds = []
+    for mass in credible_masses:
+        index = min(int(np.searchsorted(cumulative, float(mass), side="left")), ordered.size - 1)
+        thresholds.append(float(ordered[index]))
+    levels = np.unique(np.asarray(thresholds, dtype=float))
+    levels = levels[(levels > 0.0) & (levels < maximum)]
+    if levels.size == 0:
+        return
+
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    ax.contour(
+        x_centers,
+        y_centers,
+        histogram.T,
+        levels=levels,
+        colors=color,
+        linewidths=1.2,
+    )
+
+
 def _resample_indices(weights, n, seed=None, rng=None):
     if rng is None:
         rng = np.random.default_rng(seed)
     weights = np.asarray(weights, dtype=float)
     weights = weights / np.sum(weights)
-    replace = int(n) > weights.size
+    # Importance samplers can return many exact-zero weights. NumPy cannot
+    # sample more distinct indices than the positive-probability support, even
+    # when n <= len(weights), so switch to posterior resampling with replacement.
+    positive_support = int(np.count_nonzero(weights > 0.0))
+    replace = int(n) > positive_support
     return rng.choice(np.arange(weights.size), size=int(n), replace=replace, p=weights)
 
 

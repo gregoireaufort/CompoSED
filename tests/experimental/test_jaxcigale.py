@@ -2,13 +2,14 @@ import importlib.util
 import math
 
 import numpy as np
+from composed._numerics import trapezoid
 import pytest
 
 
 def trapz_numpy(y, x):
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
-    return np.trapz(y, x)
+    return trapezoid(y, x)
 
 
 def test_jaxcigale_imports_without_jax_dependency():

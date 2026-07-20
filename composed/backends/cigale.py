@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import warnings
 from collections import Counter
 from collections.abc import Mapping as MappingABC
 from collections.abc import Sequence as SequenceABC
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, ClassVar, Mapping, Sequence
 
 import numpy as np
 
@@ -15,7 +16,8 @@ from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, IntegerUniformPrior, LogUniformPrior, Prior, UniformPrior
-from composed.units import MassNormalization
+from composed.sfh import SFHModel, coerce_sfh_model
+from composed.units import MASS_CONVENTION_SCHEMA, MassNormalization, MassReference
 
 REDSHIFT_KEYS = ("z", "zred", "redshift")
 MJY_PER_MAGGIE = 3631.0e3
@@ -45,13 +47,19 @@ class CIGALEBackend(SEDBackend):
 
     This backend deliberately supports only
     ``MassNormalization.PER_SOLAR_MASS``. For SFH modules, ``normalise=True`` is
-    enforced on every call, so the likelihood remains the only place where
-    ``10**log10_mass`` may be applied.
+    enforced on every call. CIGALE therefore first computes an SED for one
+    solar mass formed; CompoSED divides that SED by
+    ``SED.info['stellar.m_star']`` before returning it. The public output is per
+    one solar mass of present-day surviving stellar mass, and the likelihood
+    remains the only place where ``10**log10_mass`` is applied.
     """
 
     modules: Sequence[str]
     module_parameters: Mapping[str, Mapping[str, Any]] | None = None
+    sfh: SFHModel | str | None = None
+    cosmology: Any | None = None
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: ClassVar[MassReference] = MassReference.SURVIVING_STELLAR_MASS
     default_z_key: str = "redshift"
     photometry_mode: str = "auto"
     cache_warehouse: bool = True
@@ -59,7 +67,6 @@ class CIGALEBackend(SEDBackend):
     clear_photometry_cache: bool = False
     strict_unknown_parameters: bool = True
     require_redshifting: bool = True
-    require_sfh_integrated_info: bool = True
     mass_normalization_tolerance: float = 1e-8
     _warehouse: Any = field(default=None, init=False, repr=False)
     _entries: tuple["_ParameterEntry", ...] = field(default=(), init=False, repr=False)
@@ -68,6 +75,23 @@ class CIGALEBackend(SEDBackend):
         modules = tuple(str(module) for module in self.modules)
         if not modules:
             raise ValueError("CIGALEBackend requires at least one CIGALE module.")
+        self.sfh = coerce_sfh_model(self.sfh, backend="cigale")
+        if self.sfh is not None:
+            if self.sfh.name == "constant" and not hasattr(np, "float"):
+                raise ImportError(
+                    "The exact named constant CIGALE SFH uses upstream v2022.0 "
+                    "module 'sfhperiodic', which still references the removed np.float "
+                    "alias. Use the dedicated CompoSED CIGALE environment with "
+                    "NumPy 1.23.5, or patch that upstream alias explicitly. CompoSED "
+                    "does not replace the constant history with a long-tau approximation."
+                )
+            existing_sfh_modules = tuple(module for module in modules if _is_sfh_module(module))
+            if existing_sfh_modules:
+                raise ValueError(
+                    "CIGALEBackend received both sfh=<named model> and native SFH module(s): "
+                    f"{', '.join(existing_sfh_modules)}. Use one SFH declaration only."
+                )
+            modules = (str(self.sfh.cigale_module_name), *modules)
         self.modules = modules
 
         self.mass_normalization = MassNormalization(self.mass_normalization)
@@ -89,6 +113,11 @@ class CIGALEBackend(SEDBackend):
             )
 
         module_parameters = _normalize_module_parameters(self.module_parameters)
+        if self.sfh is not None and self.sfh.cigale_module_name in module_parameters:
+            raise ValueError(
+                f"Parameters for generated CIGALE module {self.sfh.cigale_module_name!r} "
+                "come from the named SFH object and may not also appear in module_parameters."
+            )
         unknown_modules = set(module_parameters) - set(modules)
         if unknown_modules:
             names = ", ".join(sorted(unknown_modules))
@@ -100,7 +129,7 @@ class CIGALEBackend(SEDBackend):
         """Predict observed-frame filter photometry in maggies."""
 
         filter_set = coerce_filter_set(filters)
-        sed, module_list = self._sed_from_params(params)
+        sed, module_list, mass_metadata = self._sed_from_params(params)
 
         mode = self._resolve_photometry_mode(filter_set)
         try:
@@ -112,6 +141,7 @@ class CIGALEBackend(SEDBackend):
             if self.clear_photometry_cache:
                 _clear_cigale_photometry_caches()
 
+        flux_maggies = flux_maggies / mass_metadata["surviving_stellar_mass_msun"]
         if flux_maggies.shape != (len(filter_set),):
             raise ValueError(f"CIGALE photometry shape {flux_maggies.shape}; expected {(len(filter_set),)}.")
         if not np.all(np.isfinite(flux_maggies)):
@@ -127,6 +157,10 @@ class CIGALEBackend(SEDBackend):
                 "photometry_mode": mode,
                 "modules": module_list,
                 "cigale_info": dict(getattr(sed, "info", {})),
+                "mass_normalization": self.mass_normalization.value,
+                "mass_convention": MASS_CONVENTION_SCHEMA,
+                "mass_reference": self.mass_reference.value,
+                **mass_metadata,
             },
         )
 
@@ -148,9 +182,12 @@ class CIGALEBackend(SEDBackend):
 
         if resolution is not None:
             raise NotImplementedError("CIGALEBackend spectral resolution convolution is not implemented yet.")
-        sed, module_list = self._sed_from_params(params)
+        sed, module_list, mass_metadata = self._sed_from_params(params)
         wave_a = np.asarray(getattr(sed, "wavelength_grid"), dtype=float) * 10.0
-        fnu_mjy = np.asarray(getattr(sed, "fnu"), dtype=float)
+        fnu_mjy = (
+            np.asarray(getattr(sed, "fnu"), dtype=float)
+            / mass_metadata["surviving_stellar_mass_msun"]
+        )
         flam_cgs_per_a = _fnu_mjy_to_flambda_cgs_per_a(wave_a, fnu_mjy)
         wave_out, flux_out = _sample_or_clip_spectrum(wave_a, flam_cgs_per_a, wavelengths, wavelength_range)
         if not np.all(np.isfinite(flux_out)):
@@ -168,6 +205,9 @@ class CIGALEBackend(SEDBackend):
                 "cigale_info": dict(getattr(sed, "info", {})),
                 "spectrum_frame": "observed",
                 "mass_normalization": self.mass_normalization.value,
+                "mass_convention": MASS_CONVENTION_SCHEMA,
+                "mass_reference": self.mass_reference.value,
+                **mass_metadata,
             },
         )
 
@@ -185,9 +225,12 @@ class CIGALEBackend(SEDBackend):
         ``SED.wavelength_grid`` and ``SED.luminosity`` conventions.
         """
 
-        sed, module_list = self._rest_sed_from_params(params)
+        sed, module_list, mass_metadata = self._rest_sed_from_params(params)
         wave_nm = np.asarray(getattr(sed, "wavelength_grid"), dtype=float)
-        luminosity_w_per_nm = np.asarray(getattr(sed, "luminosity"), dtype=float)
+        luminosity_w_per_nm = (
+            np.asarray(getattr(sed, "luminosity"), dtype=float)
+            / mass_metadata["surviving_stellar_mass_msun"]
+        )
         wave_out, flux_out = _sample_or_clip_spectrum(wave_nm, luminosity_w_per_nm, wavelengths, wavelength_range)
         if not np.all(np.isfinite(flux_out)):
             raise FloatingPointError("CIGALE rest spectrum contains non-finite luminosity values after sampling.")
@@ -204,6 +247,9 @@ class CIGALEBackend(SEDBackend):
                 "cigale_info": dict(getattr(sed, "info", {})),
                 "spectrum_frame": "rest",
                 "mass_normalization": self.mass_normalization.value,
+                "mass_convention": MASS_CONVENTION_SCHEMA,
+                "mass_reference": self.mass_reference.value,
+                **mass_metadata,
             },
         )
 
@@ -212,22 +258,31 @@ class CIGALEBackend(SEDBackend):
         module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=True)
         sed = self._sed_warehouse().get_sed(module_list, parameter_list)
         if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
-            self._validate_per_solar_mass_sed(sed)
-        return sed, module_list
+            mass_metadata = self._validate_per_solar_mass_sed(sed)
+        else:  # pragma: no cover - constructor currently rejects this mode.
+            mass_metadata = {}
+        return sed, module_list, mass_metadata
 
     def _rest_sed_from_params(self, params: Mapping[str, Any]):
         params = dict(params)
         module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=False)
         sed = self._sed_warehouse().get_sed(module_list, parameter_list)
         if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
-            self._validate_per_solar_mass_sed(sed)
-        return sed, module_list
+            mass_metadata = self._validate_per_solar_mass_sed(sed)
+        else:  # pragma: no cover - constructor currently rejects this mode.
+            mass_metadata = {}
+        return sed, module_list, mass_metadata
 
     def _sed_warehouse(self):
         if self.cache_warehouse and self._warehouse is not None:
             return self._warehouse
 
-        from pcigale.warehouse import SedWarehouse
+        # Upstream CIGALE v2022.0 imports pkg_resources while loading its data
+        # package. Modern setuptools emits a deprecation warning that users
+        # cannot act on without changing the pinned scientific engine.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
+            from pcigale.warehouse import SedWarehouse
 
         nocache = list(self.nocache_modules) if self.nocache_modules is not None else None
         warehouse = SedWarehouse(nocache=nocache)
@@ -259,6 +314,17 @@ class CIGALEBackend(SEDBackend):
                 used.add(entry.flat_name)
             configs[entry.module][entry.parameter] = _coerce_cigale_value(value, entry.dtype)
 
+        if self.sfh is not None:
+            sfh_redshift = self._redshift_for_named_sfh(params)
+            configs[str(self.sfh.cigale_module_name)].update(
+                self.sfh.cigale_parameters(
+                    params,
+                    redshift=sfh_redshift,
+                    cosmology=self._cosmology(),
+                )
+            )
+            used.update(self.sfh.required_parameters)
+
         self._enforce_sfh_normalise(configs)
         if include_redshifting:
             self._inject_redshift(configs, params, used)
@@ -271,6 +337,33 @@ class CIGALEBackend(SEDBackend):
         self._check_unknown_parameters(params, used)
 
         return output_modules, [configs[module] for module in output_modules]
+
+    def _redshift_for_named_sfh(self, params: Mapping[str, Any]) -> float | None:
+        for key in (self.default_z_key, *REDSHIFT_KEYS):
+            if key in params:
+                z = float(params[key])
+                if not np.isfinite(z) or z < 0.0:
+                    raise ValueError(f"Redshift parameter {key!r} must be finite and non-negative.")
+                return z
+        redshift_module = _first_redshifting_module(self.modules)
+        for entry in self._entries:
+            if entry.module != redshift_module or entry.parameter != "redshift":
+                continue
+            if entry.prior is None:
+                z = float(entry.fixed_value)
+                if not np.isfinite(z) or z < 0.0:
+                    raise ValueError("Fixed CIGALE redshift must be finite and non-negative.")
+                return z
+            if entry.flat_name in params:
+                z = float(params[entry.flat_name])
+                if not np.isfinite(z) or z < 0.0:
+                    raise ValueError(f"Redshift parameter {entry.flat_name!r} must be finite and non-negative.")
+                return z
+        if self.sfh is not None and self.sfh.requires_redshift:
+            raise ValueError(
+                f"Named SFH {self.sfh.name!r} uses an age fraction and requires a redshift parameter."
+            )
+        return None
 
     def _enforce_sfh_normalise(self, configs: dict[str, dict[str, Any]]) -> None:
         for module in self.modules:
@@ -314,14 +407,20 @@ class CIGALEBackend(SEDBackend):
                 return key, z
         raise ValueError("Missing redshift parameter. Provide one of: z, zred, redshift.")
 
-    def _validate_per_solar_mass_sed(self, sed) -> None:
+    def _cosmology(self):
+        if self.cosmology is not None:
+            return self.cosmology
+        from astropy.cosmology import Planck18
+
+        return Planck18
+
+    def _validate_per_solar_mass_sed(self, sed) -> dict[str, float]:
         info = getattr(sed, "info", {})
         if "sfh.integrated" not in info:
-            if self.require_sfh_integrated_info:
-                raise ValueError(
-                    "CIGALE SED does not expose info['sfh.integrated']; cannot verify per-solar-mass normalization."
-                )
-            return
+            raise ValueError(
+                "CIGALE SED does not expose info['sfh.integrated']; cannot convert "
+                "the formed-mass-normalized SED to surviving stellar mass."
+            )
         formed_mass = float(info["sfh.integrated"])
         if not np.isfinite(formed_mass) or not np.isclose(
             formed_mass, 1.0, rtol=float(self.mass_normalization_tolerance), atol=float(self.mass_normalization_tolerance)
@@ -330,6 +429,20 @@ class CIGALEBackend(SEDBackend):
                 "CIGALE SED is not normalized to one solar mass formed "
                 f"(info['sfh.integrated']={formed_mass!r})."
             )
+        if "stellar.m_star" not in info:
+            raise ValueError(
+                "CIGALE SED does not expose info['stellar.m_star']; a stellar population "
+                "module is required to normalize output by surviving stellar mass."
+            )
+        stellar_mass = float(info["stellar.m_star"])
+        if not np.isfinite(stellar_mass) or stellar_mass <= 0.0:
+            raise FloatingPointError("CIGALE returned a non-positive or non-finite stellar.m_star value.")
+        return {
+            "formed_mass_msun": formed_mass,
+            "surviving_stellar_mass_msun": stellar_mass,
+            "surviving_stellar_mass_fraction": stellar_mass / formed_mass,
+            "output_normalization_divisor_msun": stellar_mass,
+        }
 
     def _resolve_photometry_mode(self, filter_set: FilterSet) -> str:
         if self.photometry_mode != "auto":
@@ -402,6 +515,13 @@ def build_cigale_backend_and_parameter_space(
 
     backend = CIGALEBackend(modules=modules, module_parameters=module_parameters, **backend_kwargs)
     parameter_space = build_cigale_parameter_space(modules, module_parameters, additional_priors=additional_priors)
+    if backend.sfh is not None:
+        missing = [name for name in backend.sfh.required_parameters if name not in parameter_space.names]
+        if missing:
+            raise ValueError(
+                "Named CIGALE SFH parameters must be declared in additional_priors; missing: "
+                + ", ".join(missing)
+            )
     return backend, parameter_space
 
 
@@ -610,8 +730,10 @@ def _clear_cigale_photometry_caches() -> None:
     """
 
     try:
-        from pcigale.sed import SED
-        from pcigale.sed import utils as sed_utils
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
+            from pcigale.sed import SED
+            from pcigale.sed import utils as sed_utils
     except Exception:  # pragma: no cover - pcigale is optional
         return
 

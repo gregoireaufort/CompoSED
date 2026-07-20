@@ -9,6 +9,7 @@ from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
 from composed.likelihood import GaussianPhotometricLikelihood, GaussianSpectralLikelihood
 from composed.parameters import ParameterSpace
 from composed.results import InferenceResult, normalize_sampling_result
+from composed.units import MASS_CONVENTION_SCHEMA, backend_mass_reference
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class _TransformedBackend:
         self.backend = backend
         self.transform = transform
         self.mass_normalization = backend.mass_normalization
+        self.mass_reference = getattr(backend, "mass_reference", None)
 
     def _params(self, params):
         transformed = self.transform(dict(params))
@@ -82,6 +84,7 @@ class Problem:
         if self.parameter_transform is not None:
             evaluation_backend = _TransformedBackend(self.backend, self.parameter_transform)
         self._evaluation_backend = evaluation_backend
+        backend_mass_reference(evaluation_backend)
 
         if isinstance(self.data, SpectroPhotometricDataset):
             photometry = self.data.photometry
@@ -151,6 +154,21 @@ class Problem:
             "spectrum": self._components[1].simulate(theta, noise_fn=noise_fn["spectrum"], rng=rng),
         }
 
+    def simulate_with_uncertainty(self, theta, noise_fn, rng: np.random.Generator | None = None):
+        """Simulate photometry and return ``(active_flux, active_sigma)``.
+
+        The uncertainty is the exact value returned by ``noise_fn`` for the
+        same noiseless model and random realization. This first stable SBI
+        contract is photometry-only; joint spectrophotometric SBI requires a
+        separate explicit context schema.
+        """
+
+        if len(self._components) != 1 or not isinstance(self.data, SEDDataset):
+            raise NotImplementedError(
+                "simulate_with_uncertainty currently supports a photometric SEDDataset Problem only."
+            )
+        return self._components[0].simulate_with_uncertainty(theta, noise_fn=noise_fn, rng=rng)
+
     def to_inftools_posterior(self):
         from inftools.core import Posterior
 
@@ -169,8 +187,13 @@ class Problem:
         transform_name = None
         if self.parameter_transform is not None:
             transform_name = getattr(self.parameter_transform, "__name__", type(self.parameter_transform).__name__)
+        mass_normalization = getattr(self.backend, "mass_normalization", None)
+        mass_reference = backend_mass_reference(self.backend)
         return {
             "backend": f"{type(self.backend).__module__}.{type(self.backend).__name__}",
+            "mass_normalization": getattr(mass_normalization, "value", mass_normalization),
+            "mass_reference": getattr(mass_reference, "value", mass_reference),
+            "mass_convention": MASS_CONVENTION_SCHEMA,
             "parameters": tuple(self.parameters.names),
             "priors": {name: repr(self.parameters.priors[name]) for name in self.parameters.names},
             "data": type(self.data).__name__,
@@ -348,11 +371,11 @@ def fit(
             meta={**tamis.meta, "weights_norm": tamis.weights},
         )
     elif sampler_config.name == "pocomc":
-        from inftools.pocomc_adapter import run_pocomc
+        from inftools.pocomc_adapter import pocomc_prior_from_parameter_space, run_pocomc
 
         _reject_noncontinuous_for_sampler(problem.parameters, "PocoMC")
         if "prior" not in options and "bounds" not in options:
-            options["bounds"] = _uniform_bounds(problem.parameters, "PocoMC")
+            options["prior"] = pocomc_prior_from_parameter_space(problem.parameters)
         options.setdefault("random_state", seed)
         raw = run_pocomc(posterior, **options)
     else:

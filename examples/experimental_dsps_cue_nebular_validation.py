@@ -41,6 +41,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.experimental.jaxcigale.ssp_data import (
     default_continuum_ssp_path,
     require_continuum_ssp_path,
@@ -447,7 +448,7 @@ def trapezoid(y, x):
 
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
-    return np.trapz(y, x)
+    return trapezoid(y, x)
 
 
 def plot_spectra_grid(output_dir: Path, draws, wave_nm, dsps_total, cigale_total, fsps_total) -> None:

@@ -184,6 +184,31 @@ def test_simulate_training_set_with_toy_likelihood():
     assert np.allclose(x, np.array([[1.0, 2.0]] * 5))
 
 
+def test_simulate_training_set_can_return_exact_sigma():
+    data = SEDDataset(["g", "r"], flux=np.zeros(2), sigma=np.ones(2))
+    backend = MockBackend([1.0, 2.0], band_names=["g", "r"])
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+    like = GaussianPhotometricLikelihood(backend, data, ps)
+
+    def noise(flux, theta=None, rng=None):
+        del rng
+        return 0.1 * flux + 0.01 * theta[0]
+
+    theta, x, sigma, metadata = simulate_training_set(
+        ps,
+        like,
+        n=5,
+        noise_fn=noise,
+        rng=np.random.default_rng(3),
+        return_sigma=True,
+        return_metadata=True,
+    )
+    expected = 0.1 * np.asarray([1.0, 2.0])[None, :] + 0.01 * theta
+    assert sigma.shape == x.shape == (5, 2)
+    assert np.allclose(sigma, expected)
+    assert metadata["returned_sigma"] is True
+
+
 def test_simulate_training_set_parallel_thread_chunks():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
 
@@ -210,6 +235,31 @@ def test_simulate_training_set_parallel_thread_chunks():
     assert meta["batch_size"] == 4
     assert meta["n_workers"] == 2
     assert meta["executor"] == "thread"
+
+
+def test_parallel_training_simulation_returns_matching_sigma_rows():
+    class Simulator:
+        def simulate_with_uncertainty(self, theta, noise_fn=None, rng=None):
+            flux = np.array([theta[0], theta[0] + 1.0])
+            sigma = np.asarray(noise_fn(flux), dtype=float)
+            return flux + rng.normal(scale=sigma), sigma
+
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+    theta, x, sigma = simulate_training_set(
+        ps,
+        Simulator(),
+        n=17,
+        noise_fn=lambda flux: 0.1 + 0.05 * flux,
+        rng=np.random.default_rng(12),
+        batch_size=4,
+        n_workers=2,
+        executor="thread",
+        return_sigma=True,
+    )
+
+    expected = np.column_stack([0.1 + 0.05 * theta[:, 0], 0.15 + 0.05 * theta[:, 0]])
+    assert x.shape == sigma.shape == (17, 2)
+    assert np.allclose(sigma, expected)
 
 
 def test_simulate_training_set_retries_failures():
@@ -273,6 +323,30 @@ def test_tiny_maf_training_if_dependencies_available():
     assert np.all(np.isfinite(logp))
     assert len(history["val_loss"]) == 2
     assert np.all(np.isfinite(history["val_loss"]))
+
+
+@pytest.mark.sbi
+def test_maf_training_seed_controls_weight_initialization():
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch/nflows are not installed.")
+
+    rng = np.random.default_rng(81)
+    theta = rng.normal(size=(48, 1))
+    x = theta + 0.1 * rng.normal(size=(48, 1))
+    settings = {
+        "hidden_features": 8,
+        "num_transforms": 2,
+        "num_blocks": 1,
+        "device": "cpu",
+        "epochs": 2,
+        "batch_size": 16,
+        "seed": 82,
+    }
+    first = train_maf_posterior_from_dataset(theta, x, **settings)
+    second = train_maf_posterior_from_dataset(theta, x, **settings)
+
+    for name, value in first.flow.state_dict().items():
+        assert first.torch.equal(value, second.flow.state_dict()[name])
 
 
 @pytest.mark.sbi

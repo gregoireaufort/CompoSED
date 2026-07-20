@@ -20,18 +20,21 @@ priors, parameter spaces, Gaussian likelihoods, mock backends, plotting, and
 basic samplers.
 
 ```bash
-git clone https://github.com/YOUR_ORG/CompoSED.git
+git clone https://github.com/gregoireaufort/CompoSED.git
 cd CompoSED
 
 conda env create -f envs/composed-core.yml
 conda activate composed-core
 
-python -m pip install -e ".[dev,plot,samplers,notebooks]"
+python -m pip install -e ".[dev,plot]"
 python scripts/check_environment.py --core
 python -m pytest -q
 ```
 
 The core tests should not require FSPS, CIGALE, JAX, DSPS, Cue, or torch.
+Install traditional samplers with `python -m pip install -e ".[samplers]"`.
+Jupyter is deliberately not part of the default environment; users who want a
+kernel can install `ipykernel` in the environment they actually use.
 
 ## FSPS Backend
 
@@ -71,11 +74,11 @@ This environment intentionally does not install notebooks, pocomc, emcee,
 nflows, or torch.  Add those only when the analysis needs them:
 
 ```bash
-# High-level diffusion SBI pipeline.
-python -m pip install -e ".[diffusion]"
-
 # MAF/nflows SBI path.
 python -m pip install -e ".[sbi]"
+
+# Experimental conditional diffusion path, only when explicitly needed.
+python -m pip install -e ".[diffusion]"
 
 # Traditional samplers such as emcee/pocomc.
 python -m pip install -e ".[samplers]"
@@ -113,6 +116,13 @@ python scripts/check_environment.py --cigale
 python examples/cigale_photometry_demo.py
 ```
 
+The dedicated recipe pins NumPy 1.23.5 because CIGALE v2022.0's native
+`sfhperiodic` module, used for an exact constant SFH, still references the
+removed `np.float` alias. CompoSED reports this incompatibility explicitly on
+newer NumPy and does not silently replace a constant history with an
+approximately constant long-timescale model. Exponential and delayed-tau
+native modules do not have this specific limitation.
+
 CompoSED does not hide CIGALE's database/module setup.  If CIGALE cannot build
 one SED through `pcigale.warehouse.SedWarehouse`, CompoSED cannot use it either.
 
@@ -120,9 +130,9 @@ As with FSPS, keep the backend environment small and install neural or sampler
 layers only when needed:
 
 ```bash
-python -m pip install -e ".[diffusion]"  # diffusion SBI
 python -m pip install -e ".[sbi]"        # MAF/nflows SBI
-python -m pip install -e ".[samplers]"   # emcee/pocomc/TAMIS helpers
+python -m pip install -e ".[diffusion]"  # experimental diffusion SBI
+python -m pip install -e ".[samplers]"   # emcee, PocoMC, and SciPy sampler helpers
 ```
 
 ## JAX-CIGALE, DSPS, and Cue
@@ -168,21 +178,21 @@ record it for validation runs.
 
 ## SBI / Neural Posterior Estimation
 
-The neural SBI layers are optional.  The high-level conditional diffusion
-pipeline uses torch only:
-
-```bash
-python -m pip install -e ".[diffusion]"
-python examples/minimal_photometric_diffusion_sbi.py
-```
-
-The MAF/nflows posterior estimator needs torch and nflows.  It can run without
-FSPS or CIGALE if you train from a pre-existing `(theta, x)` dataset.
+The stable neural SBI layer is the MAF/nflows posterior estimator. It needs
+torch and nflows, and can run without FSPS or CIGALE when trained from a
+pre-existing paired photometric dataset.
 
 ```bash
 python -m pip install -e ".[sbi]"
 python scripts/check_environment.py --sbi
 python examples/sbi_mock_photometry_demo.py
+```
+
+The conditional diffusion path is experimental and uses torch only:
+
+```bash
+python -m pip install -e ".[diffusion]"
+python examples/minimal_photometric_diffusion_sbi.py
 ```
 
 GPU/MPS/CUDA choices are torch/JAX installation issues rather than CompoSED

@@ -18,7 +18,13 @@ from composed.catalog import (
 from composed.data import SEDDataset
 from composed.filters import FilterSet
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
-from composed.units import MassNormalization
+from composed.units import (
+    MASS_CONVENTION_SCHEMA,
+    MassNormalization,
+    MassReference,
+    backend_mass_reference,
+    validate_mass_reference,
+)
 
 MJY_PER_MAGGIE = 3631.0e3
 AB_ZERO_FNU_W_M2_HZ = 3631.0e-26
@@ -33,7 +39,7 @@ class RestFrameSpectralGrid:
     ``luminosity_w_per_nm`` has shape ``(n_models, n_wave)``.  Each row is a
     rest-frame luminosity-density spectrum before cosmological redshifting and
     IGM attenuation.  The expected unit is W/nm per declared mass
-    normalization, normally one formed solar mass for CIGALE-like backends.
+    normalization, normally one solar mass of surviving stars.
     """
 
     wavelength_nm: np.ndarray
@@ -43,7 +49,12 @@ class RestFrameSpectralGrid:
     valid: np.ndarray
     parameter_names: tuple[str, ...]
     mass_normalization: MassNormalization
+    mass_reference: MassReference | None = MassReference.SURVIVING_STELLAR_MASS
     meta: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.mass_normalization = MassNormalization(self.mass_normalization)
+        self.mass_reference = validate_mass_reference(self.mass_normalization, self.mass_reference)
 
     def save(self, path: str | Path) -> None:
         """Save the rest-frame grid to a NumPy ``.npz`` file."""
@@ -65,7 +76,11 @@ def save_restframe_spectral_grid(grid: RestFrameSpectralGrid, path: str | Path) 
         path,
         compressed=True,
         provenance_paths=grid.meta.get("provenance_paths"),
-        extra={"artifact_type": "RestFrameSpectralGrid", "grid_meta": grid.meta},
+        extra={
+            "artifact_type": "RestFrameSpectralGrid",
+            "mass_convention": MASS_CONVENTION_SCHEMA,
+            "grid_meta": grid.meta,
+        },
         wavelength_nm=np.asarray(grid.wavelength_nm, dtype=float),
         luminosity_w_per_nm=np.asarray(grid.luminosity_w_per_nm, dtype=float),
         samples=np.asarray(grid.samples, dtype=float),
@@ -73,6 +88,10 @@ def save_restframe_spectral_grid(grid: RestFrameSpectralGrid, path: str | Path) 
         valid=np.asarray(grid.valid, dtype=bool),
         parameter_names=np.asarray(grid.parameter_names, dtype=object),
         mass_normalization=np.asarray(grid.mass_normalization.value, dtype=object),
+        mass_reference=np.asarray(
+            "" if grid.mass_reference is None else grid.mass_reference.value,
+            dtype=object,
+        ),
         meta=np.asarray(json.dumps(grid.meta, sort_keys=True, default=str), dtype=object),
     )
 
@@ -91,6 +110,11 @@ def load_restframe_spectral_grid(
     elif provenance_path_for(path).exists():
         provenance = read_provenance(provenance_path_for(path))
     data = np.load(path, allow_pickle=True)
+    if "mass_reference" not in data.files:
+        raise ValueError(
+            "Legacy rest-frame spectral grid has no mass_reference. Rebuild it with this "
+            "CompoSED version; older grids were normalized by formed mass."
+        )
     meta = _decode_saved_meta(data["meta"].item()) if "meta" in data.files else {}
     if provenance is not None:
         meta["provenance"] = provenance
@@ -102,6 +126,11 @@ def load_restframe_spectral_grid(
         valid=np.asarray(data["valid"], dtype=bool),
         parameter_names=tuple(str(name) for name in data["parameter_names"]),
         mass_normalization=MassNormalization(str(data["mass_normalization"].item())),
+        mass_reference=(
+            None
+            if str(data["mass_reference"].item()) == ""
+            else MassReference(str(data["mass_reference"].item()))
+        ),
         meta=meta,
     )
 
@@ -176,6 +205,8 @@ def build_restframe_spectral_grid(
     )
     if samples.shape[0] == 0:
         raise ValueError("Cannot build an empty rest-frame spectral grid.")
+    mass_norm = MassNormalization(getattr(backend, "mass_normalization", None))
+    mass_reference = backend_mass_reference(backend)
 
     requested_wave = None if wavelengths_nm is None else _validate_wavelength_nm(wavelengths_nm)
     wavelength_grid = requested_wave
@@ -203,7 +234,6 @@ def build_restframe_spectral_grid(
         if spectrum is not None:
             luminosity[i] = spectrum
 
-    mass_norm = MassNormalization(getattr(backend, "mass_normalization", None))
     return RestFrameSpectralGrid(
         wavelength_nm=wavelength_grid,
         luminosity_w_per_nm=luminosity,
@@ -212,11 +242,14 @@ def build_restframe_spectral_grid(
         valid=valid & np.isfinite(log_prior),
         parameter_names=names,
         mass_normalization=mass_norm,
+        mass_reference=mass_reference,
         meta={
             "excluded_parameters": tuple(excluded_parameters),
             "wavelength_unit": "nm",
             "luminosity_unit": "W/nm",
             "mass_scale_applied": False,
+            "mass_reference": getattr(mass_reference, "value", None),
+            "mass_convention": MASS_CONVENTION_SCHEMA,
         },
     )
 
@@ -334,6 +367,7 @@ def project_rest_grid_to_photometric_grid(
             "Native fast catalog mode expects a PER_SOLAR_MASS rest-frame grid. "
             f"Got {rest_grid.mass_normalization}."
         )
+    validate_mass_reference(rest_grid.mass_normalization, rest_grid.mass_reference)
     if not np.array_equal(rest_grid.wavelength_nm, operator.wavelength_nm):
         raise ValueError("Rest grid wavelength and operator wavelength grids do not match.")
     flux = rest_grid.luminosity_w_per_nm @ operator.matrix.T
@@ -354,10 +388,13 @@ def project_rest_grid_to_photometric_grid(
         parameter_names=rest_grid.parameter_names,
         band_names=operator.band_names,
         mass_normalization=rest_grid.mass_normalization,
+        mass_reference=rest_grid.mass_reference,
         meta={
             "source": "RestFrameSpectralGrid projected with RedshiftFilterOperator",
             "redshift": operator.redshift,
             "operator_meta": dict(operator.meta),
+            "mass_reference": rest_grid.mass_reference.value,
+            "mass_convention": MASS_CONVENTION_SCHEMA,
         },
     )
 

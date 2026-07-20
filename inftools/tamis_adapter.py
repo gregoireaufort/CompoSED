@@ -11,9 +11,11 @@ from .core import Posterior, SamplingResult, Array
 try:
     import TAMIS
     _HAS_TAMIS = True
-except ImportError:  # safety if you don't have TAMIS installed in a given env
+    _TAMIS_IMPORT_ERROR = None
+except ImportError as exc:  # safety if you don't have TAMIS installed in a given env
     TAMIS = None
     _HAS_TAMIS = False
+    _TAMIS_IMPORT_ERROR = exc
 
 
 def qmc_sobol_means(n, d, seed=0, eps=1e-6):
@@ -172,7 +174,14 @@ def run_tamis(
     """
     import numpy as np
 
-    
+    if not _HAS_TAMIS:
+        raise ImportError(
+            "The external TAMIS adapter requires a package that provides `import TAMIS`; "
+            "it is not distributed by CompoSED or its sampler extra. Use composed.MixedTAMIS "
+            "for the self-contained implementation, or install the external TAMIS package "
+            "explicitly before using composed.TAMIS."
+        ) from _TAMIS_IMPORT_ERROR
+
     rng = np.random.default_rng(seed)
     dim = int(posterior.dim)
     x0 = np.asarray(x0, float)

@@ -1,0 +1,11 @@
+include CHANGELOG.md
+include LICENSE
+include README.md
+include pytest.ini
+recursive-include docs *.md
+recursive-include envs *.yml
+recursive-include examples *.py
+recursive-include notebooks/tutorials *.ipynb *.md
+recursive-include notebooks/validation *.ipynb *.md
+recursive-include scripts *.py
+recursive-include tests *.py

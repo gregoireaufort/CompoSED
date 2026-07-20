@@ -1,4 +1,4 @@
-"""Compute FSPS broadband photometry for one simple tabular SFH.
+"""Compute FSPS broadband photometry for one named delayed-tau SFH.
 
 This is intentionally written like a small analysis script:
 
@@ -12,23 +12,21 @@ Requirements: python-fsps, sedpy, and ``SPS_HOME`` pointing at the FSPS grids.
 
 from __future__ import annotations
 
-import numpy as np
-
 from composed.backends.fsps import FSPSBackend
 from composed.filters import FilterSet
+from composed.sfh import DelayedTauSFH
 
 
 FILTER_NAMES = ["sdss_g0", "sdss_r0", "sdss_i0"]
 
-# FSPS tabular SFH inputs are a monotonically increasing age/time grid in Gyr
-# and SFR in Msun / yr. The backend validates monotonic time and non-negative
-# SFR before calling FSPS.
+# Named SFH scalar parameters use Gyr. CompoSED constructs and validates the
+# tabular history before calling FSPS.
 GALAXY_PARAMETERS = {
     "zred": 0.1,
     "logzsol": -0.3,
     "dust2": 0.2,
-    "tabular_time_gyr": np.array([0.01, 1.0, 5.0]),
-    "tabular_sfr_msun_per_yr": np.array([1.0, 1.0, 0.2]),
+    "tage_gyr": 5.0,
+    "tau_gyr": 1.5,
 }
 
 
@@ -36,12 +34,17 @@ def main() -> None:
     from sedpy.observate import load_filters
 
     filters = FilterSet(load_filters(FILTER_NAMES), names=FILTER_NAMES)
-    backend = FSPSBackend()
+    backend = FSPSBackend(sfh=DelayedTauSFH())
 
     phot = backend.predict_photometry(GALAXY_PARAMETERS, filters)
 
     print("FSPSBackend photometry")
     print(f"mass normalization: {backend.mass_normalization.name}")
+    print(f"mass reference: {phot.metadata['mass_reference']}")
+    print(
+        "surviving fraction for the unit-formed-mass SFH: "
+        f"{phot.metadata['surviving_stellar_mass_fraction']:.6f}"
+    )
     print("output units: maggies")
     for band, flux in zip(phot.band_names, phot.flux):
         print(f"{band}: {flux:.8e} maggies")

@@ -7,7 +7,9 @@ import pytest
 
 from composed.backends.fsps import FSPSBackend
 from composed.filters import FilterSet
-from composed.units import MassNormalization
+from composed.sfh import ContinuitySFH, DelayedTauSFH, TabularSFH
+from composed.units import MassNormalization, MassReference
+from composed._numerics import trapezoid
 
 
 def test_fsps_backend_module_imports_without_fsps_installed():
@@ -87,6 +89,84 @@ def test_missing_redshift_raises_clear_error(monkeypatch):
         )
 
 
+def test_named_delayed_tau_sfh_is_evaluated_and_not_forwarded_to_fsps(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(
+        sfh=DelayedTauSFH(age="age_fraction", age_kind="fraction_of_universe", n_time=41),
+        cosmology=FakeCosmology(age_gyr=10.0),
+    )
+    backend._sp = FakeStellarPopulation()
+
+    spectrum = backend.predict_rest_spectrum(
+        {
+            "z": 1.0,
+            "age_fraction": 0.4,
+            "tau_gyr": 1.0,
+            "dust2": 0.2,
+        }
+    )
+
+    time_gyr, sfr = backend._sp.tabular_sfh
+    assert time_gyr.shape == sfr.shape == (41,)
+    assert time_gyr[-1] == pytest.approx(4.0)
+    assert np.all(np.diff(time_gyr) > 0.0)
+    assert np.all(sfr >= 0.0)
+    assert backend._sp.params["dust2"] == pytest.approx(0.2)
+    assert spectrum.metadata["sfh_model"]["name"] == "delayed_tau"
+    assert spectrum.metadata["sfh_model"]["age_kind"] == "fraction_of_universe"
+
+
+def test_named_fsps_sfh_rejects_raw_tabular_parameters(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(sfh="constant", cosmology=FakeCosmology(age_gyr=10.0))
+    backend._sp = FakeStellarPopulation()
+
+    with pytest.raises(ValueError, match="Use one SFH declaration only"):
+        backend.predict_rest_spectrum(
+            {
+                "z": 0.2,
+                "tage_gyr": 2.0,
+                "tabular_time_gyr": [0.0, 1.0],
+                "tabular_sfr_msun_per_yr": [1.0, 1.0],
+            }
+        )
+
+
+def test_parametric_named_fsps_sfh_requires_per_solar_mass(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    with pytest.raises(ValueError, match="PER_SOLAR_MASS"):
+        FSPSBackend(sfh="exponential", mass_normalization=MassNormalization.ABSOLUTE)
+
+
+def test_tabular_sfh_object_allows_absolute_amplitude(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(
+        sfh=TabularSFH(time="time", sfr="sfr"),
+        mass_normalization=MassNormalization.ABSOLUTE,
+        cosmology=FakeCosmology(age_gyr=10.0),
+    )
+    backend._sp = FakeStellarPopulation()
+    backend.predict_rest_spectrum(
+        {
+            "z": 0.2,
+            "time": [0.0, 1.0],
+            "sfr": [2.0e-9, 2.0e-9],
+        }
+    )
+
+    _, sfr = backend._sp.tabular_sfh
+    assert np.allclose(sfr, [2.0e-9, 2.0e-9])
+    assert backend._sp.formed_mass == pytest.approx(2.0)
+
+
 def test_photometry_output_shape_matches_number_of_filters(monkeypatch):
     install_fake_sedpy(monkeypatch, magnitudes=[20.0, 21.0, 22.0])
 
@@ -156,6 +236,51 @@ def test_spectrum_wavelength_range_clips_native_grid(monkeypatch):
     assert np.all(spectrum.wavelength >= 1500.0)
     assert np.all(spectrum.wavelength <= 2500.0)
     assert spectrum.wavelength.shape == spectrum.flux.shape
+
+
+def test_per_solar_mass_spectrum_is_normalized_by_surviving_stellar_mass(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(mass_normalization=MassNormalization.PER_SOLAR_MASS, cosmology=FakeCosmology(20.0))
+    backend._sp = FakeStellarPopulation()
+
+    spectrum = backend.predict_rest_spectrum(
+        {
+            "z": 0.0,
+            "tabular_time_gyr": [0.0, 1.0, 2.0],
+            "tabular_sfr_msun_per_yr": [1.0, 1.0, 1.0],
+        }
+    )
+
+    assert spectrum.metadata["formed_mass_msun"] == pytest.approx(1.0)
+    assert spectrum.metadata["surviving_stellar_mass_msun"] == pytest.approx(0.65)
+    assert spectrum.metadata["surviving_stellar_mass_fraction"] == pytest.approx(0.65)
+    assert spectrum.metadata["mass_reference"] == MassReference.SURVIVING_STELLAR_MASS.value
+    expected_luminosity_w_per_nm = np.array([1.0, 2.0, 1.0]) * fsps_backend.LSUN_CGS * 1e-6 / 0.65
+    assert np.allclose(spectrum.flux, expected_luminosity_w_per_nm)
+
+
+def test_per_solar_mass_requires_fsps_stellar_mass(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    class MissingStellarMassPopulation(FakeStellarPopulation):
+        def set_tabular_sfh(self, time_gyr, sfr):
+            super().set_tabular_sfh(time_gyr, sfr)
+            del self.stellar_mass
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(mass_normalization=MassNormalization.PER_SOLAR_MASS, cosmology=FakeCosmology(20.0))
+    backend._sp = MissingStellarMassPopulation()
+
+    with pytest.raises(FloatingPointError, match="stellar_mass"):
+        backend.predict_rest_spectrum(
+            {
+                "z": 0.0,
+                "tabular_time_gyr": [0.0, 1.0, 2.0],
+                "tabular_sfr_msun_per_yr": [1.0, 1.0, 1.0],
+            }
+        )
 
 
 def test_sedpy_shape_mismatch_raises_clear_error(monkeypatch):
@@ -287,6 +412,61 @@ def test_real_fsps_reused_backend_matches_fresh_backend_after_parameter_omission
     assert np.allclose(after_omission.flux, fresh.flux, rtol=1.0e-12, atol=0.0)
 
 
+@pytest.mark.fsps
+def test_real_fsps_named_delayed_tau_matches_its_explicit_tabular_history():
+    if not os.environ.get("SPS_HOME"):
+        pytest.skip("SPS_HOME is not configured.")
+    pytest.importorskip("fsps")
+    pytest.importorskip("sedpy")
+    from sedpy.observate import load_filters
+
+    filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
+    sfh = DelayedTauSFH(n_time=64)
+    scalar_params = {"zred": 0.1, "tage_gyr": 5.0, "tau_gyr": 1.5, "logzsol": -0.3}
+    named = FSPSBackend(sfh=sfh).predict_photometry(scalar_params, filters)
+
+    history = sfh.evaluate(scalar_params, redshift=0.1)
+    tabular_params = {
+        "zred": 0.1,
+        "logzsol": -0.3,
+        "tabular_time_gyr": history.time_gyr,
+        "tabular_sfr_msun_per_yr": history.sfr_msun_per_yr,
+    }
+    explicit = FSPSBackend().predict_photometry(tabular_params, filters)
+
+    assert np.allclose(named.flux, explicit.flux, rtol=1.0e-12, atol=0.0)
+    assert named.metadata["sfh_model"]["name"] == "delayed_tau"
+
+
+@pytest.mark.fsps
+def test_real_fsps_high_redshift_continuity_history_is_numerically_valid():
+    if not os.environ.get("SPS_HOME"):
+        pytest.skip("SPS_HOME is not configured.")
+    pytest.importorskip("fsps")
+    pytest.importorskip("sedpy")
+    from sedpy.observate import load_filters
+
+    sfh = ContinuitySFH(
+        age="age_fraction",
+        age_kind="fraction_of_universe",
+        lookback_edges_gyr=(0.0, 0.01, 0.03, 0.1, 0.3),
+    )
+    params = {
+        "zred": 4.8,
+        "logzsol": -0.2,
+        "dust2": 0.3,
+        "age_fraction": 0.65,
+        **{name: 0.0 for name in sfh.ratio_names},
+    }
+    filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
+    phot = FSPSBackend(sfh=sfh).predict_photometry(params, filters)
+
+    assert np.all(np.isfinite(phot.flux))
+    assert np.all(phot.flux >= 0.0)
+    assert phot.metadata["formed_mass_msun"] > 0.0
+    assert phot.metadata["surviving_stellar_mass_msun"] > 0.0
+
+
 class FakeStellarPopulation:
     def __init__(self):
         self.params = FakeParameterSet(
@@ -305,9 +485,15 @@ class FakeStellarPopulation:
             }
         )
         self.tabular_sfh = None
+        self.formed_mass = 1.0
+        self.stellar_mass = 0.65
 
     def set_tabular_sfh(self, time_gyr, sfr):
-        self.tabular_sfh = (np.asarray(time_gyr), np.asarray(sfr))
+        time_gyr = np.asarray(time_gyr)
+        sfr = np.asarray(sfr)
+        self.tabular_sfh = (time_gyr, sfr)
+        self.formed_mass = float(trapezoid(sfr, time_gyr) * 1.0e9)
+        self.stellar_mass = 0.65 * self.formed_mass
 
     def get_spectrum(self, tage, peraa=True):
         assert peraa is True

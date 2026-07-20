@@ -1,8 +1,10 @@
 import importlib.util
+import json
 
 import numpy as np
 import pytest
 
+import composed
 from composed.backends.base import ModelPhotometry
 from composed.data import SEDDataset
 from composed.filters import FilterSet
@@ -12,8 +14,11 @@ from composed.problem import Gaussian, Problem, fit
 from composed.sbi import (
     Diffusion,
     MAF,
+    PhotometricContext,
+    PriorSupportTransform,
     SBITrainingSet,
     Simulate,
+    TrainedMAFSBI,
     simulate_photometric_training_set,
     simulate_sbi_training_set,
     train_sbi,
@@ -85,6 +90,14 @@ def toy_problem(mask=None):
     )
 
 
+def test_stable_top_level_exports_maf_but_not_experimental_diffusion():
+    assert hasattr(composed, "MAF")
+    assert hasattr(composed, "PhotometricContext")
+    assert hasattr(composed, "TrainedMAFSBI")
+    assert not hasattr(composed, "Diffusion")
+    assert not hasattr(composed, "TrainedDiffusionSBI")
+
+
 def test_transform_photometry_abmag_and_shape_errors():
     flux = np.array([[1.0, 0.1]])
     mag = transform_photometry(flux, "abmag")
@@ -127,7 +140,7 @@ def test_problem_simulation_is_the_declared_sbi_source():
     problem = toy_problem(mask=[True, False, True])
     training = simulate_sbi_training_set(
         problem,
-        Simulate(n=12, noise_fn=zero_noise, infer=["z", "log10_mass"]),
+        Simulate(n=12, noise_fn=zero_noise, infer=["z", "log10_mass"], context="flux"),
         rng=123,
     )
 
@@ -136,6 +149,132 @@ def test_problem_simulation_is_the_declared_sbi_source():
     assert training.theta_names == ("z", "log10_mass")
     assert training.theta_full.shape == (12, 3)
     assert training.metadata["problem"] == problem.specification()
+
+
+def test_default_problem_sbi_context_retains_exact_sigma_and_accepts_negative_flux():
+    context = PhotometricContext("snr_logsigma", flux_unit="maggies")
+    encoded = context.encode(
+        np.asarray([[-0.2, 0.4]]),
+        np.asarray([[0.1, 0.2]]),
+    )
+    assert np.allclose(encoded, [[-2.0, 2.0, -1.0, np.log10(0.2)]])
+    assert context.feature_names(["g", "r"]) == (
+        "snr:g",
+        "snr:r",
+        "log10_sigma:g",
+        "log10_sigma:r",
+    )
+
+    training = simulate_sbi_training_set(
+        toy_problem(mask=[True, False, True]),
+        Simulate(n=12, noise_fn=small_noise, infer=["z", "log10_mass"]),
+        rng=123,
+    )
+    assert training.x.shape == (12, 4)
+    assert training.x_native.shape == training.sigma_native.shape == (12, 2)
+    assert np.all(training.sigma_native > 0.0)
+    assert np.allclose(
+        training.x,
+        np.column_stack(
+            [
+                training.x_native / training.sigma_native,
+                np.log10(training.sigma_native),
+            ]
+        ),
+    )
+    assert training.x_names == (
+        "snr:u",
+        "snr:r",
+        "log10_sigma:u",
+        "log10_sigma:r",
+    )
+    assert training.observation_groups == {
+        "photometry": ("snr:u", "snr:r"),
+        "uncertainty": ("log10_sigma:u", "log10_sigma:r"),
+    }
+
+
+def test_preexisting_photometry_constructor_uses_same_context_contract():
+    parameter_space = ParameterSpace(["z"], {"z": UniformPrior(0.0, 2.0)})
+    training = SBITrainingSet.from_photometry(
+        theta=np.asarray([[0.2], [1.0]]),
+        flux=np.asarray([[1.0, -0.1], [2.0, 0.2]]),
+        sigma=np.asarray([[0.1, 0.2], [0.4, 0.1]]),
+        theta_names=["z"],
+        band_names=["g", "r"],
+        source="presampled_photometry",
+        parameter_space=parameter_space,
+    )
+    assert training.x.shape == (2, 4)
+    assert training.band_names == ("g", "r")
+    assert training.context.mode == "snr_logsigma"
+    unconstrained = training.theta_transform.transform(training.theta)
+    assert np.allclose(training.theta_transform.inverse(unconstrained), training.theta)
+
+
+def test_prior_support_transform_roundtrip_support_and_jacobian():
+    from composed.priors import LogUniformPrior, NormalPrior, StudentTPrior
+
+    space = ParameterSpace(
+        ["u", "logu", "normal", "student_t"],
+        {
+            "u": UniformPrior(-2.0, 3.0),
+            "logu": LogUniformPrior(0.1, 100.0),
+            "normal": NormalPrior(0.0, 2.0),
+            "student_t": StudentTPrior(2.0, 0.0, 0.3),
+        },
+    )
+    transform = PriorSupportTransform.from_parameter_space(space, space.names)
+    theta = np.asarray([[-1.0, 0.2, -3.0, -0.2], [2.5, 50.0, 4.0, 0.6]])
+    unconstrained = transform.transform(theta)
+    recovered = transform.inverse(unconstrained)
+
+    assert np.allclose(recovered, theta)
+    assert np.all(np.isfinite(transform.log_abs_det_forward(theta)))
+    extreme = transform.inverse(np.asarray([[-1.0e6, 1.0e6, 0.0, -3.0]]))
+    assert -2.0 <= extreme[0, 0] <= 3.0
+    assert 0.1 <= extreme[0, 1] <= 100.0
+    assert extreme[0, 2] == 0.0
+    assert extreme[0, 3] == -3.0
+
+
+def test_maf_catalog_sampling_chunks_context_rows_without_object_loops():
+    class FakeEstimator:
+        theta_dim = 1
+        x_dim = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def sample(self, context, num_samples):
+            context = np.asarray(context)
+            self.calls.append(context.shape[0])
+            return np.repeat(context[:, None, :1], int(num_samples), axis=1)
+
+    training = SBITrainingSet.from_arrays(
+        theta=np.asarray([[0.0], [1.0]]),
+        x=np.asarray([[0.0, 0.0], [1.0, 1.0]]),
+        theta_names=["theta"],
+        x_names=["x0", "x1"],
+        source="batching_test",
+    )
+    estimator = FakeEstimator()
+    trained = TrainedMAFSBI(estimator, training, history={"train_loss": [0.0]})
+    samples = trained.sample(np.ones((5, 2)), num_samples=3, batch_size=2)
+
+    assert estimator.calls == [2, 2, 1]
+    assert samples.shape == (5, 3, 1)
+
+    estimator.calls.clear()
+    summary = trained.summarize_catalog(
+        np.arange(10, dtype=float).reshape(5, 2),
+        num_samples=4,
+        batch_size=2,
+    )
+    assert estimator.calls == [2, 2, 1]
+    assert summary.quantile_values.shape == (5, 3, 1)
+    assert np.allclose(summary.median[:, 0], [0.0, 2.0, 4.0, 6.0, 8.0])
+    assert summary.mean.dtype == np.float32
 
 
 def test_preexisting_training_set_is_complete_without_a_problem():
@@ -354,3 +493,55 @@ def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
     assert result.logp is None
     assert result.map_estimate is None
     assert result.inference_state.training_set.source == "composed.problem.simulate"
+    assert result.inference_state.training_set.context.mode == "snr_logsigma"
+    assert np.all((result.samples[:, 0] >= 0.0) & (result.samples[:, 0] <= 1.0))
+    assert np.all((result.samples[:, 1] >= 9.0) & (result.samples[:, 1] <= 11.0))
+
+
+@pytest.mark.sbi
+def test_trained_maf_save_load_roundtrip_preserves_schema_and_weights(tmp_path):
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch/nflows are not installed.")
+
+    problem = toy_problem()
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(n=64, noise_fn=small_noise, infer=["z", "log10_mass"]),
+        rng=51,
+    )
+    trained = train_sbi(
+        training,
+        MAF(
+            hidden_features=16,
+            num_transforms=2,
+            num_blocks=1,
+            epochs=2,
+            batch_size=16,
+            validation_split=0.2,
+            patience=2,
+        ),
+        seed=52,
+    )
+    checkpoint = trained.save(tmp_path / "toy_maf")
+    loaded = type(trained).load(checkpoint, device="cpu")
+    manifest = json.loads((checkpoint / "manifest.json").read_text())
+
+    before = trained.sample(problem.data, num_samples=7, batch_size=1, seed=53)
+    after = loaded.sample(problem.data, num_samples=7, batch_size=1, seed=53)
+
+    assert loaded.training_set is None
+    assert loaded.theta_names == trained.theta_names
+    assert loaded.x_names == trained.x_names
+    assert loaded.band_names == trained.band_names
+    assert loaded.context.specification() == trained.context.specification()
+    saved_problem = manifest["metadata"]["training_set_metadata"]["problem"]
+    assert saved_problem["backend"] == problem.specification()["backend"]
+    assert saved_problem["parameters"] == list(problem.parameters.names)
+    assert manifest["metadata"]["training_set_metadata"]["noise_model"] == "small_noise"
+    assert np.allclose(after, before)
+    assert np.all(np.isfinite(loaded.log_prob(after[0, :3], problem.data)))
+    assert {path.name for path in checkpoint.iterdir()} == {
+        "manifest.json",
+        "standardizers.npz",
+        "weights.pt",
+    }

@@ -40,6 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.provenance import require_provenance, save_npz_with_provenance
 
 C_A_PER_S = 2.99792458e18
@@ -459,7 +460,7 @@ def flat_lcdm_age_gyr_numpy(z: float, omega_m: float = 0.3075, h: float = 0.6774
 def trapezoid(y, x):
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
-    return np.trapz(y, x)
+    return trapezoid(y, x)
 
 
 if __name__ == "__main__":

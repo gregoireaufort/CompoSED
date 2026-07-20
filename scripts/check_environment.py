@@ -164,6 +164,24 @@ def check_cigale() -> list[Check]:
     """CIGALE backend checks."""
 
     checks = [import_check("pcigale", distribution="pcigale")]
+    try:
+        import numpy as np
+
+        supports_periodic = np.lib.NumpyVersion(np.__version__) < "1.24.0"
+        checks.append(
+            Check(
+                "CIGALE constant SFH",
+                supports_periodic,
+                (
+                    f"NumPy {np.__version__} retains np.float for upstream sfhperiodic"
+                    if supports_periodic
+                    else f"NumPy {np.__version__} removed np.float; named constant SFH requires NumPy 1.23.5"
+                ),
+                required=False,
+            )
+        )
+    except Exception as exc:
+        checks.append(Check("CIGALE constant SFH", False, f"could not check NumPy: {exc}", required=False))
     checks.append(
         Check(
             "CIGALE target",

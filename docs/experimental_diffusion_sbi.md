@@ -4,8 +4,9 @@
 model for array-based simulation-based inference.  It is experimental: useful
 for research and notebooks, but less stable than the top-level MAF interface.
 
-Most CompoSED users should select it through `composed.Diffusion`. The class in
-this document is the lower-level score-model implementation.
+Diffusion is excluded from the stable CompoSED `0.1` top-level API. Experimental
+high-level use imports `Diffusion` from `composed.sbi`; the class documented
+below is the lower-level score-model implementation.
 
 ## Data Entering
 
@@ -82,7 +83,8 @@ training table encodes a special convention.
 For external paired arrays, the high-level route is:
 
 ```python
-from composed import Diffusion, SBITrainingSet, train_sbi
+from composed import SBITrainingSet, train_sbi
+from composed.sbi import Diffusion
 
 training = SBITrainingSet.from_arrays(
     theta_train,

@@ -20,7 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from composed import (
-    Diffusion,
     Gaussian,
     ParameterSpace,
     Problem,
@@ -29,6 +28,7 @@ from composed import (
     UniformPrior,
     fit,
 )
+from composed.sbi import Diffusion
 from composed.backends.base import ModelPhotometry
 from composed.filters import FilterSet
 from composed.units import MassNormalization
@@ -99,6 +99,7 @@ def main():
             n=2_000,
             noise_fn=noise_model,
             infer=["z", "log10_mass", "dust"],
+            context="flux",
             feature_transform="log10_flux",
         ),
         seed=7,

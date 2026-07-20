@@ -3,7 +3,6 @@
 from __future__ import annotations
 from typing import Optional
 import numpy as np
-import emcee
 
 from .core import Posterior, SamplingResult, Array
 
@@ -108,6 +107,14 @@ def run_emcee(
     x0:
         Initial point (used to initialize all walkers in a small Gaussian ball).
     """
+    try:
+        import emcee
+    except ImportError as exc:
+        raise ImportError(
+            "run_emcee requires the optional emcee package. "
+            "Install CompoSED with the 'samplers' extra."
+        ) from exc
+
     if rng is not None and seed is not None:
         raise ValueError("Pass either rng or seed, not both.")
     if rng is None:

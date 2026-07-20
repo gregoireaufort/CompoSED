@@ -36,22 +36,63 @@ Two photometry modes are supported:
 
 ## Mass Normalization
 
-CIGALE is used in `composed` as a per-solar-mass backend. The backend declares:
+CIGALE is used in `composed` as a per-surviving-stellar-mass backend. The
+backend declares:
 
 ```python
 MassNormalization.PER_SOLAR_MASS
 ```
 
 and enforces `normalise=True` for every SFH module whose name starts with
-`sfh`. The likelihood is then responsible for multiplying model photometry by
+`sfh`. This first produces an SED for one solar mass formed. The backend
+requires `SED.info['stellar.m_star']` and divides photometry and spectra by that
+value. The likelihood then multiplies the per-surviving-mass output by
 `10**log10_mass`.
 
-This keeps the same convention as the FSPS backend: backends make normalized
-photometry; likelihoods apply the explicit mass parameter.
+Thus `log10_mass` has the same meaning for CIGALE and FSPS: present-day
+surviving stellar mass. The original `sfh.integrated`, `stellar.m_star`, and
+their ratio remain available in `ModelPhotometry.metadata` or
+`ModelSpectrum.metadata` for inspection.
+
+The standalone numerical check can be run in the CIGALE environment with:
+
+```bash
+python examples/validate_cigale_mass_normalization.py
+```
+
+It compares the backend against an independent direct `SedWarehouse` call and
+explicit division by `stellar.m_star`.
 
 ## Parameter Specs
 
-Module parameters are specified as a nested dictionary:
+For the stable cross-backend SFH subset, prefer a named SFH and omit the SFH
+module from `modules`:
+
+```python
+from composed import DelayedTauSFH, UniformPrior
+
+backend, parameter_space = build_cigale_backend_and_parameter_space(
+    modules=["bc03", "redshifting"],
+    module_parameters={
+        "bc03": {"imf": 1, "metallicity": [0.008, 0.02]},
+        "redshifting": {"redshift": {"name": "z", "range": [0.05, 2.0]}},
+    },
+    additional_priors={
+        "log10_mass": UniformPrior(8.0, 12.0),
+        "tage_gyr": UniformPrior(0.1, 5.0),
+        "tau_gyr": UniformPrior(0.1, 5.0),
+    },
+    sfh=DelayedTauSFH(),
+)
+```
+
+CompoSED maps constant, exponential, and delayed-tau histories to native
+CIGALE v2022.0 modules with `normalise=True`. See `docs/sfh_models.md` for the
+equations and unit conversion. Continuity and arbitrary tabular histories are
+not silently approximated in this backend.
+
+The original native-module API remains available for every CIGALE SFH. Module
+parameters are specified as a nested dictionary:
 
 ```python
 module_parameters = {

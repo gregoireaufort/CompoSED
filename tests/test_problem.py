@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 
+import composed
+
 from composed import (
     Gaussian,
     Emcee,
@@ -16,6 +18,11 @@ from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
 from composed.units import MassNormalization
+
+
+def test_package_exposes_version():
+    assert isinstance(composed.__version__, str)
+    assert composed.__version__
 
 
 class ParameterBackend(SEDBackend):
@@ -51,6 +58,9 @@ def test_problem_exposes_prior_likelihood_posterior_and_transform():
     assert problem.log_prior([2.0]) == pytest.approx(expected_prior)
     assert problem.log_posterior([2.0]) == pytest.approx(expected_like + expected_prior)
     assert problem.specification()["parameter_transform"] == "amplitude_transform"
+    assert problem.specification()["mass_normalization"] == "absolute"
+    assert problem.specification()["mass_reference"] is None
+    assert problem.specification()["mass_convention"] == "composed.mass.surviving_stellar.v1"
 
 
 def test_joint_problem_adds_two_data_terms_but_prior_once():

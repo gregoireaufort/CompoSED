@@ -146,27 +146,33 @@ class MAFPosteriorEstimator:
         standardize: bool = True,
         max_grad_norm: float | None = None,
         restore_best: bool = True,
+        initialization_seed: int | None = None,
     ) -> None:
         torch, _ = _require_sbi_dependencies()
         self.torch = torch
         self.theta_dim = int(theta_dim)
         self.x_dim = int(x_dim)
+        self.hidden_features = int(hidden_features)
+        self.num_transforms = int(num_transforms)
+        self.num_blocks = int(num_blocks)
         self.learning_rate = float(learning_rate)
         self.standardize = bool(standardize)
         self.max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
         self.restore_best = bool(restore_best)
+        self.initialization_seed = None if initialization_seed is None else int(initialization_seed)
         self.device = resolve_torch_device(
             torch,
             device=device,
             validate=bool(validate_device),
             allow_fallback=bool(allow_device_fallback),
         )
+        _seed_torch(torch, self.initialization_seed)
         flow = build_maf(
             theta_dim=self.theta_dim,
             x_dim=self.x_dim,
-            hidden_features=hidden_features,
-            num_transforms=num_transforms,
-            num_blocks=num_blocks,
+            hidden_features=self.hidden_features,
+            num_transforms=self.num_transforms,
+            num_blocks=self.num_blocks,
         )
         self.flow = _prepare_flow_for_device(flow, torch, self.device)
         self.theta_standardizer: Standardizer | None = None
@@ -180,6 +186,8 @@ class MAFPosteriorEstimator:
         epochs: int = 100,
         batch_size: int = 256,
         validation_split: float = 0.0,
+        patience: int | None = None,
+        min_delta: float = 0.0,
         seed: int | None = None,
         verbose: bool = False,
     ) -> dict[str, list[float]]:
@@ -195,6 +203,12 @@ class MAFPosteriorEstimator:
         validation_split = float(validation_split)
         if not 0.0 <= validation_split < 1.0:
             raise ValueError("validation_split must lie in [0, 1).")
+        if patience is not None and int(patience) <= 0:
+            raise ValueError("patience must be positive or None.")
+        patience = None if patience is None else int(patience)
+        min_delta = float(min_delta)
+        if not np.isfinite(min_delta) or min_delta < 0.0:
+            raise ValueError("min_delta must be finite and non-negative.")
         n_total = theta_train.shape[0]
         n_validation = int(round(validation_split * n_total))
         if n_validation >= n_total:
@@ -214,8 +228,7 @@ class MAFPosteriorEstimator:
             theta_fit = theta_train
             x_fit = x_train
 
-        if seed is not None:
-            torch.manual_seed(int(seed))
+        _seed_torch(torch, seed)
         theta_t = torch.as_tensor(theta_fit, dtype=torch.float32, device=self.device)
         x_t = torch.as_tensor(x_fit, dtype=torch.float32, device=self.device)
         training_index_t = torch.as_tensor(training_indices, dtype=torch.long, device=self.device)
@@ -246,6 +259,8 @@ class MAFPosteriorEstimator:
         self.flow.train()
         best_loss = float("inf")
         best_state = None
+        best_epoch = None
+        epochs_without_improvement = 0
         for epoch in range(epochs):
             losses = []
             saw_nonfinite_loss = False
@@ -258,6 +273,15 @@ class MAFPosteriorEstimator:
                     break
                 opt.zero_grad()
                 loss.backward()
+                gradients_are_finite = all(
+                    parameter.grad is None
+                    or bool(torch.all(torch.isfinite(parameter.grad)).detach().cpu().item())
+                    for parameter in self.flow.parameters()
+                )
+                if not gradients_are_finite:
+                    saw_nonfinite_loss = True
+                    losses.append(np.nan)
+                    break
                 if self.max_grad_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.flow.parameters(), self.max_grad_norm)
                 opt.step()
@@ -277,9 +301,13 @@ class MAFPosteriorEstimator:
                 selection_loss = validation_loss_value
             else:
                 selection_loss = mean_loss
-            if np.isfinite(selection_loss) and selection_loss < best_loss:
+            if np.isfinite(selection_loss) and selection_loss < best_loss - min_delta:
                 best_loss = selection_loss
                 best_state = {key: value.detach().clone() for key, value in self.flow.state_dict().items()}
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
             if verbose:
                 message = f"epoch {epoch + 1}/{epochs}: train_loss={mean_loss:.6g}"
                 if theta_validation is not None:
@@ -290,16 +318,46 @@ class MAFPosteriorEstimator:
                 if verbose:
                     print(f"stopping early after non-finite loss at epoch {epoch + 1}")
                 break
+            if patience is not None and epochs_without_improvement >= patience:
+                self.history["stopped_early_patience"] = [float(epoch + 1)]
+                if verbose:
+                    print(f"stopping early after {patience} epochs without improvement")
+                break
         if best_state is None:
             raise FloatingPointError("MAF training produced no finite epoch loss.")
         if self.restore_best and best_state is not None:
             self.flow.load_state_dict(best_state)
             self.history["best_selection_loss"] = [best_loss]
+        self.history["best_epoch"] = [float(best_epoch)]
+        self.history["epochs_ran"] = [float(len(self.history["train_loss"]))]
         return self.history
 
-    def sample(self, x_obs: np.ndarray, num_samples: int = 10000) -> np.ndarray:
+    def configuration(self) -> dict[str, Any]:
+        """JSON-friendly architecture and training-state configuration."""
+
+        return {
+            "theta_dim": self.theta_dim,
+            "x_dim": self.x_dim,
+            "hidden_features": self.hidden_features,
+            "num_transforms": self.num_transforms,
+            "num_blocks": self.num_blocks,
+            "learning_rate": self.learning_rate,
+            "standardize": self.standardize,
+            "max_grad_norm": self.max_grad_norm,
+            "restore_best": self.restore_best,
+            "initialization_seed": self.initialization_seed,
+        }
+
+    def sample(
+        self,
+        x_obs: np.ndarray,
+        num_samples: int = 10000,
+        *,
+        seed: int | None = None,
+    ) -> np.ndarray:
         self._check_fitted()
         torch = self.torch
+        _seed_torch(torch, seed)
         x = _as_context_batch(x_obs, self.x_dim)
         x_std = self.x_standardizer.transform(x)
         context = torch.as_tensor(x_std, dtype=torch.float32, device=self.device)
@@ -350,11 +408,14 @@ def simulate_training_set(
     n_workers: int = 1,
     executor: Literal["process", "thread", "serial"] = "process",
     mp_context: str | None = None,
+    return_sigma: bool = False,
 ):
     """Sample theta from priors and simulate flux-like observations.
 
     The returned ``x`` rows are the same active-band or active-pixel vectors
-    consumed by the likelihood.  For expensive backends such as FSPS, set
+    consumed by the likelihood. When ``return_sigma=True``, the simulator must
+    expose ``simulate_with_uncertainty`` and the exact Gaussian sigma used for
+    every realization is returned alongside ``x``. For expensive backends such as FSPS, set
     ``n_workers > 1`` and a modest ``batch_size`` so each worker keeps its own
     backend instance alive across many forward-model calls.  Process execution
     requires ``simulator`` and ``noise_fn`` to be pickleable; in notebooks,
@@ -378,28 +439,32 @@ def simulate_training_set(
     if n == 0:
         theta_empty = np.empty((0, parameter_space.ndim), dtype=float)
         x_empty = np.empty((0, 0), dtype=float)
+        sigma_empty = np.empty((0, 0), dtype=float)
         if return_metadata:
-            return theta_empty, x_empty, {
+            output = (theta_empty, x_empty, sigma_empty) if return_sigma else (theta_empty, x_empty)
+            return (*output, {
                 "attempts": 0,
                 "failures": [],
                 "batch_size": batch_size,
                 "n_workers": n_workers,
                 "executor": executor,
                 "mp_context": mp_context,
-            }
-        return theta_empty, x_empty
+                "returned_sigma": bool(return_sigma),
+            })
+        return (theta_empty, x_empty, sigma_empty) if return_sigma else (theta_empty, x_empty)
 
     if executor == "serial" or n_workers == 1:
-        theta_out, x_out, metadata = _simulate_training_set_serial(
+        theta_out, x_out, sigma_out, metadata = _simulate_training_set_serial(
             parameter_space,
             simulator,
             n=n,
             noise_fn=noise_fn,
             rng=rng,
             max_retries=max_retries,
+            return_sigma=bool(return_sigma),
         )
     else:
-        theta_out, x_out, metadata = _simulate_training_set_parallel(
+        theta_out, x_out, sigma_out, metadata = _simulate_training_set_parallel(
             parameter_space,
             simulator,
             n=n,
@@ -410,11 +475,24 @@ def simulate_training_set(
             n_workers=n_workers,
             executor=executor,
             mp_context=mp_context,
+            return_sigma=bool(return_sigma),
         )
 
-    metadata.update({"batch_size": batch_size, "n_workers": n_workers, "executor": executor, "mp_context": mp_context})
+    metadata.update(
+        {
+            "batch_size": batch_size,
+            "n_workers": n_workers,
+            "executor": executor,
+            "mp_context": mp_context,
+            "returned_sigma": bool(return_sigma),
+        }
+    )
     if return_metadata:
+        if return_sigma:
+            return theta_out, x_out, sigma_out, metadata
         return theta_out, x_out, metadata
+    if return_sigma:
+        return theta_out, x_out, sigma_out
     return theta_out, x_out
 
 
@@ -426,10 +504,12 @@ def _simulate_training_set_serial(
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator,
     max_retries: int,
+    return_sigma: bool,
 ):
     failures = []
     theta_rows = []
     x_rows = []
+    sigma_rows = []
     attempts = 0
     while len(theta_rows) < n:
         if attempts - len(theta_rows) > int(max_retries):
@@ -439,18 +519,29 @@ def _simulate_training_set_serial(
         attempts += 1
         theta = parameter_space.sample_prior(1, rng=rng)[0]
         try:
-            x = _simulate_one(simulator, theta, noise_fn, rng)
+            simulated = _simulate_one(simulator, theta, noise_fn, rng, return_sigma=return_sigma)
+            if return_sigma:
+                x, sigma = simulated
+            else:
+                x, sigma = simulated, None
             x = np.asarray(x, dtype=float)
             if x.ndim != 1 or not np.all(np.isfinite(x)):
                 raise ValueError(f"Simulator returned invalid observation shape/content: shape={x.shape}.")
+            if return_sigma:
+                sigma = np.asarray(sigma, dtype=float)
+                if sigma.shape != x.shape or not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
+                    raise ValueError("Simulator returned invalid uncertainty values.")
         except Exception as exc:
             failures.append({"theta": theta, "error": repr(exc)})
             continue
         theta_rows.append(theta)
         x_rows.append(x)
+        if return_sigma:
+            sigma_rows.append(sigma)
     theta_out = np.asarray(theta_rows, dtype=float)
     x_out = np.asarray(x_rows, dtype=float)
-    return theta_out, x_out, {"attempts": attempts, "failures": failures}
+    sigma_out = np.asarray(sigma_rows, dtype=float) if return_sigma else None
+    return theta_out, x_out, sigma_out, {"attempts": attempts, "failures": failures}
 
 
 def _simulate_training_set_parallel(
@@ -465,6 +556,7 @@ def _simulate_training_set_parallel(
     n_workers: int,
     executor: Literal["process", "thread"],
     mp_context: str | None,
+    return_sigma: bool,
 ):
     n_candidate = n + int(max_retries)
     theta_candidates = parameter_space.sample_prior(n_candidate, rng=rng)
@@ -477,7 +569,7 @@ def _simulate_training_set_parallel(
         pool_kwargs: dict[str, Any] = {
             "max_workers": n_workers,
             "initializer": _init_simulation_worker,
-            "initargs": (simulator, noise_fn),
+            "initargs": (simulator, noise_fn, return_sigma),
         }
     else:
         context = mp.get_context(mp_context) if mp_context is not None else None
@@ -486,16 +578,18 @@ def _simulate_training_set_parallel(
             "max_workers": n_workers,
             "mp_context": context,
             "initializer": _init_simulation_worker,
-            "initargs": (simulator, noise_fn),
+            "initargs": (simulator, noise_fn, return_sigma),
         }
 
     theta_rows = []
     x_rows = []
+    sigma_rows = []
     failures = []
     with pool_cls(**pool_kwargs) as pool:
-        for good_theta, good_x, bad in pool.map(_simulate_chunk_from_worker, payloads, chunksize=1):
+        for good_theta, good_x, good_sigma, bad in pool.map(_simulate_chunk_from_worker, payloads, chunksize=1):
             theta_rows.extend(good_theta)
             x_rows.extend(good_x)
+            sigma_rows.extend(good_sigma)
             failures.extend(bad)
 
     if len(theta_rows) < n:
@@ -503,7 +597,8 @@ def _simulate_training_set_parallel(
 
     theta_out = np.asarray(theta_rows[:n], dtype=float)
     x_out = np.asarray(x_rows[:n], dtype=float)
-    return theta_out, x_out, {"attempts": len(theta_rows) + len(failures), "failures": failures}
+    sigma_out = np.asarray(sigma_rows[:n], dtype=float) if return_sigma else None
+    return theta_out, x_out, sigma_out, {"attempts": len(theta_rows) + len(failures), "failures": failures}
 
 
 def train_maf_posterior_from_dataset(
@@ -566,8 +661,10 @@ def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) 
             "standardize",
             "max_grad_norm",
             "restore_best",
+            "initialization_seed",
         }
     }
+    estimator_kwargs.setdefault("initialization_seed", kwargs.get("seed"))
     estimator = MAFPosteriorEstimator(theta_dim=theta_train.shape[1], x_dim=x_train.shape[1], **estimator_kwargs)
     estimator.fit(theta_train, x_train, **kwargs)
     return estimator
@@ -611,6 +708,16 @@ def _synchronize_device(torch, device) -> None:
         torch.cuda.synchronize(device)
     elif device_type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
         torch.mps.synchronize()
+
+
+def _seed_torch(torch, seed: int | None) -> None:
+    """Seed torch initialization or posterior draws when requested."""
+
+    if seed is None:
+        return
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 @contextmanager
@@ -699,7 +806,21 @@ def _prepare_precomputed_training_pairs(
     return theta_arr, x_arr, metadata
 
 
-def _simulate_one(simulator, theta: np.ndarray, noise_fn, rng: np.random.Generator) -> np.ndarray:
+def _simulate_one(
+    simulator,
+    theta: np.ndarray,
+    noise_fn,
+    rng: np.random.Generator,
+    *,
+    return_sigma: bool = False,
+):
+    if return_sigma:
+        if hasattr(simulator, "simulate_with_uncertainty"):
+            return simulator.simulate_with_uncertainty(theta, noise_fn=noise_fn, rng=rng)
+        raise TypeError(
+            "return_sigma=True requires a simulator exposing "
+            "simulate_with_uncertainty(theta, noise_fn, rng)."
+        )
     if hasattr(simulator, "simulate"):
         return simulator.simulate(theta, noise_fn=noise_fn, rng=rng)
     if hasattr(simulator, "rvs"):
@@ -709,12 +830,14 @@ def _simulate_one(simulator, theta: np.ndarray, noise_fn, rng: np.random.Generat
 
 _WORKER_SIMULATOR = None
 _WORKER_NOISE_FN = None
+_WORKER_RETURN_SIGMA = False
 
 
-def _init_simulation_worker(simulator, noise_fn) -> None:
-    global _WORKER_SIMULATOR, _WORKER_NOISE_FN
+def _init_simulation_worker(simulator, noise_fn, return_sigma=False) -> None:
+    global _WORKER_SIMULATOR, _WORKER_NOISE_FN, _WORKER_RETURN_SIGMA
     _WORKER_SIMULATOR = simulator
     _WORKER_NOISE_FN = noise_fn
+    _WORKER_RETURN_SIGMA = bool(return_sigma)
 
 
 def _simulate_chunk_from_worker(payload):
@@ -724,19 +847,36 @@ def _simulate_chunk_from_worker(payload):
     rng = np.random.default_rng(int(seed))
     good_theta = []
     good_x = []
+    good_sigma = []
     failures = []
     for theta in np.asarray(theta_chunk, dtype=float):
         try:
-            x = _simulate_one(_WORKER_SIMULATOR, theta, _WORKER_NOISE_FN, rng)
+            simulated = _simulate_one(
+                _WORKER_SIMULATOR,
+                theta,
+                _WORKER_NOISE_FN,
+                rng,
+                return_sigma=_WORKER_RETURN_SIGMA,
+            )
+            if _WORKER_RETURN_SIGMA:
+                x, sigma = simulated
+            else:
+                x, sigma = simulated, None
             x = np.asarray(x, dtype=float)
             if x.ndim != 1 or not np.all(np.isfinite(x)):
                 raise ValueError(f"Simulator returned invalid observation shape/content: shape={x.shape}.")
+            if _WORKER_RETURN_SIGMA:
+                sigma = np.asarray(sigma, dtype=float)
+                if sigma.shape != x.shape or not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
+                    raise ValueError("Simulator returned invalid uncertainty values.")
         except Exception as exc:
             failures.append({"theta": np.asarray(theta, dtype=float), "error": repr(exc)})
             continue
         good_theta.append(np.asarray(theta, dtype=float))
         good_x.append(x)
-    return good_theta, good_x, failures
+        if _WORKER_RETURN_SIGMA:
+            good_sigma.append(sigma)
+    return good_theta, good_x, good_sigma, failures
 
 
 def _as_2d(values: np.ndarray, dim: int, name: str) -> np.ndarray:

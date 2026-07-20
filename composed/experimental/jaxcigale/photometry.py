@@ -5,6 +5,7 @@ from typing import Sequence
 
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.experimental.jaxcigale.dependencies import require_jax
 
 C_A_PER_S = 2.99792458e18
@@ -16,7 +17,7 @@ def trapz_numpy(y, x):
 
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
-    return np.trapz(y, x)
+    return trapezoid(y, x)
 
 
 @dataclass(frozen=True)

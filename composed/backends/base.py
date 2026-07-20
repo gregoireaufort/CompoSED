@@ -7,6 +7,7 @@ import numpy as np
 
 from composed.units import (
     MassNormalization,
+    MassReference,
     canonical_photometric_flux_unit,
     canonical_spectral_flux_unit,
     canonical_wavelength_unit,
@@ -76,13 +77,14 @@ class SEDBackend:
     """Common backend interface.
 
     Backends must declare ``mass_normalization`` and implement
-    ``predict_photometry(params, filters)``. They should not apply any
-    likelihood-specific mass scaling; that is handled centrally by
-    ``GaussianPhotometricLikelihood`` when the normalization is
-    ``PER_SOLAR_MASS``.
+    ``predict_photometry(params, filters)``. ``PER_SOLAR_MASS`` outputs are per
+    one solar mass of present-day surviving stars, as declared by
+    ``mass_reference``. Backends should not apply the fitted mass amplitude;
+    that remains centralized in the likelihood.
     """
 
     mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+    mass_reference: MassReference | None = None
 
     def predict_photometry(self, params: Mapping[str, float], filters) -> ModelPhotometry:
         raise NotImplementedError

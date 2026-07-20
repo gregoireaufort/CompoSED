@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.experimental.cigale_fsps_stellar import register_cigale_fsps_stellar_module
 
 
@@ -213,7 +214,7 @@ def nly_from_spectrum(spectrum, lo=0.0, hi=91.1):
     if np.count_nonzero(good) < 2:
         return 0.0
     wave_m = wave[good] * 1.0e-9
-    return _json_float(np.trapz(lum[good] * wave_m / (H_J_S * C_M_S), wave[good]))
+    return _json_float(trapezoid(lum[good] * wave_m / (H_J_S * C_M_S), wave[good]))
 
 
 def lum_from_spectrum(spectrum, lo=0.0, hi=91.1):
@@ -222,7 +223,7 @@ def lum_from_spectrum(spectrum, lo=0.0, hi=91.1):
     good = (wave >= lo) & (wave <= hi) & np.isfinite(wave) & np.isfinite(lum)
     if np.count_nonzero(good) < 2:
         return 0.0
-    return _json_float(np.trapz(lum[good], wave[good]))
+    return _json_float(trapezoid(lum[good], wave[good]))
 
 
 def _median_ratio(ratio, lo, hi):
