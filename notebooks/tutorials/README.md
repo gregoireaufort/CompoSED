@@ -19,6 +19,11 @@ artifacts. Set `COMPOSED_TUTORIAL_QUICK=1` before opening an SBI notebook for a
 short installation check; the normal configuration uses 300,000 simulations
 and all 100,000 catalog objects.
 
+Both MAF notebooks use the same public facade as the sampler tutorials:
+`fit(problem, MAF(...), training=Simulate(...))`. The returned
+`InferenceResult` contains the single-galaxy posterior and retains the trained
+amortized estimator for catalog inference.
+
 COSMOS2020/LePhare values shown in the plots are comparison estimates, not ground truth.
 All four inference notebooks use the same effective uncertainty convention,
 `sigma_eff^2 = sigma_catalog^2 + (0.05 |flux|)^2`. The 5% term is an explicit
