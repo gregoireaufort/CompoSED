@@ -1,8 +1,8 @@
 """Minimal photometric diffusion-SBI pipeline.
 
-This is the slide-friendly version of the workflow.  Replace ``ToySEDBackend``
-with FSPS, CIGALE, or JAX-CIGALE for a real science run; the rest of the data
-flow is the same.
+This is the slide-friendly version of the workflow. Replace ``ToySEDBackend``
+with FSPS or CIGALE for a real science run; the rest of the data flow is the
+same.
 """
 
 from __future__ import annotations

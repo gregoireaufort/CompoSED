@@ -23,9 +23,14 @@ return conventions into the object-first shape above.
 The diagnostics do not change parameter units.  They compute:
 
 - posterior means, medians, standard deviations, and 16-84% intervals;
-- marginal ranks of the true value among posterior samples;
-- central credible interval coverage curves;
+- marginal ranks of the true value among posterior samples, with randomized
+  tie handling for discrete or quantized parameters;
+- central credible interval coverage curves and their binomial standard errors;
 - optional TARP coverage when the external `tarp` package is installed.
+
+`sample_posterior_dataset(..., seed=...)` forwards reproducible seeds to
+estimators that expose a `seed` argument.  Batched sampling uses a distinct,
+deterministic child seed for each batch.
 
 ## Masks, Cuts, And Normalization
 
@@ -39,6 +44,9 @@ ordering.  No mass normalization or flux conversion happens here.
 - `sample_posterior_dataset`: estimator sampling and shape normalization.
 - `rank_statistics`: rank percentiles used for calibration checks.
 - `marginal_coverage`: central interval coverage.
+- `tarp_coverage`: the explicit conversion from CompoSED's
+  `(objects, samples, parameters)` convention to TARP's
+  `(samples, objects, parameters)` convention.
 - `run_sbi_diagnostics`: one-call wrapper that optionally writes arrays and
   plots.
 
@@ -57,6 +65,7 @@ result = run_sbi_diagnostics(
     theta_true=theta_true,
     theta_names=["z", "log10_mass"],
     make_plots=False,
+    seed=7,
 )
 
 print(result["coverage"]["mean_coverage"])
@@ -67,4 +76,7 @@ print(result["coverage"]["mean_coverage"])
 For simulated validation data, calibrated posteriors should have approximately
 uniform rank percentiles and coverage curves close to the one-to-one line.
 Systematic rank slopes, U-shapes, or coverage deficits are signs that the
-posterior estimator is biased or overconfident.
+posterior estimator is biased or overconfident.  The gray band on the coverage
+plot is the approximate two-standard-deviation binomial fluctuation expected
+from the finite number of validation objects; it is not a model uncertainty
+band.

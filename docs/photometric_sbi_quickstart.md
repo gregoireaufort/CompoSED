@@ -1,7 +1,8 @@
-# Photometric MAF SBI Quickstart
+# Photometric SBI Quickstart
 
-The stable CompoSED `0.1` SBI path trains a conditional masked autoregressive
-flow for physical parameters given measured photometry and its uncertainty:
+The stable CompoSED `0.1` SBI path trains either a conditional masked
+autoregressive flow (`MAF`) or Gaussian-mixture density network (`MDN`) for
+physical parameters given measured photometry and its uncertainty:
 
 ```text
 q(theta | measured flux, sigma)
@@ -89,6 +90,47 @@ posterior.save("runs/fsps_photoz_maf")
 The fitted `UniformPrior` and `LogUniformPrior` bounds are encoded through
 invertible transforms, so the MAF produces physical samples inside prior
 support rather than relying on post-hoc rejection.
+
+## Use The Simpler MDN Alternative
+
+The simulation, noise model, observation context, prior transforms, catalog
+sampling, and diagnostics are identical. Replace only the inference method:
+
+```python
+from composed import MDN
+
+result = fit(
+    problem,
+    method=MDN(
+        n_components=8,
+        hidden_features=128,
+        num_blocks=3,
+        epochs=200,
+        batch_size=2048,
+        validation_split=0.1,
+        patience=20,
+        num_samples=512,
+        inference_batch_size=8192,
+        device="auto",
+    ),
+    training=Simulate(
+        n=100_000,
+        noise_fn=noise_fn,
+        infer=["zred", "log10_mass"],
+        context=PhotometricContext("snr_logsigma"),
+    ),
+    seed=7,
+)
+
+posterior = result.inference_state
+posterior.save("runs/fsps_photoz_mdn")
+```
+
+The MDN is a mixture of diagonal Gaussians in transformed parameter space. Its
+density is exactly normalized and cheap to evaluate. Multiple components can
+represent distinct modes, but MAF is generally more expressive for curved or
+high-dimensional posterior geometry. Install only PyTorch with
+`python -m pip install -e ".[mdn]"`.
 
 ## Why The Default Context Uses S/N And Sigma
 
@@ -191,9 +233,9 @@ Masked bands are removed consistently from simulated flux, simulated sigma,
 observed flux, and observed sigma. A trained posterior rejects a dataset with a
 different active-band order or flux unit.
 
-Censored upper limits do not yet have a stable SBI context encoding in `0.1`.
-Problem-driven MAF training and `SEDDataset` posterior sampling reject them
-explicitly rather than treating limits as detections.
+Censored upper limits do not yet have a stable fixed-context SBI encoding in
+`0.1`. Problem-driven MAF/MDN training and `SEDDataset` posterior sampling
+reject them explicitly rather than treating limits as detections.
 
 Run simulation-based calibration on held-out simulations:
 

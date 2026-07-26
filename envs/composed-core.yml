@@ -5,17 +5,7 @@ dependencies:
   - python=3.11
   - pip
   - numpy>=1.24
-  - scipy
   - astropy
-  - matplotlib
-  - pandas
-  - tqdm
-  - pytest
-  - ipykernel
-  - jupyterlab
-  - emcee
-  - corner
-  - pip:
-      # Install CompoSED itself from the repository root with:
-      # python -m pip install -e ".[dev,plot,samplers,notebooks]"
-      - pocomc
+  # Install CompoSED and only the extras needed for the analysis:
+  # python -m pip install -e ".[dev,plot]"
+  # python -m pip install -e ".[samplers]"  # optional

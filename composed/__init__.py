@@ -20,7 +20,15 @@ from composed.likelihood import GaussianPhotometricLikelihood, GaussianSpectralL
 from composed.filters import FilterSet, load_filter_set
 from composed.parameters import ParameterSpace
 from composed.noise import EmpiricalPhotometricNoise
-from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
+from composed.priors import (
+    ChoicePrior,
+    DeltaPrior,
+    IntegerUniformPrior,
+    LogUniformPrior,
+    NormalPrior,
+    StudentTPrior,
+    UniformPrior,
+)
 from composed.problem import (
     Emcee,
     Gaussian,
@@ -51,21 +59,27 @@ from composed.results import (
     load_inference_result,
     normalize_sampling_result,
     posterior_summary,
+    problem_fingerprint,
+    require_result_matches_problem,
     save_inference_result,
 )
 from composed.sbi import (
     MAF,
     MAFCatalogSummary,
     MAFPhotometricSBIResult,
+    MDN,
+    MDNPhotometricSBIResult,
     PhotometricContext,
     PhotometricTrainingSet,
     SBITrainingSet,
     Simulate,
     TrainedMAFSBI,
+    TrainedMDNSBI,
     simulate_photometric_training_set,
     simulate_sbi_training_set,
     train_sbi,
     train_maf_photometric_sbi,
+    train_mdn_photometric_sbi,
     transform_photometry,
 )
 from composed.sfh import (
@@ -97,6 +111,7 @@ __all__ = [
     "TabularSFH",
     "available_sfh_models",
     "make_sfh",
+    "ChoicePrior",
     "DeltaPrior",
     "DerivedSFHQuantities",
     "CatalogGridResult",
@@ -106,6 +121,7 @@ __all__ = [
     "Grid",
     "InferenceResult",
     "InferenceFailure",
+    "IntegerUniformPrior",
     "Laplace",
     "FilterSet",
     "LogUniformPrior",
@@ -114,6 +130,8 @@ __all__ = [
     "MAF",
     "MAFCatalogSummary",
     "MAFPhotometricSBIResult",
+    "MDN",
+    "MDNPhotometricSBIResult",
     "PhotometricContext",
     "MixedGibbs",
     "MixedTAMIS",
@@ -136,6 +154,7 @@ __all__ = [
     "RandomWalk",
     "TAMIS",
     "TrainedMAFSBI",
+    "TrainedMDNSBI",
     "Emcee",
     "EmpiricalPhotometricNoise",
     "UniformPrior",
@@ -150,10 +169,12 @@ __all__ = [
     "load_filter_set",
     "normalize_sampling_result",
     "posterior_summary",
+    "problem_fingerprint",
     "project_rest_grid_to_photometric_grid",
     "provenance_path_for",
     "read_provenance",
     "require_provenance",
+    "require_result_matches_problem",
     "run_photometric_grid_catalog",
     "simulate_photometric_training_set",
     "simulate_sbi_training_set",
@@ -162,6 +183,7 @@ __all__ = [
     "save_restframe_spectral_grid",
     "sha256_file",
     "train_maf_photometric_sbi",
+    "train_mdn_photometric_sbi",
     "train_sbi",
     "transform_photometry",
     "write_provenance",

@@ -16,11 +16,31 @@ Training data is a two-dimensional feature table:
 x_train.shape == (n_objects, n_features)
 ```
 
-The feature vector can contain any continuous quantities, for example:
+For generic precomputed arrays the feature vector can contain any continuous
+quantities, for example:
 
 ```text
 [mags, mag_errors, physical_parameters]
 ```
+
+For Problem-driven photometric SBI, CompoSED constructs a stricter observation
+vector in band order:
+
+```text
+[photometric context,
+ uncertainty context,
+ availability,
+ censoring flag,
+ limit-known flag,
+ upper-limit depth,
+ prior-transformed parameters]
+```
+
+The default photometric context is measured signal-to-noise plus
+`log10(sigma / reference_flux)`. Fluxes and uncertainties remain in the
+`SEDDataset.flux_unit` declared by the user. A censored flux is never supplied
+to the network: its photometric feature is neutral, while its uncertainty,
+limit, and state flags remain visible.
 
 `FeatureMetadata` records the column names and scientific groups:
 
@@ -48,7 +68,12 @@ The fitted sampler returns samples in the original physical units.
 
 ## Masks And Cuts
 
-The mask convention is:
+Two masks have different scientific meanings:
+
+- the **availability/censoring channels** are values in the observed data;
+- the **diffusion mask** is a temporary training or inference instruction.
+
+The diffusion-mask convention is:
 
 ```python
 mask == True   # known / conditioned / clamped
@@ -63,16 +88,25 @@ If both `mags` and `magerrs` groups exist, magnitude-error masks can be tied to
 magnitude masks.  That prevents a hidden flux from leaking through a visible
 catalog uncertainty.
 
+For CompoSED photometry, the photometry, uncertainty, availability, censoring,
+and upper-limit channels are tied by band during random masking. Hiding a band
+therefore hides its complete observed state, while the stored availability
+flag itself remains distinct from this artificial training mask.
+
 ## Normalization
 
-The diffusion estimator does no SED-specific mass normalization.  It learns the
-joint distribution of whatever feature vector you give it.  If a parameter is
-`log10_mass`, it is just another feature unless your upstream simulator or
-training table encodes a special convention.
+Backend mass normalization is applied upstream by `Problem.simulate`, exactly
+as it is in the deterministic likelihood. Before diffusion training, bounded
+continuous priors are mapped to unconstrained neural coordinates. Returned
+samples are inverse-transformed to the physical parameter units declared by
+the `ParameterSpace`, so a bounded mass or redshift cannot leak outside its
+prior merely because of neural sampling noise.
 
 ## Important Functions To Audit
 
 - `FeatureMetadata.from_groups`: feature order and group definitions.
+- `SBITrainingSet.diffusion_observation_features`: measured values and
+  availability/censoring channels.
 - `make_training_mask`: which data are visible during training.
 - `ConditionalDiffusionEstimator.fit`: the diffusion noise and score loss.
 - `ConditionalDiffusionEstimator.sample`: standardization, mask handling, and
@@ -167,5 +201,7 @@ training starts.
 
 Start with data simulated from the same distribution used for training.  Check
 that known photometric entries are exactly clamped in returned physical units,
-that posterior summaries recover the true parameters statistically, and that
-held-out feature inpainting has sensible residuals before moving to real data.
+that censored values are represented only by their limits, that all returned
+parameters remain inside prior support, that posterior summaries recover the
+true parameters statistically, and that held-out feature inpainting has
+sensible residuals before moving to real data.

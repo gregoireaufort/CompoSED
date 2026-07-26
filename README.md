@@ -4,25 +4,24 @@ Composable Bayesian SED fitting and photo-z inference.
 
 ## Installation
 
-The core CompoSED package is lightweight, but scientific engines such as FSPS,
-CIGALE, DSPS, and Cue have their own upstream installation and data
-requirements.  Start with the install guide:
+The core CompoSED package is lightweight, but the FSPS and CIGALE scientific
+engines have their own upstream installation and data requirements. Start with
+the install guide:
 
 ```bash
 python -m pip install -e ".[dev,plot]"
 python scripts/check_environment.py --core
 ```
 
-Then install only the backend stack you need.  FSPS users must configure
-`SPS_HOME`; CIGALE users should install the upstream `v2022.0` release; Cue
-users must provide `CUE_DATA_DIR`; JAX-CIGALE DSPS validation uses
-`DSPS_CONTINUUM_SSP_FILE`.
+Then install only the backend stack you need. FSPS users must configure
+`SPS_HOME`; CIGALE users should install the upstream `v2022.0` release.
 
 Optional inference layers are installed independently:
 
 ```bash
 python -m pip install -e ".[samplers]"  # emcee and PocoMC
-python -m pip install -e ".[sbi]"       # torch and nflows
+python -m pip install -e ".[sbi]"       # MAF: torch and nflows
+python -m pip install -e ".[mdn]"       # MDN only: torch
 ```
 
 See [`docs/install.md`](docs/install.md) for the supported environment recipes
@@ -74,9 +73,9 @@ backend outputs are normalized by that same quantity.
 ## Acknowledgements and citations
 
 CompoSED is an inference/interface layer around scientific modeling codes. If
-you use the CIGALE, FSPS, DSPS, or Cue paths, cite those projects as well as
-CompoSED. See `docs/citations.md` for the current citation checklist and a
-short acknowledgement template.
+you use the CIGALE or FSPS paths, cite those projects as well as CompoSED. See
+`docs/citations.md` for the current citation checklist and a short
+acknowledgement template.
 
 ## Spectral likelihood
 
@@ -241,10 +240,10 @@ shape, finite positive maggies, relative flux agreement, and AB magnitude
 agreement. CI or lightweight development environments may skip these tests when
 FSPS, sedpy, or `SPS_HOME` are unavailable.
 
-## Simulation-Based Inference / MAF Posterior Estimator
+## Simulation-Based Inference / Neural Posterior Estimators
 
-The stable `0.1` SBI method is a conditional Masked Autoregressive Flow using
-optional `torch` and `nflows`. It learns
+The stable `0.1` SBI methods are a conditional Masked Autoregressive Flow
+(`MAF`) and a conditional Gaussian-mixture density network (`MDN`). Both learn
 `q(theta | measured flux, measurement sigma)`. The default context contains
 `flux/sigma` and `log10(sigma)` for every active band, so negative noisy fluxes
 are valid and heteroscedastic catalog depths are conditioned on explicitly.
@@ -290,9 +289,41 @@ posterior = result.inference_state
 posterior.save("runs/photoz_maf")
 ```
 
+Use the same workflow with a small, closed-form mixture posterior by changing
+only the method:
+
+```python
+from composed import MDN
+
+result = fit(
+    problem,
+    method=MDN(
+        n_components=8,
+        hidden_features=128,
+        num_blocks=3,
+        epochs=200,
+        device="auto",
+    ),
+    training=Simulate(
+        n=100_000,
+        noise_fn=noise_fn,
+        infer=["zred", "log10_mass"],
+        context=PhotometricContext("snr_logsigma"),
+    ),
+    seed=7,
+)
+```
+
+`MDN` requires only PyTorch (`pip install -e ".[mdn]"`). Each component has a
+diagonal covariance in transformed parameter space; the mixture can represent
+multiple modes, while `MAF` remains the more expressive default for strongly
+curved high-dimensional posteriors. Both expose normalized physical-space
+`sample` and `log_prob` methods and use the same prior-support transforms. A
+complete small run is in `examples/sbi_mdn_mock_photometry_demo.py`.
+
 Uniform and log-uniform targets use invertible bounded transforms, so physical
 samples remain inside prior support without rejection. Catalog inference is
-batched inside nflows:
+batched inside the neural estimator:
 
 ```python
 catalog_samples = posterior.sample(
@@ -400,6 +431,32 @@ forward model, simulation campaign, or empirical labeled dataset.  See
 then MPS, then CPU, validates a tiny float32 workload before training, and keeps
 diffusion tensors in float32 to avoid Apple MPS float64 failures.
 
+## Parallel MixedTAMIS evaluation
+
+MixedTAMIS remains serial by default. Expensive independent target evaluations
+within each adaptation round can be distributed explicitly:
+
+```python
+result = fit(
+    problem,
+    MixedTAMIS(
+        T_max=100,
+        n_per_iter=1000,
+        n_workers=8,
+        batch_size=32,
+        mp_context="spawn",
+    ),
+    seed=61,
+)
+```
+
+The process pool persists for the complete run. Each process owns its backend
+state and, for CIGALE, lazily creates its own `SedWarehouse`. Proposal draws,
+adaptation, and final AMIS recycling remain in the parent process. Keep
+`n_workers=1` when using a local function or lambda that cannot be pickled.
+When fitting many galaxies with `inftools.fit_many`, parallelize either across
+galaxies or within each sampler rather than enabling both at full core count.
+
 ## Catalog-scale fitting
 
 For finite photometric grids, use the catalog grid evaluator so the backend
@@ -506,69 +563,8 @@ weights by default, while grid/TAMIS-style outputs use `weights_norm` from the
 sampler metadata when available. Results are saved as an `.npz` array file plus
 a JSON sidecar containing metadata and posterior summaries.
 
-## Experimental JAX-CIGALE
-
-`composed.experimental.jaxcigale` is a JAX-native, CIGALE-inspired prototype.
-It does not call `pcigale`; instead it keeps the CIGALE idea of a fixed ordered
-module chain while making each module a pure JAX operation after setup.
-
-Optional dependencies:
-
-```bash
-pip install "composed[jaxcigale]"
-```
-
-Minimal analytic-stellar demo:
-
-```python
-import numpy as np
-
-from composed.experimental.jaxcigale import (
-    JaxFilterSet,
-    JaxParameterSpace,
-    UniformJaxPrior,
-    analytic_stellar_module,
-    build_jax_sed_model,
-    delayed_sfh_module,
-    no_nebular_module,
-    redshift_module,
-)
-
-wave_rest = np.linspace(900.0, 20000.0, 512)
-age_grid = np.linspace(0.02, 8.0, 64)
-filter_wave = np.linspace(4000.0, 9000.0, 128)
-filters = JaxFilterSet.from_curves(["wide"], [filter_wave], [np.ones_like(filter_wave)])
-
-space = JaxParameterSpace(
-    names=["log10_mass", "z", "tau_gyr", "tage_gyr", "logzsol"],
-    priors={
-        "log10_mass": UniformJaxPrior(8.0, 12.0),
-        "z": UniformJaxPrior(1.0e-4, 3.0),
-        "tau_gyr": UniformJaxPrior(0.2, 8.0),
-        "tage_gyr": UniformJaxPrior(0.2, 10.0),
-        "logzsol": UniformJaxPrior(-1.0, 0.3),
-    },
-)
-
-model = build_jax_sed_model(
-    [delayed_sfh_module(age_grid), analytic_stellar_module(), no_nebular_module(), redshift_module()],
-    wave_rest,
-    filters,
-    space,
-)
-```
-
-Use a strictly positive lower bound for JAX-CIGALE redshift priors. The JAX
-observed-flux conversion intentionally treats `z <= 0` as invalid rather than
-silently adopting a local 10 pc convention.
+## Validation provenance
 
 Validation scripts that cache arrays should write provenance sidecars with
 `composed.provenance.save_npz_with_provenance`; see
 [`docs/validation_provenance.md`](docs/validation_provenance.md).
-
-For science runs, replace `analytic_stellar_module()` with
-`dsps_stellar_module(ssp_data)`. Nebular emission is currently an explicit graph
-slot: `no_nebular_module()` can be replaced by `nebular_emulator_module(...)`
-once a CLOUDY/Cue-style emulator is validated. See
-`docs/experimental_jaxcigale.md` and
-`examples/experimental_jaxcigale_photometry_demo.py`.

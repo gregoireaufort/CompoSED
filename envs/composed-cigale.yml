@@ -10,5 +10,7 @@ dependencies:
   - scipy=1.12
   - astropy=6.1
   - configobj
+  # CIGALE v2022.0 imports pkg_resources at runtime.
+  - setuptools>=77,<81
   # Install CIGALE v2022.0 from its upstream GitLab tutorial/release after
   # creating the env.  Then install CompoSED from the repository root.

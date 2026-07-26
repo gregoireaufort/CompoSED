@@ -179,6 +179,7 @@ def make_training_mask(
     known_bands: list[str] | tuple[str, ...] | None = None,
     known_params: list[str] | tuple[str, ...] | None = None,
     tie_magerr_to_mag: bool = True,
+    tie_groups: list[str] | tuple[str, ...] | None = None,
 ):
     """Return a boolean torch mask where ``True`` means known.
 
@@ -224,6 +225,29 @@ def make_training_mask(
         magerr_t = torch_mod.tensor(magerr_cols, dtype=torch_mod.long, device=device)
         mask[:, magerr_t] = mask[:, mag_t]
 
+    if tie_groups is not None:
+        groups = tuple(str(group) for group in tie_groups)
+        if len(groups) < 2:
+            raise ValueError("tie_groups must name at least two feature groups.")
+        missing = [group for group in groups if group not in meta.groups]
+        if missing:
+            raise ValueError("Unknown tied feature group(s): " + ", ".join(missing))
+        lengths = {len(meta.groups[group]) for group in groups}
+        if len(lengths) != 1:
+            raise ValueError(
+                "Tied feature groups must contain the same number of columns; got "
+                + ", ".join(f"{group}={len(meta.groups[group])}" for group in groups)
+                + "."
+            )
+        reference_t = torch_mod.tensor(
+            meta.groups[groups[0]], dtype=torch_mod.long, device=device
+        )
+        for group in groups[1:]:
+            target_t = torch_mod.tensor(
+                meta.groups[group], dtype=torch_mod.long, device=device
+            )
+            mask[:, target_t] = mask[:, reference_t]
+
     return mask
 
 
@@ -250,6 +274,7 @@ def make_curriculum_training_mask(
             known_bands=mask_config.get("known_bands"),
             known_params=mask_config.get("known_params"),
             tie_magerr_to_mag=bool(mask_config.get("tie_magerr_to_mag", True)),
+            tie_groups=mask_config.get("tie_groups"),
         )
 
     batch_size, n_features = int(batch_shape[0]), int(batch_shape[1])
@@ -278,6 +303,7 @@ def make_curriculum_training_mask(
             known_bands=mode.get("known_bands"),
             known_params=mode.get("known_params"),
             tie_magerr_to_mag=bool(mask_config.get("tie_magerr_to_mag", True)),
+            tie_groups=mask_config.get("tie_groups"),
         )
     return mask
 

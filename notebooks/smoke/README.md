@@ -3,7 +3,7 @@
 These notebooks are fast plumbing checks. They may use analytic stellar
 continua, toy nebular lines, or intentionally simplified data. They are useful
 for testing array shapes, plotting code, and sampler wiring, but they should not
-be used as evidence that the physical DSPS/Cue/CIGALE comparisons are correct.
+be used as evidence that the physical CIGALE or FSPS models are correct.
 
 Real scientific validation notebooks live in `notebooks/validation/`.
 

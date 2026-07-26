@@ -9,6 +9,7 @@ as ``(n_objects, n_samples, n_parameters)``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ def sample_posterior_dataset(
     x_test: np.ndarray,
     num_samples: int,
     batch_size: int | None = None,
+    seed: int | None = None,
 ) -> np.ndarray:
     """Draw posterior samples for a batch of conditioning vectors.
 
@@ -94,37 +96,65 @@ def sample_posterior_dataset(
     """
 
     x_arr = _as_2d(x_test, "x_test")
+    if x_arr.shape[0] == 0 or x_arr.shape[1] == 0:
+        raise ValueError("x_test must contain at least one object and one feature.")
+    if not np.all(np.isfinite(x_arr)):
+        raise ValueError("x_test contains NaN or inf values.")
     num_samples = int(num_samples)
     if num_samples <= 0:
         raise ValueError("num_samples must be positive.")
 
     n_objects = x_arr.shape[0]
     if batch_size is None:
-        raw = estimator.sample(x_arr, num_samples=num_samples)
-        return _as_samples_object_first(raw, n_objects=n_objects)
+        raw = _draw_estimator_samples(estimator, x_arr, num_samples, seed)
+        samples = _as_samples_object_first(raw, n_objects=n_objects)
+        _check_requested_sample_count(samples, num_samples)
+        return samples
 
     batch_size = int(batch_size)
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
 
+    seed_generator = None if seed is None else np.random.default_rng(seed)
     chunks = []
     for start in range(0, n_objects, batch_size):
         end = min(start + batch_size, n_objects)
-        raw = estimator.sample(x_arr[start:end], num_samples=num_samples)
-        chunks.append(_as_samples_object_first(raw, n_objects=end - start))
+        chunk_seed = None
+        if seed_generator is not None:
+            chunk_seed = int(seed_generator.integers(0, np.iinfo(np.int32).max))
+        raw = _draw_estimator_samples(estimator, x_arr[start:end], num_samples, chunk_seed)
+        chunk = _as_samples_object_first(raw, n_objects=end - start)
+        _check_requested_sample_count(chunk, num_samples)
+        chunks.append(chunk)
     return np.concatenate(chunks, axis=0)
 
 
-def rank_statistics(samples: np.ndarray, theta_true: np.ndarray) -> dict[str, np.ndarray]:
+def rank_statistics(
+    samples: np.ndarray,
+    theta_true: np.ndarray,
+    *,
+    randomize_ties: bool = True,
+    seed: int | None = 0,
+) -> dict[str, np.ndarray]:
     """Return marginal posterior ranks of the true parameters.
 
     For each object and parameter, the rank is the number of posterior samples
     below the true value.  A calibrated posterior should give approximately
-    uniform rank percentiles over many simulated test objects.
+    uniform rank percentiles over many simulated test objects.  When posterior
+    draws tie the truth, the default randomized rank selects uniformly among
+    all valid positions in that tied block.  This is important for discrete or
+    quantized parameters; it does not affect continuous samples without ties.
     """
 
     sample_set = PosteriorSampleSet(samples=samples, theta_true=theta_true)
-    ranks = np.sum(sample_set.samples < sample_set.theta_true[:, None, :], axis=1)
+    below = np.sum(sample_set.samples < sample_set.theta_true[:, None, :], axis=1)
+    if randomize_ties:
+        tied = np.sum(sample_set.samples == sample_set.theta_true[:, None, :], axis=1)
+        rng = np.random.default_rng(seed)
+        tie_offset = np.floor(rng.random(tied.shape) * (tied + 1)).astype(int)
+        ranks = below + tie_offset
+    else:
+        ranks = below
     percentiles = ranks / float(sample_set.n_samples)
     return {
         "ranks": ranks.astype(int),
@@ -166,6 +196,8 @@ def marginal_coverage(
         "levels": levels_arr,
         "coverage": coverage,
         "mean_coverage": np.mean(coverage, axis=1),
+        "standard_error": np.sqrt(coverage * (1.0 - coverage) / sample_set.n_objects),
+        "n_objects": np.asarray(sample_set.n_objects, dtype=int),
     }
 
 
@@ -199,6 +231,7 @@ def run_sbi_diagnostics(
     output_dir: str | Path | None = None,
     make_plots: bool = True,
     use_tarp: bool = False,
+    seed: int | None = 0,
 ) -> dict[str, Any]:
     """Run a compact SBI diagnostic suite.
 
@@ -210,14 +243,20 @@ def run_sbi_diagnostics(
     if posterior_samples is None:
         if estimator is None or x_test is None:
             raise ValueError("Provide posterior_samples, or provide both estimator and x_test.")
-        posterior_samples = sample_posterior_dataset(estimator, x_test, num_samples=num_samples, batch_size=batch_size)
+        posterior_samples = sample_posterior_dataset(
+            estimator,
+            x_test,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            seed=seed,
+        )
 
     sample_set = PosteriorSampleSet(
         samples=posterior_samples,
         theta_true=theta_true,
         x=x_test,
         theta_names=None if theta_names is None else tuple(theta_names),
-        metadata={"num_samples": int(num_samples)},
+        metadata={"num_samples": int(np.asarray(posterior_samples).shape[-2]), "seed": seed},
     )
 
     results: dict[str, Any] = {
@@ -225,12 +264,12 @@ def run_sbi_diagnostics(
         "summary": prediction_summary(sample_set.samples, sample_set.theta_true),
     }
     if sample_set.theta_true is not None:
-        results["ranks"] = rank_statistics(sample_set.samples, sample_set.theta_true)
+        results["ranks"] = rank_statistics(sample_set.samples, sample_set.theta_true, seed=seed)
         results["coverage"] = marginal_coverage(sample_set.samples, sample_set.theta_true, levels=levels)
     if use_tarp:
         if sample_set.theta_true is None:
             raise ValueError("TARP diagnostics require theta_true.")
-        results["tarp"] = tarp_coverage(sample_set.samples, sample_set.theta_true)
+        results["tarp"] = tarp_coverage(sample_set.samples, sample_set.theta_true, seed=seed)
 
     if output_dir is not None:
         path = Path(output_dir)
@@ -243,7 +282,12 @@ def run_sbi_diagnostics(
 
 
 def tarp_coverage(samples: np.ndarray, theta_true: np.ndarray, **kwargs) -> Any:
-    """Run optional TARP coverage diagnostics when the package is installed."""
+    """Run optional TARP coverage diagnostics when the package is installed.
+
+    CompoSED stores posterior samples object-first.  TARP uses the opposite
+    convention, ``(n_samples, n_objects, n_parameters)``, so the axis
+    conversion is explicit at this external API boundary.
+    """
 
     try:
         import tarp
@@ -257,11 +301,12 @@ def tarp_coverage(samples: np.ndarray, theta_true: np.ndarray, **kwargs) -> Any:
         raise ImportError("The installed tarp package does not expose get_tarp_coverage.")
 
     sample_set = PosteriorSampleSet(samples=samples, theta_true=theta_true)
-    rng = np.random.default_rng(int(kwargs.pop("seed", 0)))
-    lo = np.min(sample_set.samples, axis=(0, 1))
-    hi = np.max(sample_set.samples, axis=(0, 1))
-    references = rng.uniform(lo, hi, size=(sample_set.n_objects, sample_set.n_parameters))
-    return tarp.get_tarp_coverage(sample_set.samples, sample_set.theta_true, references, **kwargs)
+    tarp_samples = np.transpose(sample_set.samples, (1, 0, 2))
+    kwargs.setdefault("references", "random")
+    kwargs.setdefault("norm", True)
+    kwargs.setdefault("num_alpha_bins", max(1, sample_set.n_objects // 10))
+    kwargs.setdefault("seed", 0)
+    return tarp.get_tarp_coverage(tarp_samples, sample_set.theta_true, **kwargs)
 
 
 def plot_single_posterior(
@@ -312,10 +357,13 @@ def plot_rank_histograms(ranks: dict[str, np.ndarray] | np.ndarray, theta_names:
     if ranks_arr.ndim != 2:
         raise ValueError("rank percentiles must have shape (n_objects, n_parameters).")
     names = _names_from_count(ranks_arr.shape[1], theta_names)
+    n_objects = ranks_arr.shape[0]
+    expected_per_bin = n_objects / 10.0
     fig, axes = plt.subplots(1, ranks_arr.shape[1], figsize=(3.0 * ranks_arr.shape[1], 2.8), squeeze=False)
     for i, name in enumerate(names):
         ax = axes[0, i]
         ax.hist(ranks_arr[:, i], bins=np.linspace(0.0, 1.0, 11), histtype="stepfilled", alpha=0.5)
+        ax.axhline(expected_per_bin, color="0.4", ls="--", lw=1.0)
         ax.set_title(name)
         ax.set_xlabel("rank percentile")
         ax.set_ylabel("count")
@@ -332,6 +380,16 @@ def plot_coverage_curve(coverage: dict[str, np.ndarray], theta_names: list[str] 
     names = _names_from_count(cov.shape[1], theta_names)
     fig, ax = plt.subplots(figsize=(5.0, 4.0))
     ax.plot([0.0, 1.0], [0.0, 1.0], color="0.5", ls="--", label="ideal")
+    if "n_objects" in coverage:
+        n_objects = int(np.asarray(coverage["n_objects"]))
+        ideal_sigma = np.sqrt(levels * (1.0 - levels) / n_objects)
+        ax.fill_between(
+            levels,
+            np.clip(levels - 2.0 * ideal_sigma, 0.0, 1.0),
+            np.clip(levels + 2.0 * ideal_sigma, 0.0, 1.0),
+            color="0.85",
+            label="ideal +/- 2 sigma",
+        )
     for i, name in enumerate(names):
         ax.plot(levels, cov[:, i], marker="o", ms=3, label=name)
     ax.set_xlabel("central credible level")
@@ -389,6 +447,24 @@ def _as_samples_object_first(samples: np.ndarray, n_objects: int | None = None) 
     if arr.shape[0] == 0 or arr.shape[1] == 0 or arr.shape[2] == 0:
         raise ValueError("samples must have non-empty object, sample, and parameter axes.")
     return arr
+
+
+def _draw_estimator_samples(estimator, x: np.ndarray, num_samples: int, seed: int | None):
+    """Call an estimator without requiring every implementation to accept a seed."""
+
+    sample_method = estimator.sample
+    parameters = inspect.signature(sample_method).parameters
+    if seed is not None and ("seed" in parameters or any(p.kind == p.VAR_KEYWORD for p in parameters.values())):
+        return sample_method(x, num_samples=num_samples, seed=seed)
+    return sample_method(x, num_samples=num_samples)
+
+
+def _check_requested_sample_count(samples: np.ndarray, num_samples: int) -> None:
+    if samples.shape[1] != int(num_samples):
+        raise ValueError(
+            "Estimator returned the wrong number of posterior samples: "
+            f"requested {num_samples}, received {samples.shape[1]}."
+        )
 
 
 def _as_2d(values: np.ndarray, name: str) -> np.ndarray:

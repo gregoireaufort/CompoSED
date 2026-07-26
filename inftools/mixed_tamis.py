@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+import multiprocessing as mp
+import pickle
 
 import numpy as np
 
@@ -44,6 +47,9 @@ def run_mixed_tamis(
     continuous_transform=None,
     rng: np.random.Generator | None = None,
     seed: int | None = None,
+    n_workers: int = 1,
+    batch_size: int = 32,
+    mp_context: str | None = "spawn",
 ) -> SamplingResult:
     """TAMIS-style adaptive importance sampler with a mixed proposal.
 
@@ -60,6 +66,11 @@ def run_mixed_tamis(
     parameters are sampled in unconstrained box-logit coordinates while results
     are returned in the original physical parameter space. In that case
     ``init_span`` and ``var0`` live in transformed coordinates.
+
+    Target evaluations remain serial when ``n_workers=1``. Setting
+    ``n_workers>1`` creates one persistent process pool for the complete TAMIS
+    run. Parameter vectors are sent in ordered batches, and each worker keeps
+    its own backend state (including a process-local CIGALE warehouse).
     """
 
     if rng is not None and seed is not None:
@@ -72,6 +83,10 @@ def run_mixed_tamis(
         raise ValueError("n_per_iter must be positive.")
     if int(n_comp) <= 0:
         raise ValueError("n_comp must be positive.")
+    if int(n_workers) <= 0:
+        raise ValueError("n_workers must be positive.")
+    if int(batch_size) <= 0:
+        raise ValueError("batch_size must be positive.")
 
     blocks = split_parameter_space(parameter_space)
     if not blocks.continuous_indices:
@@ -104,39 +119,53 @@ def run_mixed_tamis(
     ess_history: list[float] = []
     tempered_ess_history: list[float] = []
 
-    for _ in range(int(T_max)):
-        proposal_history.append(proposal)
-        samples = _sample_mixed_proposal(proposal, parameter_space, int(n_per_iter), rng, transform=transform)
-        log_target = np.asarray([posterior.log_prob_fn(theta) for theta in samples], dtype=float)
-        log_proposal = _mixed_proposal_logpdf(samples, proposal, parameter_space, transform=transform)
-        log_weight = log_target - log_proposal
+    pool = _create_log_prob_pool(
+        posterior.log_prob_fn,
+        n_workers=int(n_workers),
+        mp_context=mp_context,
+    )
+    try:
+        for _ in range(int(T_max)):
+            proposal_history.append(proposal)
+            samples = _sample_mixed_proposal(proposal, parameter_space, int(n_per_iter), rng, transform=transform)
+            log_target = _evaluate_log_target(
+                posterior.log_prob_fn,
+                samples,
+                pool=pool,
+                batch_size=int(batch_size),
+            )
+            log_proposal = _mixed_proposal_logpdf(samples, proposal, parameter_space, transform=transform)
+            log_weight = log_target - log_proposal
 
-        weights = _probabilities_from_log_weights(log_weight)
-        ess = _effective_sample_size(weights)
-        beta = _adapt_beta(log_weight, target_ess=min(float(alpha), float(n_per_iter)))
-        tempered_weights = _probabilities_from_log_weights(beta * log_weight)
-        tempered_ess = _effective_sample_size(tempered_weights)
+            weights = _probabilities_from_log_weights(log_weight)
+            ess = _effective_sample_size(weights)
+            beta = _adapt_beta(log_weight, target_ess=min(float(alpha), float(n_per_iter)))
+            tempered_weights = _probabilities_from_log_weights(beta * log_weight)
+            tempered_ess = _effective_sample_size(tempered_weights)
 
-        sample_history.append(samples)
-        log_target_history.append(log_target)
-        log_proposal_history.append(log_proposal)
-        weight_history.append(weights)
-        tempered_weight_history.append(tempered_weights)
-        beta_history.append(beta)
-        ess_history.append(ess)
-        tempered_ess_history.append(tempered_ess)
+            sample_history.append(samples)
+            log_target_history.append(log_target)
+            log_proposal_history.append(log_proposal)
+            weight_history.append(weights)
+            tempered_weight_history.append(tempered_weights)
+            beta_history.append(beta)
+            ess_history.append(ess)
+            tempered_ess_history.append(tempered_ess)
 
-        proposal = _update_mixed_proposal(
-            samples=samples,
-            parameter_space=parameter_space,
-            old=proposal,
-            weights=tempered_weights,
-            transform=transform,
-            discrete_probability_floor=discrete_probability_floor,
-            discrete_floor_failure_probability=discrete_floor_failure_probability,
-            discrete_floor_max_mass=discrete_floor_max_mass,
-            covariance_jitter=float(covariance_jitter),
-        )
+            proposal = _update_mixed_proposal(
+                samples=samples,
+                parameter_space=parameter_space,
+                old=proposal,
+                weights=tempered_weights,
+                transform=transform,
+                discrete_probability_floor=discrete_probability_floor,
+                discrete_floor_failure_probability=discrete_floor_failure_probability,
+                discrete_floor_max_mass=discrete_floor_max_mass,
+                covariance_jitter=float(covariance_jitter),
+            )
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     all_samples = np.vstack(sample_history)
     all_log_target = np.concatenate(log_target_history)
@@ -175,8 +204,60 @@ def run_mixed_tamis(
             "discrete_probability_floor": discrete_probability_floor,
             "discrete_floor_failure_probability": discrete_floor_failure_probability,
             "discrete_floor_max_mass": discrete_floor_max_mass,
+            "parallel_evaluation": {
+                "enabled": int(n_workers) > 1,
+                "n_workers": int(n_workers),
+                "batch_size": int(batch_size),
+                "mp_context": mp_context if int(n_workers) > 1 else None,
+            },
         },
     )
+
+
+_WORKER_LOG_PROB_FN = None
+
+
+def _init_log_prob_worker(log_prob_fn) -> None:
+    global _WORKER_LOG_PROB_FN
+    _WORKER_LOG_PROB_FN = log_prob_fn
+
+
+def _evaluate_log_prob_chunk(samples: np.ndarray) -> np.ndarray:
+    if _WORKER_LOG_PROB_FN is None:
+        raise RuntimeError("MixedTAMIS worker was not initialized.")
+    return np.asarray([_WORKER_LOG_PROB_FN(theta) for theta in samples], dtype=float)
+
+
+def _create_log_prob_pool(log_prob_fn, *, n_workers: int, mp_context: str | None):
+    if n_workers == 1:
+        return None
+
+    try:
+        pickle.dumps(log_prob_fn)
+    except Exception as exc:
+        raise TypeError(
+            "Parallel MixedTAMIS requires a pickleable posterior log-probability. "
+            "Use a top-level callable or a bound method whose Problem/backend can "
+            "be serialized, or keep n_workers=1."
+        ) from exc
+
+    context = mp.get_context(mp_context) if mp_context is not None else None
+    return ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=context,
+        initializer=_init_log_prob_worker,
+        initargs=(log_prob_fn,),
+    )
+
+
+def _evaluate_log_target(log_prob_fn, samples: np.ndarray, *, pool, batch_size: int) -> np.ndarray:
+    if pool is None:
+        # Preserve the original serial evaluation path exactly.
+        return np.asarray([log_prob_fn(theta) for theta in samples], dtype=float)
+
+    batches = tuple(samples[start : start + batch_size] for start in range(0, len(samples), batch_size))
+    evaluated = tuple(pool.map(_evaluate_log_prob_chunk, batches, chunksize=1))
+    return np.concatenate(evaluated)
 
 
 def _resolve_continuous_transform(parameter_space, blocks, continuous_transform):

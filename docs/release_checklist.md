@@ -9,11 +9,13 @@ checks. Passing unit tests does not establish posterior calibration.
 - [ ] Core tests pass on Python 3.10, 3.11, and 3.12 without optional engines.
 - [ ] Stable MAF and sampler adapter jobs pass in CI.
 - [ ] Wheel and source distributions pass `twine check`.
-- [ ] A wheel installed outside the source tree imports `composed` and
-  `inftools`.
+- [ ] Wheel and source distributions installed in clean environments pass
+  `pip check` and import `composed` and `inftools` outside the source tree.
 - [ ] The FSPS and CIGALE environment checks pass where those engines are
   installed.
 - [ ] Tutorial notebooks contain no execution errors or duplicate cell IDs.
+- [ ] Executed stable notebooks have been passed through
+  `python scripts/sanitize_notebook_outputs.py --check`.
 - [ ] Generated catalogs, checkpoints, figures, external grids, and manuscript
   scratch files are not committed.
 

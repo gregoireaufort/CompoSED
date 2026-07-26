@@ -35,6 +35,7 @@ __all__ = [
     "PosteriorSampleSet",
     "marginal_coverage",
     "MAFPosteriorEstimator",
+    "MDNPosteriorEstimator",
     "prediction_summary",
     "rank_statistics",
     "simulate_training_set",
@@ -42,6 +43,8 @@ __all__ = [
     "run_sbi_diagnostics",
     "train_maf_posterior",
     "train_maf_posterior_from_dataset",
+    "train_mdn_posterior",
+    "train_mdn_posterior_from_dataset",
 ]
 
 
@@ -142,21 +145,30 @@ def __getattr__(name):
         }[name]
     if name in {
         "MAFPosteriorEstimator",
+        "MDNPosteriorEstimator",
         "simulate_training_set",
         "train_maf_posterior",
         "train_maf_posterior_from_dataset",
+        "train_mdn_posterior",
+        "train_mdn_posterior_from_dataset",
     }:
         from .sbi import (
             MAFPosteriorEstimator,
+            MDNPosteriorEstimator,
             simulate_training_set,
             train_maf_posterior,
             train_maf_posterior_from_dataset,
+            train_mdn_posterior,
+            train_mdn_posterior_from_dataset,
         )
 
         return {
             "MAFPosteriorEstimator": MAFPosteriorEstimator,
+            "MDNPosteriorEstimator": MDNPosteriorEstimator,
             "simulate_training_set": simulate_training_set,
             "train_maf_posterior": train_maf_posterior,
             "train_maf_posterior_from_dataset": train_maf_posterior_from_dataset,
+            "train_mdn_posterior": train_mdn_posterior,
+            "train_mdn_posterior_from_dataset": train_mdn_posterior_from_dataset,
         }[name]
     raise AttributeError(f"module 'inftools' has no attribute {name!r}")

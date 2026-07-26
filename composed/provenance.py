@@ -13,17 +13,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-DEFAULT_ENV_VARS = ("SPS_HOME", "DSPS_CONTINUUM_SSP_FILE", "CUE_DATA_DIR")
+DEFAULT_ENV_VARS = ("SPS_HOME",)
 DEFAULT_PACKAGES = (
     "composed",
     "numpy",
     "scipy",
     "matplotlib",
     "astropy",
-    "jax",
-    "jaxlib",
-    "numpyro",
-    "dsps",
     "fsps",
     "sedpy",
     "pcigale",
@@ -110,20 +106,12 @@ def collect_run_provenance(
     """Collect reproducibility metadata for a validation run.
 
     ``paths`` should include the science-critical external products: SSP files,
-    Cue data directories, cached reference spectra, catalogs, and any other
-    files whose contents affect the calculation.
+    cached reference spectra, catalogs, and any other files whose contents
+    affect the calculation.
     """
 
     root = _find_repo_root(Path(repo_root).resolve() if repo_root is not None else Path.cwd())
     normalized_paths = _normalize_paths(paths)
-    # These resources directly define the DSPS+Cue model and are small enough
-    # to hash. SPS_HOME is recorded as an environment value but is not hashed
-    # recursively because a full FSPS installation can contain many files.
-    for env_name in ("DSPS_CONTINUUM_SSP_FILE", "CUE_DATA_DIR"):
-        env_path = os.environ.get(env_name)
-        if env_path and env_name not in normalized_paths:
-            normalized_paths[env_name] = Path(env_path)
-
     artifacts = {}
     for label, path in normalized_paths.items():
         artifacts[label] = artifact_provenance(path, max_files=max_directory_files)

@@ -13,7 +13,6 @@ save_npz_with_provenance(
     output_dir / "reference_spectra.npz",
     provenance_paths={
         "ssp_file": ssp_file,
-        "cue_data_dir": cue_data_dir,
         "input_catalog": catalog_path,
     },
     seed=seed,
@@ -44,13 +43,12 @@ The sidecar records:
 - git commit, branch, dirty flag, and porcelain status;
 - Python executable and version;
 - versions of the main numerical/SPS/inference packages when available;
-- selected environment variables such as `SPS_HOME`, `DSPS_CONTINUUM_SSP_FILE`,
-  and `CUE_DATA_DIR`;
+- selected environment variables such as `SPS_HOME`;
 - SHA256 hashes of declared files or directories;
 - random seed;
 - command arguments;
 - any extra stage-specific metadata.
 
-For science validation, treat SSP grids, Cue data directories, filter curves,
-catalogs, and cached reference spectra as model inputs. They should be included
-in `provenance_paths` whenever they affect the plotted result.
+For science validation, treat SSP grids, filter curves, catalogs, and cached
+reference spectra as model inputs. They should be included in
+`provenance_paths` whenever they affect the plotted result.

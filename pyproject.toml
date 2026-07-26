@@ -67,7 +67,9 @@ cigale = [
 sbi = [
   "torch",
   "nflows",
-  "scikit-learn",
+]
+mdn = [
+  "torch",
 ]
 diffusion = [
   "torch",
@@ -76,28 +78,12 @@ diagnostics-extra = [
   "matplotlib",
   "tarp",
 ]
-jaxcigale = [
-  "jax==0.4.38",
-  "jaxlib==0.4.38",
-  "dsps",
-  "numpyro==0.17.0",
-  "h5py",
-  "dill",
-  "scikit-learn",
-]
 all = [
   "fsps==0.4.7",
   "astro-sedpy==0.4.1",
   "torch",
   "nflows",
-  "scikit-learn",
   "tarp",
-  "jax==0.4.38",
-  "jaxlib==0.4.38",
-  "dsps",
-  "numpyro==0.17.0",
-  "h5py",
-  "dill",
   "scipy",
   "emcee",
   "pocomc",

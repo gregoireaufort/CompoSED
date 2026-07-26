@@ -62,6 +62,37 @@ def test_feature_metadata_and_mask_tie_magerrs_to_mags():
 
 
 @pytest.mark.diffusion
+def test_training_mask_can_tie_all_observation_state_groups_by_band():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    import torch
+    from inftools.experimental.diffusion import FeatureMetadata, make_training_mask
+
+    meta = FeatureMetadata.from_groups(
+        {
+            "photometry": ["g", "r"],
+            "uncertainty": ["g_sigma", "r_sigma"],
+            "availability": ["g_available", "r_available"],
+            "censoring": ["g_censored", "r_censored"],
+            "parameters": ["z"],
+        }
+    )
+    tied = ("photometry", "uncertainty", "availability", "censoring")
+    mask = make_training_mask(
+        (32, meta.n_features),
+        meta,
+        unknown_fraction={group: 0.5 for group in tied},
+        device=torch.device("cpu"),
+        tie_groups=tied,
+    )
+
+    reference = mask[:, meta.groups["photometry"]]
+    for group in tied[1:]:
+        assert torch.equal(reference, mask[:, meta.groups[group]])
+
+
+@pytest.mark.diffusion
 def test_diffusion_fit_sample_and_known_feature_clamping(tmp_path):
     if importlib.util.find_spec("torch") is None:
         pytest.skip("torch is not installed.")

@@ -3,7 +3,12 @@ import importlib.util
 import numpy as np
 import pytest
 
-from inftools.sbi import MAFPosteriorEstimator, simulate_training_set, train_maf_posterior_from_dataset
+from inftools.sbi import (
+    MAFPosteriorEstimator,
+    MDNPosteriorEstimator,
+    simulate_training_set,
+    train_maf_posterior_from_dataset,
+)
 from composed.backends.mock import MockBackend
 from composed.data import SEDDataset
 from composed.likelihood import GaussianPhotometricLikelihood
@@ -11,11 +16,34 @@ from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
 
 
+def identity_simulator(theta, noise_fn=None, rng=None):
+    """Pickleable simulator used by process-executor regression tests."""
+
+    del noise_fn, rng
+    return np.asarray(theta, dtype=float)
+
+
+def threshold_simulator(theta, noise_fn=None, rng=None):
+    """Reject part of the prior so process workers exercise replacement waves."""
+
+    del noise_fn, rng
+    if float(theta[0]) < 0.25:
+        raise ValueError("outside toy simulator domain")
+    return np.asarray(theta, dtype=float)
+
+
+def zero_noise(flux):
+    """Pickleable deterministic noise function for process workers."""
+
+    return np.zeros_like(flux)
+
+
 def test_importing_inftools_works_without_constructing_sbi_estimator():
     import inftools
 
     assert hasattr(inftools, "Posterior")
     assert hasattr(inftools, "MAFPosteriorEstimator")
+    assert hasattr(inftools, "MDNPosteriorEstimator")
 
 
 def test_importing_inftools_sbi_works_without_dependencies():
@@ -23,6 +51,7 @@ def test_importing_inftools_sbi_works_without_dependencies():
 
     assert hasattr(sbi, "simulate_training_set")
     assert hasattr(sbi, "train_maf_posterior_from_dataset")
+    assert hasattr(sbi, "train_mdn_posterior_from_dataset")
 
 
 def test_train_maf_posterior_from_dataset_prepares_paired_arrays(monkeypatch):
@@ -120,6 +149,21 @@ def test_constructing_maf_without_nflows_gives_helpful_import_error(monkeypatch)
         sbi.MAFPosteriorEstimator(theta_dim=1, x_dim=1)
 
 
+def test_constructing_mdn_without_torch_gives_helpful_import_error(monkeypatch):
+    import inftools.sbi as sbi
+
+    original_import = importlib.import_module
+
+    def fake_import_module(name):
+        if name == "torch":
+            raise ImportError("no torch")
+        return original_import(name)
+
+    monkeypatch.setattr(sbi.importlib, "import_module", fake_import_module)
+    with pytest.raises(ImportError, match="MDN posterior estimator requires"):
+        sbi.MDNPosteriorEstimator(theta_dim=1, x_dim=1)
+
+
 def test_maf_constructor_forces_float32_before_device_move(monkeypatch):
     import inftools.sbi as sbi
 
@@ -209,6 +253,47 @@ def test_simulate_training_set_can_return_exact_sigma():
     assert metadata["returned_sigma"] is True
 
 
+@pytest.mark.sbi
+def test_mdn_density_is_normalized_and_sampling_is_finite():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    rng = np.random.default_rng(90)
+    x = rng.normal(size=(256, 1))
+    theta = 0.7 * x + 0.4 * rng.normal(size=(256, 1))
+    estimator = MDNPosteriorEstimator(
+        theta_dim=1,
+        x_dim=1,
+        n_components=3,
+        hidden_features=24,
+        num_blocks=2,
+        device="cpu",
+        initialization_seed=91,
+    )
+    history = estimator.fit(
+        theta,
+        x,
+        epochs=3,
+        batch_size=64,
+        validation_split=0.2,
+        seed=92,
+    )
+
+    assert np.all(np.isfinite(history["train_loss"]))
+    samples = estimator.sample(np.asarray([[0.0], [0.5]]), 7, seed=93)
+    assert samples.shape == (2, 7, 1)
+    assert np.all(np.isfinite(samples))
+
+    mixture = estimator.mixture_parameters(np.asarray([[0.0]]))
+    assert np.allclose(np.sum(mixture["weights"], axis=1), 1.0)
+    assert np.all(mixture["scales"] > 0.0)
+
+    grid = np.linspace(-20.0, 20.0, 10_001)
+    log_density = estimator.log_prob(grid[:, None], np.asarray([[0.0]]))
+    integral = np.trapz(np.exp(log_density), grid)
+    assert integral == pytest.approx(1.0, abs=2.0e-3)
+
+
 def test_simulate_training_set_parallel_thread_chunks():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
 
@@ -235,6 +320,78 @@ def test_simulate_training_set_parallel_thread_chunks():
     assert meta["batch_size"] == 4
     assert meta["n_workers"] == 2
     assert meta["executor"] == "thread"
+
+
+def test_parallel_training_simulation_does_not_run_unused_retry_reserve():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    def simulator(theta, noise_fn=None, rng=None):
+        del noise_fn, rng
+        return np.array([theta[0]])
+
+    theta, x, meta = simulate_training_set(
+        ps,
+        simulator,
+        n=17,
+        noise_fn=lambda flux: np.zeros_like(flux),
+        rng=np.random.default_rng(13),
+        max_retries=100,
+        batch_size=4,
+        n_workers=2,
+        executor="thread",
+        return_metadata=True,
+    )
+
+    assert theta.shape == (17, 1)
+    assert x.shape == (17, 1)
+    assert meta["attempts"] == 17
+    assert meta["failures"] == []
+
+
+def test_process_training_simulation_does_not_run_unused_retry_reserve():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    theta, x, meta = simulate_training_set(
+        ps,
+        identity_simulator,
+        n=17,
+        noise_fn=zero_noise,
+        rng=np.random.default_rng(14),
+        max_retries=100,
+        batch_size=4,
+        n_workers=2,
+        executor="process",
+        mp_context="spawn",
+        return_metadata=True,
+    )
+
+    assert theta.shape == (17, 1)
+    assert x.shape == (17, 1)
+    assert meta["attempts"] == 17
+    assert meta["failures"] == []
+
+
+def test_process_training_simulation_replaces_only_failed_rows():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    theta, x, meta = simulate_training_set(
+        ps,
+        threshold_simulator,
+        n=17,
+        noise_fn=zero_noise,
+        rng=np.random.default_rng(15),
+        max_retries=100,
+        batch_size=4,
+        n_workers=2,
+        executor="process",
+        mp_context="spawn",
+        return_metadata=True,
+    )
+
+    assert theta.shape == x.shape == (17, 1)
+    assert np.all(theta[:, 0] >= 0.25)
+    assert len(meta["failures"]) > 0
+    assert meta["attempts"] == 17 + len(meta["failures"])
 
 
 def test_parallel_training_simulation_returns_matching_sigma_rows():
@@ -295,6 +452,19 @@ def test_simulate_training_set_raises_after_too_many_failures():
 
     with pytest.raises(RuntimeError, match="Too many failed simulations"):
         simulate_training_set(ps, simulator, n=1, noise_fn=lambda flux: flux, max_retries=1)
+
+
+def test_simulate_training_set_rejects_negative_retry_budget():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    with pytest.raises(ValueError, match="max_retries must be non-negative"):
+        simulate_training_set(
+            ps,
+            lambda theta, noise_fn=None, rng=None: np.asarray(theta),
+            n=1,
+            noise_fn=lambda flux: flux,
+            max_retries=-1,
+        )
 
 
 @pytest.mark.sbi

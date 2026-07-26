@@ -17,12 +17,18 @@ FSPS after following the upstream python-fsps/FSPS install instructions:
 
     SPS_HOME=/path/to/fsps python scripts/check_environment.py --fsps
 
-Full local science stack:
+MAF/SBI dependencies:
 
-    SPS_HOME=/path/to/fsps \
-    CUE_DATA_DIR=/path/to/cue/src/cue/data \
-    DSPS_CONTINUUM_SSP_FILE=/path/to/fsps_continuum_ssp_data.h5 \
-    python scripts/check_environment.py --all
+    python scripts/check_environment.py --sbi
+
+MDN-only SBI dependency:
+
+    python scripts/check_environment.py --mdn
+
+Traditional sampler adapters or experimental diffusion:
+
+    python scripts/check_environment.py --samplers
+    python scripts/check_environment.py --diffusion
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ if (REPO_ROOT / "composed").exists() and str(REPO_ROOT) not in sys.path:
 
 PYTHON_FSPS_INSTALL_URL = "https://python-fsps.readthedocs.io/en/latest/installation/"
 CIGALE_V2022_URL = "https://gitlab.lam.fr/cigale/cigale/-/tree/v2022.0"
-CUE_URL = "https://github.com/yi-jia-li/cue"
+EXPECTED_CIGALE_VERSION = "2022.0"
 
 
 @dataclass
@@ -99,29 +105,6 @@ def path_check(name: str, value: str | None, *, must_exist: bool = True, require
     return Check(name, True, str(path), required=required)
 
 
-def cue_data_checks(required: bool) -> list[Check]:
-    """Check the public Cue data directory used by the JAX Cue port."""
-
-    checks = [path_check("CUE_DATA_DIR", os.environ.get("CUE_DATA_DIR"), required=required)]
-    if not checks[-1].ok:
-        checks[-1].message += f" ; clone Cue from {CUE_URL} and point to src/cue/data"
-        return checks
-
-    data_dir = Path(os.environ["CUE_DATA_DIR"]).expanduser()
-    required_files = [
-        "FSPSlam.dat",
-        "speculator_cont_new.pkl",
-        "pca_cont_new.pkl",
-        "speculator_line_new_H1.pkl",
-        "pca_line_new_H1.pkl",
-        "lineList_128lines.dat",
-        "lineList_wav.npy",
-    ]
-    for filename in required_files:
-        checks.append(path_check(f"Cue file {filename}", str(data_dir / filename), required=required))
-    return checks
-
-
 def check_core() -> list[Check]:
     """Core CompoSED checks: no heavyweight scientific backend required."""
 
@@ -163,7 +146,37 @@ def check_fsps() -> list[Check]:
 def check_cigale() -> list[Check]:
     """CIGALE backend checks."""
 
-    checks = [import_check("pcigale", distribution="pcigale")]
+    pcigale_check = import_check("pcigale", distribution="pcigale")
+    checks = [
+        pcigale_check,
+        import_check("pkg_resources", distribution="setuptools"),
+    ]
+    if pcigale_check.ok:
+        try:
+            imported = importlib.import_module("pcigale")
+            version = getattr(imported, "__version__", None) or package_version("pcigale")
+            version_matches = version is not None and str(version).split("+", maxsplit=1)[0] == EXPECTED_CIGALE_VERSION
+            checks.append(
+                Check(
+                    "CIGALE target",
+                    version_matches,
+                    (
+                        f"installed {version}; expected {EXPECTED_CIGALE_VERSION} from {CIGALE_V2022_URL}"
+                        if version is not None
+                        else f"installed version is unknown; expected {EXPECTED_CIGALE_VERSION}"
+                    ),
+                )
+            )
+        except Exception as exc:
+            checks.append(Check("CIGALE target", False, f"could not inspect installed version: {exc}"))
+    else:
+        checks.append(
+            Check(
+                "CIGALE target",
+                False,
+                f"cannot verify {EXPECTED_CIGALE_VERSION} because pcigale is not importable",
+            )
+        )
     try:
         import numpy as np
 
@@ -182,69 +195,69 @@ def check_cigale() -> list[Check]:
         )
     except Exception as exc:
         checks.append(Check("CIGALE constant SFH", False, f"could not check NumPy: {exc}", required=False))
-    checks.append(
-        Check(
-            "CIGALE target",
-            True,
-            f"CompoSED validation targets upstream CIGALE v2022.0: {CIGALE_V2022_URL}",
-        )
-    )
     return checks
 
 
 def check_sbi() -> list[Check]:
-    """SBI / neural posterior estimator checks."""
+    """MAF / neural posterior estimator checks."""
 
     return [
+        # NumPy first avoids duplicate OpenMP initialization in some macOS
+        # conda environments when torch is the first numerical import.
+        import_check("numpy"),
         import_check("torch"),
         import_check("nflows"),
     ]
 
 
-def check_jaxcigale(*, require_data: bool) -> list[Check]:
-    """JAX-CIGALE checks."""
+def check_mdn() -> list[Check]:
+    """MDN-only neural posterior estimator check."""
 
-    checks = [
-        import_check("jax"),
-        import_check("jaxlib"),
-        import_check("numpyro"),
-        import_check("dsps"),
-        import_check("h5py"),
-        import_check("dill"),
-        import_check("sklearn", distribution="scikit-learn"),
+    return [
+        import_check("numpy"),
+        import_check("torch"),
     ]
 
-    # The analytic JAX-CIGALE smoke path does not need this file, but DSPS/Cue
-    # validation does.  Treat it as required only when --all/--cue asks for the
-    # complete science stack.
-    checks.append(
-        path_check(
-            "DSPS_CONTINUUM_SSP_FILE",
-            os.environ.get("DSPS_CONTINUUM_SSP_FILE"),
-            required=require_data,
-        )
-    )
 
-    try:
-        import jax
+def check_samplers() -> list[Check]:
+    """Traditional sampler-adapter dependency checks."""
 
-        checks.append(Check("JAX backend", True, f"{jax.default_backend()} ; devices={jax.devices()}"))
-    except Exception as exc:
-        checks.append(Check("JAX backend", False, f"could not query devices: {exc}", required=False))
-    return checks
+    return [
+        import_check("scipy"),
+        import_check("emcee"),
+        import_check("pocomc"),
+        import_check("tqdm"),
+    ]
+
+
+def check_diffusion() -> list[Check]:
+    """Experimental conditional-diffusion dependency checks."""
+
+    return [
+        import_check("numpy"),
+        import_check("torch"),
+    ]
 
 
 def selected_components(args: argparse.Namespace) -> set[str]:
     selected = set()
     if args.all:
-        selected.update({"core", "fsps", "cigale", "jaxcigale", "cue", "sbi"})
-    for name in ("core", "fsps", "cigale", "jaxcigale", "cue", "sbi"):
-        if getattr(args, name):
+        selected.update(
+            {
+                "core",
+                "fsps",
+                "cigale",
+                "sbi",
+                "mdn",
+                "samplers",
+                "diffusion",
+            }
+        )
+    for name in ("core", "fsps", "cigale", "sbi", "mdn", "samplers", "diffusion"):
+        if getattr(args, name, False):
             selected.add(name)
     if not selected:
         selected.add("core")
-    if "cue" in selected:
-        selected.add("jaxcigale")
     return selected
 
 
@@ -256,12 +269,14 @@ def run_checks(components: set[str]) -> list[tuple[str, list[Check]]]:
         grouped.append(("fsps", check_fsps()))
     if "cigale" in components:
         grouped.append(("cigale", check_cigale()))
-    if "jaxcigale" in components:
-        grouped.append(("jaxcigale", check_jaxcigale(require_data="cue" in components)))
-    if "cue" in components:
-        grouped.append(("cue-data", cue_data_checks(required=True)))
     if "sbi" in components:
         grouped.append(("sbi", check_sbi()))
+    if "mdn" in components:
+        grouped.append(("mdn", check_mdn()))
+    if "samplers" in components:
+        grouped.append(("samplers", check_samplers()))
+    if "diffusion" in components:
+        grouped.append(("diffusion", check_diffusion()))
     return grouped
 
 
@@ -278,13 +293,26 @@ def has_required_failures(grouped: list[tuple[str, list[Check]]]) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--all", action="store_true", help="Check all known CompoSED optional stacks.")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Check all CompoSED v0.1 backend and inference stacks.",
+    )
     parser.add_argument("--core", action="store_true", help="Check the lightweight core install.")
     parser.add_argument("--fsps", action="store_true", help="Check FSPS/python-fsps and SPS_HOME.")
     parser.add_argument("--cigale", action="store_true", help="Check CIGALE/pcigale.")
-    parser.add_argument("--jaxcigale", action="store_true", help="Check JAX-CIGALE packages.")
-    parser.add_argument("--cue", action="store_true", help="Check Cue public data plus JAX-CIGALE packages.")
     parser.add_argument("--sbi", action="store_true", help="Check torch/nflows SBI dependencies.")
+    parser.add_argument("--mdn", action="store_true", help="Check the torch-only MDN dependency.")
+    parser.add_argument(
+        "--samplers",
+        action="store_true",
+        help="Check traditional sampler-adapter dependencies.",
+    )
+    parser.add_argument(
+        "--diffusion",
+        action="store_true",
+        help="Check experimental conditional-diffusion dependencies.",
+    )
     return parser.parse_args()
 
 

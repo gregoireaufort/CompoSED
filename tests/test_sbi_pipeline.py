@@ -6,7 +6,7 @@ import pytest
 
 import composed
 from composed.backends.base import ModelPhotometry
-from composed.data import SEDDataset
+from composed.data import SEDDataset, SpectrumDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
@@ -14,11 +14,14 @@ from composed.problem import Gaussian, Problem, fit
 from composed.sbi import (
     Diffusion,
     MAF,
+    MDN,
     PhotometricContext,
     PriorSupportTransform,
     SBITrainingSet,
     Simulate,
+    TrainedDiffusionSBI,
     TrainedMAFSBI,
+    TrainedMDNSBI,
     simulate_photometric_training_set,
     simulate_sbi_training_set,
     train_sbi,
@@ -90,10 +93,12 @@ def toy_problem(mask=None):
     )
 
 
-def test_stable_top_level_exports_maf_but_not_experimental_diffusion():
+def test_stable_top_level_exports_maf_and_mdn_but_not_experimental_diffusion():
     assert hasattr(composed, "MAF")
+    assert hasattr(composed, "MDN")
     assert hasattr(composed, "PhotometricContext")
     assert hasattr(composed, "TrainedMAFSBI")
+    assert hasattr(composed, "TrainedMDNSBI")
     assert not hasattr(composed, "Diffusion")
     assert not hasattr(composed, "TrainedDiffusionSBI")
 
@@ -149,6 +154,233 @@ def test_problem_simulation_is_the_declared_sbi_source():
     assert training.theta_names == ("z", "log10_mass")
     assert training.theta_full.shape == (12, 3)
     assert training.metadata["problem"] == problem.specification()
+
+
+def test_problem_simulation_separates_condition_columns_from_inferred_targets():
+    problem = toy_problem()
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(
+            n=24,
+            noise_fn=small_noise,
+            infer=["log10_mass"],
+            condition_on=["z"],
+        ),
+        rng=17,
+    )
+
+    z_index = problem.parameters.names.index("z")
+    assert training.theta_names == ("log10_mass",)
+    assert training.condition_names == ("z",)
+    assert training.condition_values.shape == (24, 1)
+    assert np.allclose(training.condition_values[:, 0], training.theta_full[:, z_index])
+    assert training.x_names[-1] == "condition:z"
+    assert np.allclose(training.x[:, -1], training.condition_values[:, 0])
+    assert training.observation_groups["conditions"] == ("condition:z",)
+
+
+def test_problem_fit_sbi_uses_conditions_as_training_context(monkeypatch):
+    import composed.sbi as sbi_module
+
+    problem = toy_problem()
+    seen = {}
+
+    class FakeTrained:
+        def __init__(self, training_set):
+            self.training_set = training_set
+            self.theta_names = training_set.theta_names
+            self.history = {"train_loss": [1.0]}
+            self.estimator = type("Estimator", (), {"device": "cpu"})()
+
+        def sample(
+            self,
+            photometry,
+            *,
+            conditions=None,
+            num_samples,
+            batch_size=None,
+            seed=None,
+        ):
+            del photometry, batch_size, seed
+            seen["inference_conditions"] = conditions
+            values = np.linspace(9.8, 10.2, int(num_samples))
+            return values[None, :, None]
+
+    def fake_train_sbi(training_set, method, *, seed=None):
+        del method, seed
+        seen["training_set"] = training_set
+        return FakeTrained(training_set)
+
+    monkeypatch.setattr(sbi_module, "train_sbi", fake_train_sbi)
+
+    result = fit(
+        problem,
+        method=MAF(num_samples=5),
+        training=Simulate(
+            n=32,
+            noise_fn=small_noise,
+            infer=["log10_mass"],
+        ),
+        conditions={"z": 0.35},
+        seed=18,
+    )
+
+    training = seen["training_set"]
+    assert training.condition_names == ("z",)
+    assert seen["inference_conditions"] == {"z": 0.35}
+    assert result.samples.shape == (5, 1)
+    assert result.parameter_names == ("log10_mass",)
+    assert result.metadata["conditions"] == {"z": 0.35}
+    assert result.metadata["conditioned_parameter_names"] == ("z",)
+
+
+def test_problem_fit_sbi_rejects_target_condition_overlap():
+    problem = toy_problem()
+
+    with pytest.raises(ValueError, match="both inferred and conditioned"):
+        fit(
+            problem,
+            method=MAF(num_samples=2),
+            training=Simulate(
+                n=8,
+                noise_fn=small_noise,
+                infer=["z", "log10_mass"],
+            ),
+            conditions={"z": 0.35},
+            seed=19,
+        )
+
+
+@pytest.mark.sbi
+def test_problem_fit_maf_conditions_survive_checkpoint_roundtrip(tmp_path):
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch or nflows is not installed.")
+
+    problem = toy_problem()
+    result = fit(
+        problem,
+        method=MAF(
+            hidden_features=16,
+            num_transforms=2,
+            num_blocks=1,
+            epochs=2,
+            batch_size=16,
+            validation_split=0.2,
+            patience=None,
+            num_samples=4,
+            inference_batch_size=1,
+            device="cpu",
+        ),
+        training=Simulate(
+            n=96,
+            noise_fn=small_noise,
+            infer=["log10_mass"],
+        ),
+        conditions={"z": 0.35},
+        seed=22,
+    )
+
+    assert result.samples.shape == (4, 1)
+    assert result.inference_state.condition_names == ("z",)
+    checkpoint = result.inference_state.save(tmp_path / "conditioned_maf")
+    loaded = TrainedMAFSBI.load(checkpoint, device="cpu")
+    draws = loaded.sample(
+        problem.data,
+        conditions={"z": 0.35},
+        num_samples=3,
+        seed=23,
+    )
+    assert draws.shape == (1, 3, 1)
+    assert np.all(np.isfinite(draws))
+
+
+def test_trained_maf_appends_named_conditions_to_native_context():
+    problem = toy_problem()
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(
+            n=16,
+            noise_fn=small_noise,
+            infer=["log10_mass"],
+            condition_on=["z"],
+        ),
+        rng=20,
+    )
+
+    class RecordingEstimator:
+        theta_dim = 1
+        x_dim = training.x.shape[1]
+
+        def __init__(self):
+            self.context = None
+
+        def sample(self, context, num_samples):
+            self.context = np.asarray(context)
+            return np.zeros((int(num_samples), 1))
+
+    estimator = RecordingEstimator()
+    trained = TrainedMAFSBI(
+        estimator=estimator,
+        training_set=training,
+        history={},
+    )
+    draws = trained.sample(
+        problem.data,
+        conditions={"z": 0.35},
+        num_samples=3,
+    )
+
+    assert draws.shape == (1, 3, 1)
+    assert estimator.context.shape == (1, training.x.shape[1])
+    assert estimator.context[0, -1] == pytest.approx(0.35)
+    with pytest.raises(ValueError, match="requires condition values"):
+        trained.sample(problem.data, num_samples=2)
+
+
+def test_trained_diffusion_appends_named_conditions_to_native_context():
+    problem = toy_problem()
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(
+            n=16,
+            noise_fn=small_noise,
+            infer=["log10_mass"],
+            condition_on=["z"],
+        ),
+        rng=21,
+    )
+
+    class RecordingDiffusionEstimator:
+        def __init__(self):
+            self.known = None
+
+        def sample(self, known, mask, *, num_samples, **kwargs):
+            del kwargs
+            self.known = np.asarray(known)
+            cube = np.zeros(
+                (known.shape[0], int(num_samples), known.shape[1]),
+                dtype=float,
+            )
+            cube[:] = np.where(mask, known, 0.0)[:, None, :]
+            return cube
+
+    estimator = RecordingDiffusionEstimator()
+    trained = TrainedDiffusionSBI(
+        estimator=estimator,
+        training_set=training,
+        history={},
+        mask_config={},
+    )
+    draws = trained.sample(
+        problem.data,
+        conditions={"z": 0.35},
+        num_samples=3,
+        steps=2,
+    )
+
+    condition_index = training.diffusion_observation_size - 1
+    assert draws.shape == (1, 3, 1)
+    assert estimator.known[0, condition_index] == pytest.approx(0.35)
 
 
 def test_default_problem_sbi_context_retains_exact_sigma_and_accepts_negative_flux():
@@ -327,12 +559,83 @@ def test_problem_fit_rejects_unrelated_preexisting_training_set():
         fit(toy_problem(), method=MAF(epochs=1), training=external, seed=1)
 
 
-def test_problem_sbi_rejects_implicit_upper_limit_encoding():
+def test_problem_fit_maf_rejects_spectral_data_with_controlled_error():
+    problem = Problem(
+        backend=LinearColorBackend(),
+        parameters=toy_parameter_space(),
+        data=SpectrumDataset(
+            wavelength=np.asarray([5000.0, 5001.0]),
+            flux=np.asarray([1.0, 1.0]),
+            sigma=np.asarray([0.1, 0.1]),
+        ),
+        likelihood=Gaussian(),
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match="supports photometric SEDDataset observations",
+    ):
+        fit(
+            problem,
+            method=MAF(epochs=1),
+            training=Simulate(n=8, noise_fn=small_noise),
+            seed=1,
+        )
+
+
+def test_simulate_configuration_rejects_negative_retry_budget():
+    with pytest.raises(ValueError, match="max_retries must be non-negative"):
+        Simulate(n=8, noise_fn=small_noise, max_retries=-1)
+
+
+def test_preexisting_photometry_encodes_availability_and_upper_limits_explicitly():
+    training = SBITrainingSet.from_photometry(
+        theta=np.asarray([[0.2], [0.7]]),
+        flux=np.asarray([[1.0, np.nan, np.nan], [2.0, 0.5, np.nan]]),
+        sigma=np.asarray([[0.1, 0.2, np.nan], [0.2, 0.1, 0.05]]),
+        measurement_mask=np.asarray(
+            [[True, True, False], [True, True, True]]
+        ),
+        upper_limit=np.asarray(
+            [[np.nan, 0.3, np.nan], [np.nan, np.nan, 0.2]]
+        ),
+        upper_limit_mask=np.asarray(
+            [[False, True, False], [False, False, True]]
+        ),
+        theta_names=["z"],
+        band_names=["u", "g", "r"],
+        source="censored_catalog",
+        parameter_space=ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)}),
+    )
+
+    observation = training.diffusion_observation_features
+    groups = training.diffusion_feature_metadata.groups
+    assert observation.shape == (2, 18)
+    assert np.allclose(observation[:, groups["photometry"]], [[10.0, 0.0, 0.0], [10.0, 5.0, 0.0]])
+    assert np.array_equal(
+        observation[:, groups["availability"]],
+        [[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]],
+    )
+    assert np.array_equal(
+        observation[:, groups["censoring"]],
+        [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    assert np.allclose(
+        observation[:, groups["upper_limit"]],
+        [[0.0, 1.5, 0.0], [0.0, 0.0, 4.0]],
+    )
+    assert np.allclose(
+        training.diffusion_joint_features[:, -1:],
+        training.theta_transform.transform(training.theta),
+    )
+
+
+def test_problem_sbi_encodes_simulated_censoring_without_latent_flux_leakage():
     data = SEDDataset(
         band_names=["u", "g", "r"],
         flux=np.asarray([1.0, np.nan, 0.7]),
         sigma=np.asarray([0.1, 0.1, 0.1]),
-        upper_limit=np.asarray([0.0, 0.3, 0.0]),
+        upper_limit=np.asarray([0.0, 0.84, 0.0]),
         upper_limit_mask=np.asarray([False, True, False]),
     )
     problem = Problem(
@@ -342,8 +645,89 @@ def test_problem_sbi_rejects_implicit_upper_limit_encoding():
         Gaussian(),
         filters=toy_filters(),
     )
-    with pytest.raises(NotImplementedError, match="upper-limit feature encoding"):
-        simulate_sbi_training_set(problem, Simulate(n=4, noise_fn=zero_noise), rng=2)
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(n=128, noise_fn=small_noise),
+        rng=2,
+    )
+
+    assert training.has_photometric_state
+    assert np.all(training.measurement_mask_native)
+    assert np.all(~training.upper_limit_mask_native[:, [0, 2]])
+    censored = training.upper_limit_mask_native[:, 1]
+    assert np.any(censored)
+    assert np.any(~censored)
+    assert np.all(np.isnan(training.x_native[censored, 1]))
+    assert np.all(training.x_native[~censored, 1] > 0.84)
+    assert np.all(training.upper_limit_native[:, 1] == 0.84)
+    assert np.all(np.isnan(training.upper_limit_native[:, [0, 2]]))
+    assert training.metadata["observation_state"]["censoring_rule"] == (
+        "measured_flux <= upper_limit"
+    )
+
+    with pytest.raises(NotImplementedError, match="MAF does not yet encode"):
+        fit(
+            problem,
+            method=MAF(epochs=1),
+            training=Simulate(n=8, noise_fn=small_noise),
+            seed=3,
+        )
+
+
+def test_diffusion_data_state_and_conditioning_mask_are_distinct():
+    parameter_space = ParameterSpace(
+        ["z", "mass"],
+        {
+            "z": UniformPrior(0.0, 1.0),
+            "mass": UniformPrior(9.0, 11.0),
+        },
+    )
+    training = SBITrainingSet.from_photometry(
+        theta=np.asarray([[0.2, 9.5], [0.8, 10.5]]),
+        flux=np.asarray([[1.0, np.nan], [1.2, 0.8]]),
+        sigma=np.asarray([[0.1, np.nan], [0.1, 0.2]]),
+        measurement_mask=np.asarray([[True, False], [True, True]]),
+        theta_names=["z", "mass"],
+        band_names=["g", "r"],
+        source="state_mask_test",
+        parameter_space=parameter_space,
+    )
+
+    class FakeDiffusionEstimator:
+        def sample(self, known, mask, *, num_samples, **kwargs):
+            self.known = np.asarray(known)
+            self.mask = np.asarray(mask)
+            samples = np.repeat(
+                np.nan_to_num(self.known, nan=0.0)[:, None, :],
+                int(num_samples),
+                axis=1,
+            )
+            samples[:, :, -2:] = np.asarray([-1.0e6, 1.0e6])
+            return samples
+
+    estimator = FakeDiffusionEstimator()
+    trained = TrainedDiffusionSBI(
+        estimator=estimator,
+        training_set=training,
+        history={"train_loss": [0.0]},
+        mask_config={},
+    )
+    data = SEDDataset(
+        band_names=["g", "r"],
+        flux=np.asarray([1.0, np.nan]),
+        sigma=np.asarray([0.1, np.nan]),
+        mask=np.asarray([True, False]),
+    )
+    samples = trained.sample(data, num_samples=3)
+
+    n_observation = training.diffusion_observation_size
+    availability_cols = training.diffusion_feature_metadata.groups["availability"]
+    assert np.array_equal(estimator.known[0, availability_cols], [1.0, 0.0])
+    assert np.all(estimator.mask[:, :n_observation])
+    assert np.all(~estimator.mask[:, n_observation:])
+    assert samples.shape == (1, 3, 2)
+    assert np.all((samples[:, :, 0] >= 0.0) & (samples[:, :, 0] <= 1.0))
+    assert np.all((samples[:, :, 1] >= 9.0) & (samples[:, :, 1] <= 11.0))
 
 
 @pytest.mark.diffusion
@@ -373,13 +757,16 @@ def test_train_diffusion_photometric_sbi_shape_and_clamping():
     )
 
     assert np.isfinite(result.history["train_loss"][-1])
-    x_obs = result.training_set.x[:3]
+    x_obs = result.training_set.diffusion_observation_features[:3]
     samples = result.sample(x_obs, num_samples=4, steps=3, sampler="edm_euler")
     assert samples.shape == (3, 4, 2)
     assert np.all(np.isfinite(samples))
+    assert np.all((samples[:, :, 0] >= 0.0) & (samples[:, :, 0] <= 1.0))
+    assert np.all((samples[:, :, 1] >= 9.0) & (samples[:, :, 1] <= 11.0))
 
     joint = result.sample_joint(x_obs, num_samples=4, steps=3, sampler="edm_euler")
-    assert np.allclose(joint[:, :, :3], x_obs[:, None, :])
+    n_observation = result.training_set.diffusion_observation_size
+    assert np.allclose(joint[:, :, :n_observation], x_obs[:, None, :])
 
 
 @pytest.mark.diffusion
@@ -413,6 +800,55 @@ def test_standalone_preexisting_diffusion_uses_generic_observation_group():
     assert len(trained.history["val_loss"]) == 1
     samples = trained.sample(x[:2], num_samples=3, steps=2, sampler="edm_euler")
     assert samples.shape == (2, 3, 2)
+
+
+@pytest.mark.diffusion
+def test_problem_fit_diffusion_uses_sigma_upper_limit_and_physical_priors():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    problem = Problem(
+        LinearColorBackend(),
+        toy_parameter_space(),
+        SEDDataset(
+            band_names=["u", "g", "r"],
+            flux=np.asarray([1.0, np.nan, 0.7]),
+            sigma=np.asarray([0.1, 0.1, 0.1]),
+            upper_limit=np.asarray([0.0, 0.84, 0.0]),
+            upper_limit_mask=np.asarray([False, True, False]),
+        ),
+        Gaussian(),
+        filters=toy_filters(),
+    )
+    result = fit(
+        problem,
+        method=Diffusion(
+            model="mlp",
+            hidden_features=16,
+            model_config={"mlp_blocks": 1, "emb_dim": 16, "time_hidden": 16},
+            epochs=1,
+            batch_size=16,
+            num_samples=4,
+            steps=2,
+            sampler="edm_euler",
+        ),
+        training=Simulate(
+            n=64,
+            noise_fn=small_noise,
+            infer=["z", "log10_mass"],
+        ),
+        seed=19,
+    )
+
+    assert result.samples.shape == (4, 2)
+    assert np.all((result.samples[:, 0] >= 0.0) & (result.samples[:, 0] <= 1.0))
+    assert np.all((result.samples[:, 1] >= 9.0) & (result.samples[:, 1] <= 11.0))
+    training = result.inference_state.training_set
+    assert training.context.mode == "snr_logsigma"
+    assert "censoring" in training.diffusion_observation_groups
+    assert tuple(result.inference_state.mask_config["tie_groups"]) == tuple(
+        training.diffusion_observation_groups
+    )
 
 
 @pytest.mark.sbi
@@ -499,6 +935,78 @@ def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
 
 
 @pytest.mark.sbi
+def test_problem_fit_mdn_returns_normalized_bounded_physical_posterior():
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    problem = toy_problem()
+    result = fit(
+        problem,
+        method=MDN(
+            n_components=3,
+            hidden_features=16,
+            num_blocks=2,
+            epochs=3,
+            batch_size=16,
+            num_samples=7,
+            device="cpu",
+        ),
+        training=Simulate(
+            n=96,
+            noise_fn=small_noise,
+            infer=["z", "log10_mass"],
+        ),
+        seed=46,
+    )
+
+    assert result.sampler_name == "mdn"
+    assert result.samples.shape == (7, 2)
+    assert np.all((result.samples[:, 0] >= 0.0) & (result.samples[:, 0] <= 1.0))
+    assert np.all((result.samples[:, 1] >= 9.0) & (result.samples[:, 1] <= 11.0))
+    logp = result.inference_state.log_prob(result.samples, problem.data)
+    assert logp.shape == (7,)
+    assert np.all(np.isfinite(logp))
+
+
+@pytest.mark.sbi
+def test_trained_mdn_save_load_roundtrip_preserves_density_and_samples(tmp_path):
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is not installed.")
+
+    training = simulate_sbi_training_set(
+        toy_problem(),
+        Simulate(n=96, noise_fn=small_noise, infer=["z", "log10_mass"]),
+        rng=61,
+    )
+    trained = train_sbi(
+        training,
+        MDN(
+            n_components=3,
+            hidden_features=16,
+            num_blocks=2,
+            epochs=3,
+            batch_size=16,
+            device="cpu",
+        ),
+        seed=62,
+    )
+    checkpoint = trained.save(tmp_path / "mdn")
+    loaded = TrainedMDNSBI.load(checkpoint, device="cpu")
+
+    theta = np.asarray([[0.2, 9.5], [0.8, 10.5]])
+    context = training.x[:2]
+    assert np.allclose(
+        loaded.log_prob(theta, context),
+        trained.log_prob(theta, context),
+        rtol=1.0e-6,
+        atol=1.0e-6,
+    )
+    original_samples = trained.sample(context, num_samples=5, seed=63)
+    loaded_samples = loaded.sample(context, num_samples=5, seed=63)
+    assert np.allclose(loaded_samples, original_samples)
+
+
+@pytest.mark.sbi
 def test_trained_maf_save_load_roundtrip_preserves_schema_and_weights(tmp_path):
     if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
         pytest.skip("torch/nflows are not installed.")
@@ -519,6 +1027,7 @@ def test_trained_maf_save_load_roundtrip_preserves_schema_and_weights(tmp_path):
             batch_size=16,
             validation_split=0.2,
             patience=2,
+            device="cpu",
         ),
         seed=52,
     )

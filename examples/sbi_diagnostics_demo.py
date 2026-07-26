@@ -46,6 +46,7 @@ def main() -> None:
         theta_names=["z", "log10_mass"],
         output_dir=output_dir,
         make_plots=True,
+        seed=12,
     )
 
     print(f"Wrote diagnostics to {output_dir}")

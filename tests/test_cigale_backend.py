@@ -1,3 +1,4 @@
+import pickle
 import sys
 import types
 
@@ -39,6 +40,22 @@ def test_cigale_backend_rejects_absolute_mass_normalization(monkeypatch):
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     with pytest.raises(ValueError, match="PER_SOLAR_MASS"):
         CIGALEBackend(modules=["sfhdelayed", "redshifting"], mass_normalization=MassNormalization.ABSOLUTE)
+
+
+def test_cigale_backend_pickling_discards_live_warehouse(monkeypatch):
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
+    live_warehouse = lambda: None
+    backend._warehouse = live_warehouse
+
+    restored = pickle.loads(pickle.dumps(backend))
+
+    assert backend._warehouse is live_warehouse
+    assert restored._warehouse is None
+    assert restored.modules == backend.modules
+    assert restored.module_parameters == backend.module_parameters
 
 
 def test_cigale_parameter_space_from_ranges_and_choices():

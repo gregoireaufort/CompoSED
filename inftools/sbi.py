@@ -11,6 +11,16 @@ import warnings
 import numpy as np
 
 
+def _require_torch_dependency():
+    try:
+        return importlib.import_module("torch")
+    except ImportError as exc:
+        raise ImportError(
+            "The MDN posterior estimator requires the optional dependency torch. "
+            "Install it with, for example: pip install torch"
+        ) from exc
+
+
 def _require_sbi_dependencies():
     try:
         torch = importlib.import_module("torch")
@@ -396,6 +406,431 @@ class MAFPosteriorEstimator:
             raise RuntimeError("Estimator must be fit before calling sample or log_prob.")
 
 
+def build_mdn(
+    theta_dim: int,
+    x_dim: int,
+    n_components: int = 8,
+    hidden_features: int = 128,
+    num_blocks: int = 3,
+    min_scale: float = 1.0e-3,
+):
+    """Build a conditional diagonal-Gaussian mixture q(theta | x)."""
+
+    torch = _require_torch_dependency()
+    nn = torch.nn
+    theta_dim = int(theta_dim)
+    x_dim = int(x_dim)
+    n_components = int(n_components)
+    hidden_features = int(hidden_features)
+    num_blocks = int(num_blocks)
+    min_scale = float(min_scale)
+    if theta_dim <= 0 or x_dim <= 0:
+        raise ValueError("theta_dim and x_dim must be positive.")
+    if n_components <= 0 or hidden_features <= 0 or num_blocks <= 0:
+        raise ValueError("n_components, hidden_features, and num_blocks must be positive.")
+    if not np.isfinite(min_scale) or min_scale <= 0.0:
+        raise ValueError("min_scale must be positive and finite.")
+
+    class ConditionalDiagonalGaussianMixture(nn.Module):
+        """Small context network parameterizing a normalized Gaussian mixture."""
+
+        def __init__(self):
+            super().__init__()
+            layers = []
+            input_features = x_dim
+            for _ in range(num_blocks):
+                layers.extend(
+                    [
+                        nn.Linear(input_features, hidden_features),
+                        nn.SiLU(),
+                    ]
+                )
+                input_features = hidden_features
+            self.conditioner = nn.Sequential(*layers)
+            output_features = n_components * (1 + 2 * theta_dim)
+            self.output = nn.Linear(hidden_features, output_features)
+
+        def mixture_parameters(self, context):
+            raw = self.output(self.conditioner(context))
+            logits = raw[:, :n_components]
+            remainder = raw[:, n_components:].reshape(
+                context.shape[0], n_components, 2 * theta_dim
+            )
+            means = remainder[:, :, :theta_dim]
+            scales = (
+                torch.nn.functional.softplus(remainder[:, :, theta_dim:])
+                + min_scale
+            )
+            return logits, means, scales
+
+        def log_prob(self, inputs, context):
+            logits, means, scales = self.mixture_parameters(context)
+            residual = (inputs[:, None, :] - means) / scales
+            component_log_prob = -0.5 * (
+                residual.square()
+                + 2.0 * torch.log(scales)
+                + np.log(2.0 * np.pi)
+            ).sum(dim=-1)
+            log_weights = torch.log_softmax(logits, dim=-1)
+            return torch.logsumexp(log_weights + component_log_prob, dim=-1)
+
+        def sample(self, num_samples, context):
+            logits, means, scales = self.mixture_parameters(context)
+            component = torch.multinomial(
+                torch.softmax(logits, dim=-1),
+                int(num_samples),
+                replacement=True,
+            )
+            gather_index = component[:, :, None].expand(
+                context.shape[0], int(num_samples), theta_dim
+            )
+            selected_means = torch.gather(means, dim=1, index=gather_index)
+            selected_scales = torch.gather(scales, dim=1, index=gather_index)
+            noise = torch.randn(
+                selected_means.shape,
+                dtype=selected_means.dtype,
+                device=selected_means.device,
+            )
+            return selected_means + selected_scales * noise
+
+    return ConditionalDiagonalGaussianMixture()
+
+
+class MDNPosteriorEstimator:
+    """NumPy-facing conditional Gaussian-mixture posterior q(theta | x).
+
+    The estimator uses a mixture of diagonal Gaussians in standardized target
+    coordinates. Mixture weights, means, and positive scales are predicted from
+    the observation context by a small multilayer perceptron.
+    """
+
+    def __init__(
+        self,
+        theta_dim: int,
+        x_dim: int,
+        n_components: int = 8,
+        hidden_features: int = 128,
+        num_blocks: int = 3,
+        min_scale: float = 1.0e-3,
+        learning_rate: float = 1.0e-3,
+        device: str | None = "auto",
+        validate_device: bool = True,
+        allow_device_fallback: bool = True,
+        standardize: bool = True,
+        max_grad_norm: float | None = None,
+        restore_best: bool = True,
+        initialization_seed: int | None = None,
+    ) -> None:
+        torch = _require_torch_dependency()
+        self.torch = torch
+        self.theta_dim = int(theta_dim)
+        self.x_dim = int(x_dim)
+        self.n_components = int(n_components)
+        self.hidden_features = int(hidden_features)
+        self.num_blocks = int(num_blocks)
+        self.min_scale = float(min_scale)
+        self.learning_rate = float(learning_rate)
+        self.standardize = bool(standardize)
+        self.max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
+        self.restore_best = bool(restore_best)
+        self.initialization_seed = (
+            None if initialization_seed is None else int(initialization_seed)
+        )
+        self.device = resolve_torch_device(
+            torch,
+            device=device,
+            validate=bool(validate_device),
+            allow_fallback=bool(allow_device_fallback),
+        )
+        _seed_torch(torch, self.initialization_seed)
+        self.network = build_mdn(
+            theta_dim=self.theta_dim,
+            x_dim=self.x_dim,
+            n_components=self.n_components,
+            hidden_features=self.hidden_features,
+            num_blocks=self.num_blocks,
+            min_scale=self.min_scale,
+        ).to(dtype=torch.float32, device=self.device)
+        self.theta_standardizer: Standardizer | None = None
+        self.x_standardizer: Standardizer | None = None
+        self.history: dict[str, list[float]] = {"train_loss": []}
+
+    def fit(
+        self,
+        theta_train: np.ndarray,
+        x_train: np.ndarray,
+        epochs: int = 100,
+        batch_size: int = 256,
+        validation_split: float = 0.0,
+        patience: int | None = None,
+        min_delta: float = 0.0,
+        seed: int | None = None,
+        verbose: bool = False,
+    ) -> dict[str, list[float]]:
+        """Minimize the exact conditional mixture negative log likelihood."""
+
+        torch = self.torch
+        theta_train = _as_2d(theta_train, self.theta_dim, "theta_train")
+        x_train = _as_2d(x_train, self.x_dim, "x_train")
+        if theta_train.shape[0] != x_train.shape[0]:
+            raise ValueError("theta_train and x_train must have the same number of rows.")
+        epochs = int(epochs)
+        batch_size = int(batch_size)
+        validation_split = float(validation_split)
+        if epochs <= 0 or batch_size <= 0:
+            raise ValueError("epochs and batch_size must be positive.")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must lie in [0, 1).")
+        if patience is not None and int(patience) <= 0:
+            raise ValueError("patience must be positive or None.")
+        patience = None if patience is None else int(patience)
+        min_delta = float(min_delta)
+        if not np.isfinite(min_delta) or min_delta < 0.0:
+            raise ValueError("min_delta must be finite and non-negative.")
+
+        n_total = theta_train.shape[0]
+        n_validation = int(round(validation_split * n_total))
+        if n_validation >= n_total:
+            raise ValueError("validation_split must leave at least one training row.")
+        permutation = np.random.default_rng(seed).permutation(n_total)
+        validation_indices = permutation[:n_validation]
+        training_indices = permutation[n_validation:]
+
+        if self.standardize:
+            self.theta_standardizer = Standardizer.fit(theta_train[training_indices])
+            self.x_standardizer = Standardizer.fit(x_train[training_indices])
+            theta_fit = self.theta_standardizer.transform(theta_train)
+            x_fit = self.x_standardizer.transform(x_train)
+        else:
+            self.theta_standardizer = Standardizer(
+                np.zeros(self.theta_dim), np.ones(self.theta_dim)
+            )
+            self.x_standardizer = Standardizer(
+                np.zeros(self.x_dim), np.ones(self.x_dim)
+            )
+            theta_fit = theta_train
+            x_fit = x_train
+
+        _seed_torch(torch, seed)
+        theta_t = torch.as_tensor(
+            theta_fit, dtype=torch.float32, device=self.device
+        )
+        x_t = torch.as_tensor(x_fit, dtype=torch.float32, device=self.device)
+        training_index_t = torch.as_tensor(
+            training_indices, dtype=torch.long, device=self.device
+        )
+        dataset = torch.utils.data.TensorDataset(
+            theta_t.index_select(0, training_index_t),
+            x_t.index_select(0, training_index_t),
+        )
+        loader_generator = torch.Generator()
+        if seed is not None:
+            loader_generator.manual_seed(int(seed))
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=loader_generator,
+        )
+        if n_validation > 0:
+            validation_index_t = torch.as_tensor(
+                validation_indices, dtype=torch.long, device=self.device
+            )
+            theta_validation = theta_t.index_select(0, validation_index_t)
+            x_validation = x_t.index_select(0, validation_index_t)
+        else:
+            theta_validation = None
+            x_validation = None
+
+        optimizer = torch.optim.Adam(
+            self.network.parameters(), lr=self.learning_rate
+        )
+        self.history = {"train_loss": []}
+        if n_validation > 0:
+            self.history["val_loss"] = []
+        best_loss = float("inf")
+        best_state = None
+        best_epoch = None
+        epochs_without_improvement = 0
+
+        for epoch in range(epochs):
+            self.network.train()
+            losses = []
+            saw_nonfinite_loss = False
+            for theta_batch, x_batch in loader:
+                loss = -self.network.log_prob(theta_batch, x_batch).mean()
+                if not bool(torch.isfinite(loss).detach().cpu().item()):
+                    saw_nonfinite_loss = True
+                    losses.append(np.nan)
+                    break
+                optimizer.zero_grad()
+                loss.backward()
+                gradients_are_finite = all(
+                    parameter.grad is None
+                    or bool(
+                        torch.all(torch.isfinite(parameter.grad))
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+                    for parameter in self.network.parameters()
+                )
+                if not gradients_are_finite:
+                    saw_nonfinite_loss = True
+                    losses.append(np.nan)
+                    break
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.network.parameters(), self.max_grad_norm
+                    )
+                optimizer.step()
+                losses.append(float(loss.detach().cpu().item()))
+
+            mean_loss = float(np.mean(losses)) if losses else np.nan
+            self.history["train_loss"].append(mean_loss)
+            if theta_validation is not None:
+                self.network.eval()
+                with torch.no_grad():
+                    validation_loss = -self.network.log_prob(
+                        theta_validation, x_validation
+                    ).mean()
+                validation_loss_value = float(
+                    validation_loss.detach().cpu().item()
+                )
+                self.history["val_loss"].append(validation_loss_value)
+                selection_loss = validation_loss_value
+            else:
+                selection_loss = mean_loss
+
+            if np.isfinite(selection_loss) and selection_loss < best_loss - min_delta:
+                best_loss = selection_loss
+                best_state = {
+                    key: value.detach().clone()
+                    for key, value in self.network.state_dict().items()
+                }
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if verbose:
+                message = f"epoch {epoch + 1}/{epochs}: train_loss={mean_loss:.6g}"
+                if theta_validation is not None:
+                    message += f", val_loss={validation_loss_value:.6g}"
+                print(message)
+            if saw_nonfinite_loss:
+                self.history["stopped_early_nonfinite_loss"] = [
+                    float(epoch + 1)
+                ]
+                break
+            if patience is not None and epochs_without_improvement >= patience:
+                self.history["stopped_early_patience"] = [float(epoch + 1)]
+                break
+
+        if best_state is None:
+            raise FloatingPointError("MDN training produced no finite epoch loss.")
+        if self.restore_best:
+            self.network.load_state_dict(best_state)
+            self.history["best_selection_loss"] = [best_loss]
+        self.history["best_epoch"] = [float(best_epoch)]
+        self.history["epochs_ran"] = [
+            float(len(self.history["train_loss"]))
+        ]
+        return self.history
+
+    def configuration(self) -> dict[str, Any]:
+        return {
+            "theta_dim": self.theta_dim,
+            "x_dim": self.x_dim,
+            "n_components": self.n_components,
+            "hidden_features": self.hidden_features,
+            "num_blocks": self.num_blocks,
+            "min_scale": self.min_scale,
+            "learning_rate": self.learning_rate,
+            "standardize": self.standardize,
+            "max_grad_norm": self.max_grad_norm,
+            "restore_best": self.restore_best,
+            "initialization_seed": self.initialization_seed,
+        }
+
+    def sample(
+        self,
+        x_obs: np.ndarray,
+        num_samples: int = 10000,
+        *,
+        seed: int | None = None,
+    ) -> np.ndarray:
+        self._check_fitted()
+        torch = self.torch
+        _seed_torch(torch, seed)
+        x = _as_context_batch(x_obs, self.x_dim)
+        x_std = self.x_standardizer.transform(x)
+        context = torch.as_tensor(
+            x_std, dtype=torch.float32, device=self.device
+        )
+        self.network.eval()
+        with torch.no_grad():
+            samples_std = self.network.sample(int(num_samples), context)
+        samples = self.theta_standardizer.inverse_transform(
+            samples_std.detach().cpu().numpy()
+        )
+        return samples[0] if samples.shape[0] == 1 else samples
+
+    def log_prob(self, theta: np.ndarray, x_obs: np.ndarray) -> np.ndarray:
+        self._check_fitted()
+        torch = self.torch
+        theta_arr = _as_2d(theta, self.theta_dim, "theta")
+        x_arr = _as_context_batch(x_obs, self.x_dim)
+        if x_arr.shape[0] == 1 and theta_arr.shape[0] > 1:
+            x_arr = np.repeat(x_arr, theta_arr.shape[0], axis=0)
+        if x_arr.shape[0] != theta_arr.shape[0]:
+            raise ValueError(
+                "x_obs must have one row or the same number of rows as theta."
+            )
+        theta_std = self.theta_standardizer.transform(theta_arr)
+        x_std = self.x_standardizer.transform(x_arr)
+        self.network.eval()
+        with torch.no_grad():
+            logp_standardized = self.network.log_prob(
+                torch.as_tensor(
+                    theta_std, dtype=torch.float32, device=self.device
+                ),
+                torch.as_tensor(x_std, dtype=torch.float32, device=self.device),
+            )
+        logp = (
+            logp_standardized.detach().cpu().numpy()
+            - self.theta_standardizer.log_abs_det_inverse
+        )
+        return logp[0] if np.asarray(theta).ndim == 1 else logp
+
+    def mixture_parameters(self, x_obs: np.ndarray) -> dict[str, np.ndarray]:
+        """Return weights, physical means, and physical diagonal scales."""
+
+        self._check_fitted()
+        torch = self.torch
+        x = _as_context_batch(x_obs, self.x_dim)
+        x_std = self.x_standardizer.transform(x)
+        self.network.eval()
+        with torch.no_grad():
+            logits, means_std, scales_std = self.network.mixture_parameters(
+                torch.as_tensor(
+                    x_std, dtype=torch.float32, device=self.device
+                )
+            )
+        weights = torch.softmax(logits, dim=-1).detach().cpu().numpy()
+        means_std = means_std.detach().cpu().numpy()
+        scales_std = scales_std.detach().cpu().numpy()
+        means = (
+            means_std * self.theta_standardizer.std[None, None, :]
+            + self.theta_standardizer.mean[None, None, :]
+        )
+        scales = scales_std * self.theta_standardizer.std[None, None, :]
+        return {"weights": weights, "means": means, "scales": scales}
+
+    def _check_fitted(self) -> None:
+        if self.theta_standardizer is None or self.x_standardizer is None:
+            raise RuntimeError("Estimator must be fit before calling sample or log_prob.")
+
+
 def simulate_training_set(
     parameter_space,
     simulator,
@@ -428,6 +863,9 @@ def simulate_training_set(
     n = int(n)
     if n < 0:
         raise ValueError("n must be non-negative.")
+    max_retries = int(max_retries)
+    if max_retries < 0:
+        raise ValueError("max_retries must be non-negative.")
     batch_size = int(batch_size)
     n_workers = int(n_workers)
     if batch_size <= 0:
@@ -558,12 +996,6 @@ def _simulate_training_set_parallel(
     mp_context: str | None,
     return_sigma: bool,
 ):
-    n_candidate = n + int(max_retries)
-    theta_candidates = parameter_space.sample_prior(n_candidate, rng=rng)
-    chunks = [theta_candidates[start : start + batch_size] for start in range(0, n_candidate, batch_size)]
-    seeds = rng.integers(0, np.iinfo(np.uint32).max, size=len(chunks), dtype=np.uint32)
-    payloads = [(chunk, int(seed)) for chunk, seed in zip(chunks, seeds)]
-
     if executor == "thread":
         pool_cls = ThreadPoolExecutor
         pool_kwargs: dict[str, Any] = {
@@ -585,20 +1017,47 @@ def _simulate_training_set_parallel(
     x_rows = []
     sigma_rows = []
     failures = []
+    attempts = 0
     with pool_cls(**pool_kwargs) as pool:
-        for good_theta, good_x, good_sigma, bad in pool.map(_simulate_chunk_from_worker, payloads, chunksize=1):
-            theta_rows.extend(good_theta)
-            x_rows.extend(good_x)
-            sigma_rows.extend(good_sigma)
-            failures.extend(bad)
+        while len(theta_rows) < n:
+            # Only simulate the rows still required. Failed rows are replaced
+            # in a later wave, keeping the expensive backend workers alive
+            # without evaluating the unused retry reserve.
+            n_candidate = n - len(theta_rows)
+            theta_candidates = parameter_space.sample_prior(n_candidate, rng=rng)
+            chunks = [
+                theta_candidates[start : start + batch_size]
+                for start in range(0, n_candidate, batch_size)
+            ]
+            seeds = rng.integers(
+                0,
+                np.iinfo(np.uint32).max,
+                size=len(chunks),
+                dtype=np.uint32,
+            )
+            payloads = [(chunk, int(seed)) for chunk, seed in zip(chunks, seeds)]
+            attempts += n_candidate
 
-    if len(theta_rows) < n:
-        raise RuntimeError(f"Too many failed simulations: {len(failures)} failures while collecting {len(theta_rows)}/{n}.")
+            for good_theta, good_x, good_sigma, bad in pool.map(
+                _simulate_chunk_from_worker,
+                payloads,
+                chunksize=1,
+            ):
+                theta_rows.extend(good_theta)
+                x_rows.extend(good_x)
+                sigma_rows.extend(good_sigma)
+                failures.extend(bad)
+
+            if len(theta_rows) < n and len(failures) > max_retries:
+                raise RuntimeError(
+                    f"Too many failed simulations: {len(failures)} failures "
+                    f"while collecting {len(theta_rows)}/{n}."
+                )
 
     theta_out = np.asarray(theta_rows[:n], dtype=float)
     x_out = np.asarray(x_rows[:n], dtype=float)
     sigma_out = np.asarray(sigma_rows[:n], dtype=float) if return_sigma else None
-    return theta_out, x_out, sigma_out, {"attempts": len(theta_rows) + len(failures), "failures": failures}
+    return theta_out, x_out, sigma_out, {"attempts": attempts, "failures": failures}
 
 
 def train_maf_posterior_from_dataset(
@@ -670,7 +1129,80 @@ def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) 
     return estimator
 
 
-def sample_posterior(estimator: MAFPosteriorEstimator, x_obs: np.ndarray, num_samples: int = 10000) -> np.ndarray:
+def train_mdn_posterior_from_dataset(
+    theta: np.ndarray,
+    x: np.ndarray,
+    *,
+    theta_names: list[str] | tuple[str, ...] | None = None,
+    x_names: list[str] | tuple[str, ...] | None = None,
+    source: str = "precomputed_dataset",
+    finite: Literal["raise", "drop"] = "raise",
+    shuffle: bool = False,
+    rng: np.random.Generator | None = None,
+    return_metadata: bool = False,
+    **kwargs,
+):
+    """Train an MDN posterior from documented paired rows ``(theta, x)``."""
+
+    theta_train, x_train, metadata = _prepare_precomputed_training_pairs(
+        theta,
+        x,
+        theta_names=theta_names,
+        x_names=x_names,
+        source=source,
+        finite=finite,
+        shuffle=shuffle,
+        rng=rng,
+    )
+    estimator = train_mdn_posterior(theta_train, x_train, **kwargs)
+    if return_metadata:
+        return estimator, metadata
+    return estimator
+
+
+def train_mdn_posterior(
+    theta_train: np.ndarray,
+    x_train: np.ndarray,
+    **kwargs,
+) -> MDNPosteriorEstimator:
+    """Fit a conditional Gaussian-mixture posterior from paired NumPy arrays."""
+
+    theta_train = np.asarray(theta_train, dtype=float)
+    x_train = np.asarray(x_train, dtype=float)
+    estimator_kwargs = {
+        key: kwargs.pop(key)
+        for key in list(kwargs)
+        if key
+        in {
+            "n_components",
+            "hidden_features",
+            "num_blocks",
+            "min_scale",
+            "learning_rate",
+            "device",
+            "validate_device",
+            "allow_device_fallback",
+            "standardize",
+            "max_grad_norm",
+            "restore_best",
+            "initialization_seed",
+        }
+    }
+    estimator_kwargs.setdefault("initialization_seed", kwargs.get("seed"))
+    estimator = MDNPosteriorEstimator(
+        theta_dim=theta_train.shape[1],
+        x_dim=x_train.shape[1],
+        **estimator_kwargs,
+    )
+    estimator.fit(theta_train, x_train, **kwargs)
+    return estimator
+
+
+def sample_posterior(
+    estimator: MAFPosteriorEstimator | MDNPosteriorEstimator,
+    x_obs: np.ndarray,
+    num_samples: int = 10000,
+) -> np.ndarray:
     return estimator.sample(x_obs, num_samples=num_samples)
 
 

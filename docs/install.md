@@ -9,9 +9,8 @@ engines it can call.  The stable rule is:
 3. declare any data/model-grid paths with environment variables;
 4. run `scripts/check_environment.py` before running a notebook or fit.
 
-This keeps the scientific provenance visible.  FSPS grids, CIGALE releases,
-DSPS SSP files, and Cue emulator data are part of the model definition, not
-generic Python utilities.
+This keeps the scientific provenance visible. FSPS grids and the selected
+CIGALE release are part of the model definition, not generic Python utilities.
 
 ## Core Install
 
@@ -31,7 +30,7 @@ python scripts/check_environment.py --core
 python -m pytest -q
 ```
 
-The core tests should not require FSPS, CIGALE, JAX, DSPS, Cue, or torch.
+The core tests should not require FSPS, CIGALE, or torch.
 Install traditional samplers with `python -m pip install -e ".[samplers]"`.
 Jupyter is deliberately not part of the default environment; users who want a
 kernel can install `ipykernel` in the environment they actually use.
@@ -74,8 +73,11 @@ This environment intentionally does not install notebooks, pocomc, emcee,
 nflows, or torch.  Add those only when the analysis needs them:
 
 ```bash
-# MAF/nflows SBI path.
+# MAF/nflows SBI path (also includes MDN).
 python -m pip install -e ".[sbi]"
+
+# Smaller MDN-only SBI path.
+python -m pip install -e ".[mdn]"
 
 # Experimental conditional diffusion path, only when explicitly needed.
 python -m pip install -e ".[diffusion]"
@@ -121,7 +123,9 @@ The dedicated recipe pins NumPy 1.23.5 because CIGALE v2022.0's native
 removed `np.float` alias. CompoSED reports this incompatibility explicitly on
 newer NumPy and does not silently replace a constant history with an
 approximately constant long-timescale model. Exponential and delayed-tau
-native modules do not have this specific limitation.
+native modules do not have this specific limitation. The recipe also pins
+`setuptools<81` because CIGALE v2022.0 imports the legacy `pkg_resources`
+module at runtime.
 
 CompoSED does not hide CIGALE's database/module setup.  If CIGALE cannot build
 one SED through `pcigale.warehouse.SedWarehouse`, CompoSED cannot use it either.
@@ -130,62 +134,30 @@ As with FSPS, keep the backend environment small and install neural or sampler
 layers only when needed:
 
 ```bash
-python -m pip install -e ".[sbi]"        # MAF/nflows SBI
+python -m pip install -e ".[sbi]"        # MAF/nflows SBI, plus MDN
+python -m pip install -e ".[mdn]"        # MDN only
 python -m pip install -e ".[diffusion]"  # experimental diffusion SBI
 python -m pip install -e ".[samplers]"   # emcee, PocoMC, and SciPy sampler helpers
 ```
 
-## JAX-CIGALE, DSPS, and Cue
-
-`composed.experimental.jaxcigale` is experimental.  It uses JAX/NumPyro for the
-graph and NUTS, DSPS for stellar populations, and optionally the public Cue
-emulator data for nebular emission.
-
-For a CPU validation environment:
-
-```bash
-conda env create -f envs/composed-science-cpu.yml
-conda activate composed-science-cpu
-python -m pip install -e ".[dev,plot,samplers,notebooks,jaxcigale]"
-```
-
-Cue data are not committed to this repository.  Clone the public Cue repository
-and point CompoSED at the data directory:
-
-```bash
-git clone --depth 1 https://github.com/yi-jia-li/cue.git external/cue
-export CUE_DATA_DIR=$PWD/external/cue/src/cue/data
-```
-
-DSPS/Cue validation with nebular emission also needs a continuum SSP resource
-that is consistent with the JAX-CIGALE stellar module:
-
-```bash
-export DSPS_CONTINUUM_SSP_FILE=/path/to/fsps_continuum_ssp_data.h5
-```
-
-Then check:
-
-```bash
-python scripts/check_environment.py --jaxcigale
-python scripts/check_environment.py --cue
-```
-
-Use `--cue` when you expect the public Cue data files to be present.  The Cue
-loader uses old public pickle files; `scikit-learn` may warn about the version
-used to create those pickles.  Treat that warning as provenance information and
-record it for validation runs.
-
 ## SBI / Neural Posterior Estimation
 
-The stable neural SBI layer is the MAF/nflows posterior estimator. It needs
-torch and nflows, and can run without FSPS or CIGALE when trained from a
+The stable neural SBI layer provides both MAF/nflows and a smaller
+Gaussian-mixture MDN. Both can run without FSPS or CIGALE when trained from a
 pre-existing paired photometric dataset.
 
 ```bash
 python -m pip install -e ".[sbi]"
 python scripts/check_environment.py --sbi
 python examples/sbi_mock_photometry_demo.py
+```
+
+The MDN only requires torch:
+
+```bash
+python -m pip install -e ".[mdn]"
+python scripts/check_environment.py --mdn
+python examples/sbi_mdn_mock_photometry_demo.py
 ```
 
 The conditional diffusion path is experimental and uses torch only:
@@ -195,32 +167,14 @@ python -m pip install -e ".[diffusion]"
 python examples/minimal_photometric_diffusion_sbi.py
 ```
 
-GPU/MPS/CUDA choices are torch/JAX installation issues rather than CompoSED
-API choices.  Use the platform-specific torch/JAX instructions for the machine
-you intend to run on.
+GPU/MPS/CUDA choices are torch installation issues rather than CompoSED API
+choices. Use the platform-specific torch instructions for the machine you
+intend to run on.
 
-## Full Local Science Stack
-
-For development and validation on a machine where all upstream engines are
-available:
-
-```bash
-conda env create -f envs/composed-science-cpu.yml
-conda activate composed-science-cpu
-
-# Follow upstream CIGALE v2022.0 setup.
-# Follow upstream FSPS/python-fsps setup.
-export SPS_HOME=/path/to/fsps
-export CUE_DATA_DIR=$PWD/external/cue/src/cue/data
-export DSPS_CONTINUUM_SSP_FILE=/path/to/fsps_continuum_ssp_data.h5
-
-python -m pip install -e ".[all]"
-python scripts/check_environment.py --all
-python -m pytest -q
-```
-
-This is the environment intended for the validation notebooks in
-`notebooks/validation/`.
+FSPS and CIGALE can be installed together when their dependency constraints
+permit it, but separate backend environments are the documented and tested
+release configuration. This keeps CIGALE v2022.0's older NumPy requirement
+from constraining an FSPS/SBI environment.
 
 ## What The Checker Means
 
@@ -229,9 +183,10 @@ This is the environment intended for the validation notebooks in
 - Python and core CompoSED imports;
 - `SPS_HOME`, `fsps`, and `sedpy` for FSPS;
 - `pcigale` for CIGALE;
-- JAX, NumPyro, DSPS, h5py, dill, and scikit-learn for JAX-CIGALE;
-- `CUE_DATA_DIR` and expected public Cue files for Cue;
-- torch and nflows for the MAF/nflows SBI checker.  Diffusion uses torch only.
+- torch and nflows for MAF SBI, and torch alone for MDN or diffusion;
+- SciPy, emcee, PocoMC, and tqdm for the traditional sampler adapters.
 
 It does not install anything and it does not prove scientific validity.  It is a
 pre-flight check that the intended backend can be reached before a long run.
+Use `--samplers`, `--diffusion`, or `--all` to check those complete inference
+stacks explicitly.

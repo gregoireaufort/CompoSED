@@ -23,26 +23,78 @@ def test_default_selection_checks_core_only():
         core = False
         fsps = False
         cigale = False
-        jaxcigale = False
-        cue = False
         sbi = False
 
     assert checker.selected_components(Args()) == {"core"}
 
 
-def test_cue_selection_implies_jaxcigale():
+def test_all_selection_contains_only_release_stacks():
     checker = load_checker_module()
 
     class Args:
-        all = False
+        all = True
         core = False
         fsps = False
         cigale = False
-        jaxcigale = False
-        cue = True
         sbi = False
 
-    assert checker.selected_components(Args()) == {"cue", "jaxcigale"}
+    assert checker.selected_components(Args()) == {
+        "core",
+        "fsps",
+        "cigale",
+        "sbi",
+        "mdn",
+        "samplers",
+        "diffusion",
+    }
+
+
+def test_mdn_check_requires_torch_only(monkeypatch):
+    checker = load_checker_module()
+    requested = []
+
+    def fake_import_check(module, **kwargs):
+        requested.append(module)
+        return checker.Check(module, True, "fake")
+
+    monkeypatch.setattr(checker, "import_check", fake_import_check)
+
+    checks = checker.check_mdn()
+
+    assert [check.name for check in checks] == ["numpy", "torch"]
+    assert requested == ["numpy", "torch"]
+
+
+def test_sampler_check_matches_sampler_extra(monkeypatch):
+    checker = load_checker_module()
+    requested = []
+
+    def fake_import_check(module, **kwargs):
+        requested.append(module)
+        return checker.Check(module, True, "fake")
+
+    monkeypatch.setattr(checker, "import_check", fake_import_check)
+
+    checks = checker.check_samplers()
+
+    assert [check.name for check in checks] == ["scipy", "emcee", "pocomc", "tqdm"]
+    assert requested == ["scipy", "emcee", "pocomc", "tqdm"]
+
+
+def test_diffusion_check_requires_torch_only(monkeypatch):
+    checker = load_checker_module()
+    requested = []
+
+    def fake_import_check(module, **kwargs):
+        requested.append(module)
+        return checker.Check(module, True, "fake")
+
+    monkeypatch.setattr(checker, "import_check", fake_import_check)
+
+    checks = checker.check_diffusion()
+
+    assert [check.name for check in checks] == ["numpy", "torch"]
+    assert requested == ["numpy", "torch"]
 
 
 def test_missing_required_path_is_failure():
@@ -64,9 +116,27 @@ def test_missing_optional_path_is_warning():
 def test_cigale_check_reports_constant_sfh_numpy_compatibility(monkeypatch):
     checker = load_checker_module()
     monkeypatch.setattr(checker, "import_check", lambda *args, **kwargs: checker.Check("pcigale", True, "fake"))
+    fake_pcigale = type("FakeCigale", (), {"__version__": "2022.0"})()
+    monkeypatch.setattr(checker.importlib, "import_module", lambda name: fake_pcigale)
 
     checks = checker.check_cigale()
     constant_check = next(check for check in checks if check.name == "CIGALE constant SFH")
+    target_check = next(check for check in checks if check.name == "CIGALE target")
 
     assert constant_check.required is False
     assert "NumPy" in constant_check.message
+    assert target_check.ok
+
+
+def test_cigale_check_rejects_unexpected_version(monkeypatch):
+    checker = load_checker_module()
+    monkeypatch.setattr(checker, "import_check", lambda *args, **kwargs: checker.Check("pcigale", True, "fake"))
+    fake_pcigale = type("FakeCigale", (), {"__version__": "2025.0"})()
+    monkeypatch.setattr(checker.importlib, "import_module", lambda name: fake_pcigale)
+
+    checks = checker.check_cigale()
+    target_check = next(check for check in checks if check.name == "CIGALE target")
+
+    assert not target_check.ok
+    assert target_check.required
+    assert "expected 2022.0" in target_check.message

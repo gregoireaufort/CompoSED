@@ -2,31 +2,28 @@
 
 See [`docs/install.md`](install.md) for the public installation workflow.
 
-This page records the local full-stack environment used during current
-CompoSED validation.  It is not meant to replace upstream backend installation
+This page records the backend environment choices used for CompoSED v0.1
+validation. It is not meant to replace upstream backend installation
 instructions.
 
-## Local Full-Stack Choices
+## Release Environment Choices
 
 - Python 3.11.
-- NumPy 1.26 for compatibility with CIGALE 2022-era dependencies.
 - CIGALE target release: `v2022.0` from
   <https://gitlab.lam.fr/cigale/cigale/-/tree/v2022.0>.
-- CPU JAX for portable validation:
-  `jax==0.4.38`, `jaxlib==0.4.38`, `numpyro==0.17.0`.
+- NumPy 1.23.5 in the CIGALE environment, preserving the upstream
+  `sfhperiodic` implementation.
 - `astro-sedpy==0.4.1` for the FSPS/sedpy photometry path.
 - `SPS_HOME` points at the local FSPS data directory.
-- `CUE_DATA_DIR` points at a local clone of
-  <https://github.com/yi-jia-li/cue>, specifically `src/cue/data`.
-- `DSPS_CONTINUUM_SSP_FILE` points at the continuum SSP HDF5 file used by the
-  JAX-CIGALE DSPS module.
 
-The current local science environment can be checked with:
+The two release backend environments can be checked independently:
 
 ```bash
-python scripts/check_environment.py --all
+python scripts/check_environment.py --fsps
+python scripts/check_environment.py --cigale
 python -m pytest -q
 ```
 
-The checker is the authoritative way to know which optional backends are usable
-from the active Python interpreter.
+The checker reports which optional backends and inference dependencies are
+visible from the active Python interpreter. The environment recipes are
+`envs/composed-fsps.yml` and `envs/composed-cigale.yml`.

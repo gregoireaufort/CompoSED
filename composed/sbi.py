@@ -10,7 +10,7 @@ workflow:
 3. choose priors;
 4. choose a noise model;
 5. simulate a noised training set and retain its exact uncertainty;
-6. train the stable conditional MAF posterior estimator;
+6. train a stable conditional MAF or MDN posterior estimator;
 7. condition on catalog photometry and sample parameters;
 8. run diagnostics.
 
@@ -41,9 +41,11 @@ from inftools.diagnostics import run_sbi_diagnostics
 from inftools.experimental.diffusion import ConditionalDiffusionEstimator, FeatureMetadata
 from inftools.sbi import (
     MAFPosteriorEstimator,
+    MDNPosteriorEstimator,
     Standardizer,
     simulate_training_set,
     train_maf_posterior_from_dataset,
+    train_mdn_posterior_from_dataset,
 )
 
 
@@ -218,8 +220,9 @@ class PriorSupportTransform:
                 upper.append(float("nan"))
             else:
                 raise TypeError(
-                    f"MAF target {name!r} uses unsupported prior {type(prior).__name__}; "
-                    "stable MAF supports UniformPrior, LogUniformPrior, NormalPrior, and StudentTPrior."
+                    f"Neural SBI target {name!r} uses unsupported prior {type(prior).__name__}; "
+                    "MAF and diffusion support UniformPrior, LogUniformPrior, "
+                    "NormalPrior, and StudentTPrior."
                 )
         return cls(tuple(names), tuple(kinds), tuple(lower), tuple(upper))
 
@@ -329,6 +332,188 @@ def _stable_sigmoid(values: np.ndarray) -> np.ndarray:
     )
 
 
+def _photometric_state_valid_rows(
+    theta: np.ndarray,
+    flux: np.ndarray,
+    sigma: np.ndarray,
+    measurement_mask: np.ndarray,
+    upper_limit: np.ndarray,
+    upper_limit_mask: np.ndarray,
+    *,
+    context: PhotometricContext,
+) -> np.ndarray:
+    """Identify rows whose declared photometric observations are usable."""
+
+    detected = measurement_mask & ~upper_limit_mask
+    sigma_ok = np.isfinite(sigma)
+    if context.conditions_on_sigma:
+        sigma_ok &= sigma > 0.0
+    else:
+        sigma_ok &= sigma >= 0.0
+    flux_ok = np.isfinite(flux)
+    if context.mode == "abmag_magerr":
+        flux_ok &= flux > 0.0
+
+    limit_ok = np.isfinite(upper_limit)
+    if context.mode == "abmag_magerr":
+        limit_ok &= upper_limit > 0.0
+    declared_limit = measurement_mask & np.isfinite(upper_limit)
+
+    return (
+        np.all(np.isfinite(theta), axis=1)
+        & np.any(measurement_mask, axis=1)
+        & np.all(~upper_limit_mask | measurement_mask, axis=1)
+        & np.all(~measurement_mask | sigma_ok, axis=1)
+        & np.all(~detected | flux_ok, axis=1)
+        & np.all(~upper_limit_mask | limit_ok, axis=1)
+        & np.all(~declared_limit | limit_ok, axis=1)
+    )
+
+
+def _photometric_state_schema(
+    context: PhotometricContext,
+    band_names: Sequence[str],
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    bands = tuple(str(name) for name in band_names)
+    base_names = context.feature_names(bands)
+    base_groups = context.observation_groups(bands)
+    state_groups = {
+        "availability": tuple(f"available:{name}" for name in bands),
+        "censoring": tuple(f"censored:{name}" for name in bands),
+        "limit_known": tuple(f"limit_known:{name}" for name in bands),
+        "upper_limit": tuple(f"limit_value:{name}" for name in bands),
+    }
+    names = base_names + tuple(
+        name for group_names in state_groups.values() for name in group_names
+    )
+    return names, {**base_groups, **state_groups}
+
+
+def _encode_photometric_state(
+    flux: np.ndarray,
+    sigma: np.ndarray,
+    measurement_mask: np.ndarray,
+    upper_limit: np.ndarray,
+    upper_limit_mask: np.ndarray,
+    *,
+    context: PhotometricContext,
+    band_names: Sequence[str],
+    feature_transform: ObservationTransform = "features",
+) -> tuple[np.ndarray, tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Encode values, uncertainty, availability, and censoring without leakage.
+
+    Flux values hidden by a non-detection are never passed to the neural
+    estimator. Their photometric feature is set to a neutral zero, while the
+    one-sigma uncertainty, upper-limit depth, and explicit state flags retain
+    the information that is actually observed.
+    """
+
+    flux = np.asarray(flux, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    measurement_mask = np.asarray(measurement_mask, dtype=bool)
+    upper_limit = np.asarray(upper_limit, dtype=float)
+    upper_limit_mask = np.asarray(upper_limit_mask, dtype=bool)
+    bands = tuple(str(name) for name in band_names)
+    expected_shape = flux.shape
+    if flux.ndim != 2 or any(
+        array.shape != expected_shape
+        for array in (sigma, measurement_mask, upper_limit, upper_limit_mask)
+    ):
+        raise ValueError("Photometric state arrays must have one matching two-dimensional shape.")
+    if flux.shape[1] != len(bands):
+        raise ValueError("Photometric state columns must match band_names.")
+
+    dummy_theta = np.zeros((flux.shape[0], 1), dtype=float)
+    valid = _photometric_state_valid_rows(
+        dummy_theta,
+        flux,
+        sigma,
+        measurement_mask,
+        upper_limit,
+        upper_limit_mask,
+        context=context,
+    )
+    if not np.all(valid):
+        bad = np.flatnonzero(~valid)
+        raise ValueError(
+            "Invalid photometric observation state in row(s) "
+            + ", ".join(str(int(index)) for index in bad[:8])
+            + (", ..." if bad.size > 8 else "")
+            + ". Detections require finite flux and valid sigma; censored bands "
+            "require a finite upper limit and valid sigma. Sigma must be positive "
+            "for uncertainty-conditioned contexts."
+        )
+
+    detected = measurement_mask & ~upper_limit_mask
+    limit_known = measurement_mask & np.isfinite(upper_limit)
+
+    if context.mode == "flux":
+        safe_flux = np.zeros_like(flux)
+        safe_flux[detected] = flux[detected]
+        if feature_transform not in {"features", "flux", "identity"} and not np.all(detected):
+            raise ValueError(
+                "Legacy nonlinear flux feature transforms cannot encode missing or censored bands. "
+                "Use PhotometricContext('snr_logsigma') for state-aware diffusion."
+            )
+        base = transform_photometry(safe_flux, feature_transform)
+    elif context.mode == "snr_logsigma":
+        signal_to_noise = np.zeros_like(flux)
+        signal_to_noise[detected] = flux[detected] / sigma[detected]
+        log_sigma = np.zeros_like(sigma)
+        log_sigma[measurement_mask] = np.log10(
+            sigma[measurement_mask] / context.reference_flux
+        )
+        base = np.column_stack([signal_to_noise, log_sigma])
+    elif context.mode == "flux_sigma":
+        measured_flux = np.zeros_like(flux)
+        measured_flux[detected] = flux[detected]
+        measured_sigma = np.zeros_like(sigma)
+        measured_sigma[measurement_mask] = sigma[measurement_mask]
+        base = np.column_stack([measured_flux, measured_sigma])
+    else:
+        magnitude = np.zeros_like(flux)
+        magnitude_error = np.zeros_like(sigma)
+        magnitude[detected] = -2.5 * np.log10(
+            flux[detected] / context.reference_flux
+        )
+        magnitude_error[detected] = (
+            (2.5 / np.log(10.0)) * sigma[detected] / flux[detected]
+        )
+        magnitude_error[upper_limit_mask] = (
+            (2.5 / np.log(10.0))
+            * sigma[upper_limit_mask]
+            / upper_limit[upper_limit_mask]
+        )
+        base = np.column_stack([magnitude, magnitude_error])
+
+    limit_feature = np.zeros_like(upper_limit)
+    if context.mode == "snr_logsigma":
+        limit_feature[limit_known] = (
+            upper_limit[limit_known] / sigma[limit_known]
+        )
+    elif context.mode == "abmag_magerr":
+        limit_feature[limit_known] = -2.5 * np.log10(
+            upper_limit[limit_known] / context.reference_flux
+        )
+    else:
+        limit_feature[limit_known] = upper_limit[limit_known]
+
+    state = np.column_stack(
+        [
+            measurement_mask.astype(float),
+            upper_limit_mask.astype(float),
+            limit_known.astype(float),
+            limit_feature,
+        ]
+    )
+    features = np.column_stack([base, state])
+    if not np.all(np.isfinite(features)):
+        raise FloatingPointError("Encoded diffusion observation features contain NaN or inf.")
+
+    names, groups = _photometric_state_schema(context, bands)
+    return features, names, groups
+
+
 @dataclass
 class SBITrainingSet:
     """Paired physical parameters and observations used to train SBI.
@@ -339,9 +524,12 @@ class SBITrainingSet:
     Rows of ``theta`` and ``x`` must refer to the same realization.
 
     ``x_native`` records the observation before the optional feature transform;
-    for external feature tables it can simply equal ``x``. ``theta_full`` is
-    useful for simulator-generated data where nuisance parameters were sampled
-    but only a subset of parameters is used as neural labels.
+    for external feature tables it can simply equal ``x``. State-aware
+    photometry additionally stores row-wise measurement availability,
+    censoring flags, and upper-limit depths. These are observed data, not the
+    random condition mask used by diffusion training. ``theta_full`` is useful
+    for simulator-generated data where nuisance parameters were sampled but
+    only a subset of parameters is used as neural labels.
     """
 
     theta: np.ndarray
@@ -349,10 +537,15 @@ class SBITrainingSet:
     theta_names: Sequence[str]
     x_names: Sequence[str]
     source: str
+    condition_names: Sequence[str] = ()
+    condition_values: np.ndarray | None = None
     theta_full: np.ndarray | None = None
     full_parameter_names: Sequence[str] | None = None
     x_native: np.ndarray | None = None
     sigma_native: np.ndarray | None = None
+    measurement_mask_native: np.ndarray | None = None
+    upper_limit_native: np.ndarray | None = None
+    upper_limit_mask_native: np.ndarray | None = None
     native_names: Sequence[str] | None = None
     feature_transform: ObservationTransform = "features"
     context: PhotometricContext | None = None
@@ -380,6 +573,56 @@ class SBITrainingSet:
         if len(x_names) != x.shape[1] or len(set(x_names)) != len(x_names):
             raise ValueError("x_names must be unique and match x columns.")
 
+        condition_names = tuple(str(name) for name in self.condition_names)
+        if len(set(condition_names)) != len(condition_names):
+            raise ValueError("condition_names must be unique.")
+        overlap = sorted(set(condition_names) & set(theta_names))
+        if overlap:
+            raise ValueError(
+                "SBI target and condition names must be disjoint; overlap: "
+                + ", ".join(overlap)
+            )
+        if condition_names:
+            if self.condition_values is None:
+                raise ValueError(
+                    "condition_values are required when condition_names are declared."
+                )
+            condition_values = np.asarray(self.condition_values, dtype=float)
+            expected_shape = (theta.shape[0], len(condition_names))
+            if condition_values.shape != expected_shape:
+                raise ValueError(
+                    f"condition_values has shape {condition_values.shape}; "
+                    f"expected {expected_shape}."
+                )
+            if not np.all(np.isfinite(condition_values)):
+                raise ValueError("condition_values must be finite.")
+            condition_features = tuple(
+                f"condition:{name}" for name in condition_names
+            )
+            if x_names[-len(condition_names) :] != condition_features:
+                raise ValueError(
+                    "Condition columns must be the final SBI context columns in "
+                    "condition_names order."
+                )
+            if not np.allclose(
+                x[:, -len(condition_names) :],
+                condition_values,
+                rtol=0.0,
+                atol=0.0,
+            ):
+                raise ValueError(
+                    "Final SBI context columns must equal condition_values exactly."
+                )
+        else:
+            if self.condition_values is not None:
+                supplied = np.asarray(self.condition_values, dtype=float)
+                if supplied.shape != (theta.shape[0], 0):
+                    raise ValueError(
+                        "condition_values must be omitted when condition_names is empty."
+                    )
+            condition_values = np.empty((theta.shape[0], 0), dtype=float)
+            condition_features = ()
+
         theta_full = theta if self.theta_full is None else np.asarray(self.theta_full, dtype=float)
         if theta_full.ndim != 2 or theta_full.shape[0] != theta.shape[0] or not np.all(np.isfinite(theta_full)):
             raise ValueError("theta_full must be finite with shape (n_training, n_full_parameter).")
@@ -390,8 +633,8 @@ class SBITrainingSet:
             raise ValueError("full_parameter_names must be unique and match theta_full columns.")
 
         x_native = x if self.x_native is None else np.asarray(self.x_native, dtype=float)
-        if x_native.ndim != 2 or x_native.shape[0] != x.shape[0] or not np.all(np.isfinite(x_native)):
-            raise ValueError("x_native must be finite and have the same number of rows as x.")
+        if x_native.ndim != 2 or x_native.shape[0] != x.shape[0]:
+            raise ValueError("x_native must be two-dimensional and have the same number of rows as x.")
         native_names = x_names if self.native_names is None else tuple(str(name) for name in self.native_names)
         if len(native_names) != x_native.shape[1] or len(set(native_names)) != len(native_names):
             raise ValueError("native_names must be unique and match x_native columns.")
@@ -399,10 +642,71 @@ class SBITrainingSet:
         if sigma_native is not None:
             if sigma_native.shape != x_native.shape:
                 raise ValueError("sigma_native must have the same shape as x_native.")
-            if not np.all(np.isfinite(sigma_native)) or np.any(sigma_native < 0.0):
-                raise ValueError("sigma_native must be finite and non-negative.")
         if self.context is not None and not isinstance(self.context, PhotometricContext):
             raise TypeError("context must be a PhotometricContext or None.")
+
+        state_was_declared = any(
+            value is not None
+            for value in (
+                self.measurement_mask_native,
+                self.upper_limit_native,
+                self.upper_limit_mask_native,
+            )
+        )
+        if state_was_declared:
+            if self.context is None:
+                raise ValueError("State-aware photometry requires an explicit PhotometricContext.")
+            if sigma_native is None:
+                raise ValueError("State-aware photometry requires sigma_native.")
+            measurement_mask = (
+                np.ones(x_native.shape, dtype=bool)
+                if self.measurement_mask_native is None
+                else np.asarray(self.measurement_mask_native, dtype=bool)
+            )
+            upper_limit = (
+                np.full(x_native.shape, np.nan, dtype=float)
+                if self.upper_limit_native is None
+                else np.asarray(self.upper_limit_native, dtype=float)
+            )
+            upper_limit_mask = (
+                np.zeros(x_native.shape, dtype=bool)
+                if self.upper_limit_mask_native is None
+                else np.asarray(self.upper_limit_mask_native, dtype=bool)
+            )
+            if any(
+                array.shape != x_native.shape
+                for array in (measurement_mask, upper_limit, upper_limit_mask)
+            ):
+                raise ValueError(
+                    "measurement_mask_native, upper_limit_native, and "
+                    "upper_limit_mask_native must match x_native."
+                )
+            valid_rows = _photometric_state_valid_rows(
+                theta,
+                x_native,
+                sigma_native,
+                measurement_mask,
+                upper_limit,
+                upper_limit_mask,
+                context=self.context,
+            )
+            if not np.all(valid_rows):
+                raise ValueError(
+                    "State-aware native photometry is invalid. Every row needs at least one "
+                    "available band; detections require finite flux and positive sigma; "
+                    "censored bands require a finite upper limit and positive sigma."
+                )
+        else:
+            if not np.all(np.isfinite(x_native)):
+                raise ValueError(
+                    "x_native must be finite unless explicit measurement and censoring masks are supplied."
+                )
+            if sigma_native is not None:
+                if not np.all(np.isfinite(sigma_native)) or np.any(sigma_native < 0.0):
+                    raise ValueError("sigma_native must be finite and non-negative.")
+            measurement_mask = None
+            upper_limit = None
+            upper_limit_mask = None
         theta_transform = self.theta_transform or PriorSupportTransform.identity(theta_names)
         if tuple(theta_transform.names) != theta_names:
             raise ValueError("theta_transform names must exactly match theta_names order.")
@@ -413,7 +717,13 @@ class SBITrainingSet:
         if not observation_group:
             raise ValueError("observation_group must be non-empty.")
         if self.observation_groups is None:
-            observation_groups = {observation_group: x_names}
+            n_condition = len(condition_names)
+            observation_names = (
+                x_names if n_condition == 0 else x_names[:-n_condition]
+            )
+            observation_groups = {observation_group: observation_names}
+            if condition_names:
+                observation_groups["conditions"] = condition_features
         else:
             observation_groups = {
                 str(group): tuple(str(name) for name in names)
@@ -421,6 +731,10 @@ class SBITrainingSet:
             }
             if "parameters" in observation_groups:
                 raise ValueError("'parameters' is reserved for SBI target labels.")
+            if condition_names and observation_groups.get("conditions") != condition_features:
+                raise ValueError(
+                    "observation_groups['conditions'] must match condition_names order."
+                )
             flattened = tuple(name for names in observation_groups.values() for name in names)
             if flattened != x_names:
                 raise ValueError(
@@ -432,10 +746,15 @@ class SBITrainingSet:
         self.theta_names = theta_names
         self.x_names = x_names
         self.source = source
+        self.condition_names = condition_names
+        self.condition_values = condition_values
         self.theta_full = theta_full
         self.full_parameter_names = full_names
         self.x_native = x_native
         self.sigma_native = sigma_native
+        self.measurement_mask_native = measurement_mask
+        self.upper_limit_native = upper_limit
+        self.upper_limit_mask_native = upper_limit_mask
         self.native_names = native_names
         self.theta_transform = theta_transform
         self.observation_group = observation_group
@@ -508,8 +827,20 @@ class SBITrainingSet:
         parameter_space: ParameterSpace | None = None,
         metadata: Mapping[str, Any] | None = None,
         finite: str = "raise",
+        measurement_mask: np.ndarray | None = None,
+        upper_limit: np.ndarray | None = None,
+        upper_limit_mask: np.ndarray | None = None,
+        conditions: np.ndarray | None = None,
+        condition_names: Sequence[str] = (),
     ) -> "SBITrainingSet":
-        """Build paired SBI data from measured fluxes and their uncertainties."""
+        """Build paired SBI data from measured fluxes and their uncertainties.
+
+        ``measurement_mask`` describes data availability and is part of the
+        learned observation. It is distinct from the random diffusion
+        conditioning mask used during score training. ``upper_limit_mask``
+        marks censored measurements; their corresponding ``flux`` value may be
+        NaN because only ``upper_limit`` and ``sigma`` are observed.
+        """
 
         theta = np.asarray(theta, dtype=float)
         flux = np.asarray(flux, dtype=float)
@@ -524,25 +855,94 @@ class SBITrainingSet:
         theta_names = tuple(str(name) for name in theta_names)
         if len(theta_names) != theta.shape[1] or len(set(theta_names)) != len(theta_names):
             raise ValueError("theta_names must be unique and match theta columns.")
-        row_is_finite = (
-            np.all(np.isfinite(theta), axis=1)
-            & np.all(np.isfinite(flux), axis=1)
-            & np.all(np.isfinite(sigma), axis=1)
+        condition_names = tuple(str(name) for name in condition_names)
+        if len(set(condition_names)) != len(condition_names):
+            raise ValueError("condition_names must be unique.")
+        if condition_names:
+            conditions = np.asarray(conditions, dtype=float)
+            expected_shape = (theta.shape[0], len(condition_names))
+            if conditions.shape != expected_shape:
+                raise ValueError(
+                    f"conditions has shape {conditions.shape}; expected {expected_shape}."
+                )
+        elif conditions is not None:
+            supplied = np.asarray(conditions, dtype=float)
+            if supplied.shape != (theta.shape[0], 0):
+                raise ValueError(
+                    "condition_names are required when conditions are supplied."
+                )
+            conditions = supplied
+        else:
+            conditions = np.empty((theta.shape[0], 0), dtype=float)
+        context_encoder = _coerce_photometric_context(context, flux_unit=flux_unit)
+        measurement_mask = (
+            np.ones(flux.shape, dtype=bool)
+            if measurement_mask is None
+            else np.asarray(measurement_mask, dtype=bool)
         )
+        upper_limit = (
+            np.full(flux.shape, np.nan, dtype=float)
+            if upper_limit is None
+            else np.asarray(upper_limit, dtype=float)
+        )
+        upper_limit_mask = (
+            np.zeros(flux.shape, dtype=bool)
+            if upper_limit_mask is None
+            else np.asarray(upper_limit_mask, dtype=bool)
+        )
+        if any(
+            array.shape != flux.shape
+            for array in (measurement_mask, upper_limit, upper_limit_mask)
+        ):
+            raise ValueError(
+                "measurement_mask, upper_limit, and upper_limit_mask must match the flux shape."
+            )
+        row_is_finite = _photometric_state_valid_rows(
+            theta,
+            flux,
+            sigma,
+            measurement_mask,
+            upper_limit,
+            upper_limit_mask,
+            context=context_encoder,
+        )
+        if condition_names:
+            row_is_finite &= np.all(np.isfinite(conditions), axis=1)
         if finite == "raise" and not np.all(row_is_finite):
-            raise ValueError("Pre-existing SBI photometry contains NaN or inf rows; use finite='drop' explicitly.")
+            raise ValueError(
+                "Pre-existing SBI photometry contains invalid observation rows; use finite='drop' "
+                "explicitly to remove them."
+            )
         if finite == "drop":
             theta = theta[row_is_finite]
             flux = flux[row_is_finite]
             sigma = sigma[row_is_finite]
+            measurement_mask = measurement_mask[row_is_finite]
+            upper_limit = upper_limit[row_is_finite]
+            upper_limit_mask = upper_limit_mask[row_is_finite]
+            conditions = conditions[row_is_finite]
         elif finite != "raise":
             raise ValueError("finite must be 'raise' or 'drop'.")
         if theta.shape[0] == 0:
             raise ValueError("SBITrainingSet requires at least one finite photometric row.")
 
-        context_encoder = _coerce_photometric_context(context, flux_unit=flux_unit)
-        features = context_encoder.encode(flux, sigma)
-        feature_names = context_encoder.feature_names(bands)
+        features, _, _ = _encode_photometric_state(
+            flux,
+            sigma,
+            measurement_mask,
+            upper_limit,
+            upper_limit_mask,
+            context=context_encoder,
+            band_names=bands,
+        )
+        features = features[:, : len(context_encoder.feature_names(bands))]
+        photometric_feature_names = context_encoder.feature_names(bands)
+        condition_feature_names = tuple(
+            f"condition:{name}" for name in condition_names
+        )
+        if condition_names:
+            features = np.column_stack([features, conditions])
+        feature_names = photometric_feature_names + condition_feature_names
         theta_transform = (
             PriorSupportTransform.identity(theta_names)
             if parameter_space is None
@@ -556,6 +956,7 @@ class SBITrainingSet:
                 "active_band_names": bands,
                 "flux_unit": str(flux_unit),
                 "photometric_context": context_encoder.specification(),
+                "state_aware_photometry": True,
             }
         )
         return cls(
@@ -564,16 +965,28 @@ class SBITrainingSet:
             theta_names=theta_names,
             x_names=feature_names,
             source=source,
+            condition_names=condition_names,
+            condition_values=conditions,
             theta_full=theta,
             full_parameter_names=theta_names,
             x_native=flux,
             sigma_native=sigma,
+            measurement_mask_native=measurement_mask,
+            upper_limit_native=upper_limit,
+            upper_limit_mask_native=upper_limit_mask,
             native_names=bands,
             feature_transform="features",
             context=context_encoder,
             theta_transform=theta_transform,
             observation_group="photometry",
-            observation_groups=context_encoder.observation_groups(bands),
+            observation_groups={
+                **context_encoder.observation_groups(bands),
+                **(
+                    {"conditions": condition_feature_names}
+                    if condition_names
+                    else {}
+                ),
+            },
             metadata=dataset_metadata,
         )
 
@@ -594,6 +1007,106 @@ class SBITrainingSet:
         """Return ``[photometry_features, inferred_parameters]``."""
 
         return np.column_stack([self.x, self.theta])
+
+    @property
+    def has_photometric_state(self) -> bool:
+        """Whether row-wise availability and censoring were declared."""
+
+        return self.measurement_mask_native is not None
+
+    @property
+    def diffusion_observation_features(self) -> np.ndarray:
+        """Observation vector learned by the masked diffusion estimator.
+
+        Generic paired arrays use ``x`` directly. Photometric datasets append
+        four explicit state channels per band: availability, censoring,
+        whether a depth is known, and the depth value in context-consistent
+        units.
+        """
+
+        if not self.has_photometric_state:
+            return self.x
+        features, _, _ = _encode_photometric_state(
+            self.x_native,
+            self.sigma_native,
+            self.measurement_mask_native,
+            self.upper_limit_native,
+            self.upper_limit_mask_native,
+            context=self.context,
+            band_names=self.native_names,
+            feature_transform=self.feature_transform,
+        )
+        if self.condition_names:
+            features = np.column_stack([features, self.condition_values])
+        return features
+
+    @property
+    def diffusion_observation_groups(self) -> dict[str, tuple[str, ...]]:
+        if not self.has_photometric_state:
+            return dict(self.observation_groups)
+        _, groups = _photometric_state_schema(self.context, self.native_names)
+        if self.condition_names:
+            groups["conditions"] = tuple(
+                f"condition:{name}" for name in self.condition_names
+            )
+        return groups
+
+    @property
+    def diffusion_feature_metadata(self) -> FeatureMetadata:
+        """Feature schema for neural joint training."""
+
+        return FeatureMetadata.from_groups(
+            {**self.diffusion_observation_groups, "parameters": self.theta_names}
+        )
+
+    @property
+    def diffusion_joint_features(self) -> np.ndarray:
+        """Return observations plus prior-unconstrained inferred parameters."""
+
+        theta_neural = self.theta_transform.transform(self.theta)
+        return np.column_stack([self.diffusion_observation_features, theta_neural])
+
+    @property
+    def diffusion_observation_size(self) -> int:
+        return int(self.diffusion_observation_features.shape[1])
+
+    def encode_diffusion_observation(
+        self,
+        flux: np.ndarray,
+        sigma: np.ndarray,
+        measurement_mask: np.ndarray,
+        upper_limit: np.ndarray,
+        upper_limit_mask: np.ndarray,
+        conditions: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Apply the exact diffusion observation encoding used for training."""
+
+        if not self.has_photometric_state:
+            raise ValueError("This training set has no native photometric state schema.")
+        features, names, _ = _encode_photometric_state(
+            flux,
+            sigma,
+            measurement_mask,
+            upper_limit,
+            upper_limit_mask,
+            context=self.context,
+            band_names=self.native_names,
+            feature_transform=self.feature_transform,
+        )
+        if self.condition_names:
+            condition_values = _condition_matrix(
+                conditions,
+                condition_names=self.condition_names,
+                n_object=features.shape[0],
+            )
+            features = np.column_stack([features, condition_values])
+            names = tuple(names) + tuple(
+                f"condition:{name}" for name in self.condition_names
+            )
+        expected_names = self.diffusion_feature_metadata.names[: self.diffusion_observation_size]
+        if tuple(names) != tuple(expected_names):
+            raise RuntimeError("Diffusion observation encoding no longer matches its training schema.")
+        return features
 
     # Compatibility names retained for the first photometric SBI notebooks.
     @property
@@ -623,6 +1136,7 @@ class Simulate:
     n: int
     noise_fn: Callable[[np.ndarray], np.ndarray]
     infer: Sequence[str] | None = None
+    condition_on: Sequence[str] | None = None
     context: PhotometricContext | str = "snr_logsigma"
     feature_transform: ObservationTransform | None = None
     max_retries: int = 100
@@ -636,6 +1150,13 @@ class Simulate:
             raise ValueError("Simulate.n must be positive.")
         if not callable(self.noise_fn):
             raise TypeError("Simulate.noise_fn must be callable.")
+        if int(self.max_retries) < 0:
+            raise ValueError("Simulate.max_retries must be non-negative.")
+        if self.condition_on is not None:
+            condition_names = tuple(str(name) for name in self.condition_on)
+            if len(set(condition_names)) != len(condition_names):
+                raise ValueError("Simulate.condition_on names must be unique.")
+            object.__setattr__(self, "condition_on", condition_names)
         context_mode = self.context.mode if isinstance(self.context, PhotometricContext) else str(self.context)
         if self.feature_transform is not None and str(context_mode).lower() != "flux":
             raise ValueError(
@@ -652,6 +1173,29 @@ class MAF:
     num_transforms: int = 5
     num_blocks: int = 2
     learning_rate: float = 1e-3
+    device: str | None = "auto"
+    standardize: bool = True
+    max_grad_norm: float | None = None
+    restore_best: bool = True
+    epochs: int = 100
+    batch_size: int = 256
+    validation_split: float = 0.1
+    patience: int | None = 20
+    min_delta: float = 0.0
+    num_samples: int = 512
+    inference_batch_size: int | None = 8192
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
+class MDN:
+    """Conditional Gaussian-mixture posterior inference configuration."""
+
+    n_components: int = 8
+    hidden_features: int = 128
+    num_blocks: int = 3
+    min_scale: float = 1.0e-3
+    learning_rate: float = 1.0e-3
     device: str | None = "auto"
     standardize: bool = True
     max_grad_norm: float | None = None
@@ -708,8 +1252,13 @@ class TrainedDiffusionSBI:
 
     def sample(
         self,
-        photometry: np.ndarray,
+        photometry: np.ndarray | SEDDataset,
         *,
+        sigma: np.ndarray | None = None,
+        conditions=None,
+        measurement_mask: np.ndarray | None = None,
+        upper_limit: np.ndarray | None = None,
+        upper_limit_mask: np.ndarray | None = None,
         input_units: str = "features",
         num_samples: int = 512,
         steps: int = 64,
@@ -722,15 +1271,22 @@ class TrainedDiffusionSBI:
         Parameters
         ----------
         photometry:
-            One object ``(n_bands,)`` or a catalog ``(n_objects, n_bands)``.
+            An :class:`SEDDataset`, one object, or a photometric catalog.
         input_units:
-            ``"features"`` means the array is already in the training feature
-            units.  ``"flux"`` means native active-band fluxes and applies the
-            same transform used during training.
+            ``"features"`` means an array already contains the complete
+            diffusion observation vector, including state channels.
+            ``"native"`` means flux-like values in the training flux unit and
+            requires ``sigma`` for state-aware photometry. Passing an
+            ``SEDDataset`` supplies units, masks, errors, and limits directly.
         """
 
         joint = self.sample_joint(
             photometry,
+            sigma=sigma,
+            conditions=conditions,
+            measurement_mask=measurement_mask,
+            upper_limit=upper_limit,
+            upper_limit_mask=upper_limit_mask,
             input_units=input_units,
             num_samples=num_samples,
             steps=steps,
@@ -738,13 +1294,17 @@ class TrainedDiffusionSBI:
             batch_size=batch_size,
             **sampler_kwargs,
         )
-        n_bands = len(self.band_names)
-        return joint[:, :, n_bands:]
+        return joint[:, :, self.training_set.diffusion_observation_size :]
 
     def sample_joint(
         self,
-        photometry: np.ndarray,
+        photometry: np.ndarray | SEDDataset,
         *,
+        sigma: np.ndarray | None = None,
+        conditions=None,
+        measurement_mask: np.ndarray | None = None,
+        upper_limit: np.ndarray | None = None,
+        upper_limit_mask: np.ndarray | None = None,
         input_units: str = "features",
         num_samples: int = 512,
         steps: int = 64,
@@ -752,22 +1312,30 @@ class TrainedDiffusionSBI:
         batch_size: int | None = None,
         **sampler_kwargs,
     ) -> np.ndarray:
-        """Sample full joint vectors while clamping observed photometry."""
+        """Sample observation features and physical parameters.
 
-        x = _as_2d(photometry, expected_cols=len(self.band_names), name="photometry")
-        if input_units in {"flux", "native"}:
-            x = transform_photometry(x, self.training_set.feature_transform)
-        elif input_units != "features":
-            raise ValueError("input_units must be 'features' or 'native'.")
+        The estimator itself operates on prior-unconstrained parameter
+        coordinates. Only the returned parameter columns are converted back to
+        their declared physical units.
+        """
 
+        x = self._observation_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            measurement_mask=measurement_mask,
+            upper_limit=upper_limit,
+            upper_limit_mask=upper_limit_mask,
+            input_units=input_units,
+        )
         n_objects = x.shape[0]
-        n_bands = len(self.band_names)
+        n_observation = self.training_set.diffusion_observation_size
         n_theta = len(self.theta_names)
-        known = np.full((n_objects, n_bands + n_theta), np.nan, dtype=float)
-        known[:, :n_bands] = x
+        known = np.full((n_objects, n_observation + n_theta), np.nan, dtype=float)
+        known[:, :n_observation] = x
         mask = np.zeros_like(known, dtype=bool)
-        mask[:, :n_bands] = True
-        return self.estimator.sample(
+        mask[:, :n_observation] = True
+        neural_joint = self.estimator.sample(
             known,
             mask,
             num_samples=num_samples,
@@ -775,6 +1343,183 @@ class TrainedDiffusionSBI:
             sampler=sampler,
             batch_size=batch_size,
             **sampler_kwargs,
+        )
+        physical_joint = np.asarray(neural_joint, dtype=float).copy()
+        physical_joint[:, :, n_observation:] = self.training_set.theta_transform.inverse(
+            physical_joint[:, :, n_observation:]
+        )
+        return physical_joint
+
+    def _observation_features(
+        self,
+        photometry: np.ndarray | SEDDataset,
+        *,
+        sigma: np.ndarray | None,
+        conditions,
+        measurement_mask: np.ndarray | None,
+        upper_limit: np.ndarray | None,
+        upper_limit_mask: np.ndarray | None,
+        input_units: str,
+    ) -> np.ndarray:
+        """Build the exact observation vector used during diffusion training."""
+
+        if isinstance(photometry, SEDDataset):
+            if any(
+                value is not None
+                for value in (sigma, measurement_mask, upper_limit, upper_limit_mask)
+            ):
+                raise ValueError(
+                    "Do not pass sigma or state arrays alongside an SEDDataset; "
+                    "they are read from the dataset."
+                )
+            if not self.training_set.has_photometric_state:
+                raise ValueError(
+                    "This diffusion model was trained on generic precomputed features, "
+                    "not native SEDDataset photometry."
+                )
+            training_bands = self.band_names
+            data_index = {name: index for index, name in enumerate(photometry.band_names)}
+            missing = [name for name in training_bands if name not in data_index]
+            if missing:
+                raise ValueError(
+                    "SEDDataset is missing trained band(s): " + ", ".join(missing)
+                )
+            indices = np.asarray([data_index[name] for name in training_bands], dtype=int)
+            context = self.training_set.context
+            if context.flux_unit is not None and str(photometry.flux_unit) != str(context.flux_unit):
+                raise ValueError(
+                    f"SEDDataset flux unit {photometry.flux_unit!r} does not match trained "
+                    f"context unit {context.flux_unit!r}."
+                )
+            flux = photometry.flux[indices][None, :]
+            sigma = photometry.sigma[indices][None, :]
+            measurement_mask = photometry.active_mask[indices][None, :]
+            upper_limit_mask = (
+                photometry.upper_limit_mask[indices] & photometry.active_mask[indices]
+            )[None, :]
+            upper_values = np.full((1, len(training_bands)), np.nan, dtype=float)
+            upper_values[upper_limit_mask] = photometry.upper_limit[indices][
+                upper_limit_mask[0]
+            ]
+            return self.training_set.encode_diffusion_observation(
+                flux,
+                sigma,
+                measurement_mask,
+                upper_values,
+                upper_limit_mask,
+                conditions=conditions,
+            )
+
+        if input_units == "features":
+            if any(
+                value is not None
+                for value in (sigma, measurement_mask, upper_limit, upper_limit_mask)
+            ):
+                raise ValueError(
+                    "State arrays are only accepted with input_units='native'."
+                )
+            array = np.asarray(photometry, dtype=float)
+            if array.ndim == 1:
+                array = array[None, :]
+            if array.ndim != 2 or not np.all(np.isfinite(array)):
+                raise ValueError(
+                    "diffusion observation features must be a finite one- or "
+                    "two-dimensional array."
+                )
+            n_condition = len(self.training_set.condition_names)
+            full_size = self.training_set.diffusion_observation_size
+            base_size = full_size - n_condition
+            if array.shape[1] == full_size:
+                if conditions is not None and n_condition:
+                    supplied = _condition_matrix(
+                        conditions,
+                        condition_names=self.training_set.condition_names,
+                        n_object=array.shape[0],
+                    )
+                    if not np.allclose(
+                        array[:, base_size:],
+                        supplied,
+                        rtol=0.0,
+                        atol=0.0,
+                    ):
+                        raise ValueError(
+                            "Condition values do not match the condition columns "
+                            "already present in diffusion features."
+                        )
+                return array
+            if n_condition and array.shape[1] == base_size:
+                supplied = _condition_matrix(
+                    conditions,
+                    condition_names=self.training_set.condition_names,
+                    n_object=array.shape[0],
+                )
+                return np.column_stack([array, supplied])
+            raise ValueError(
+                "diffusion observation features have shape "
+                f"{array.shape}; expected (*, {full_size})"
+                + (
+                    f" or (*, {base_size}) with explicit conditions."
+                    if n_condition
+                    else "."
+                )
+            )
+        if input_units not in {"flux", "native"}:
+            raise ValueError("input_units must be 'features' or 'native'.")
+
+        if not self.training_set.has_photometric_state:
+            x = _as_2d(photometry, expected_cols=len(self.band_names), name="photometry")
+            base = transform_photometry(x, self.training_set.feature_transform)
+            condition_values = _condition_matrix(
+                conditions,
+                condition_names=self.training_set.condition_names,
+                n_object=base.shape[0],
+            )
+            return (
+                base
+                if condition_values.shape[1] == 0
+                else np.column_stack([base, condition_values])
+            )
+
+        flux = _as_2d_allow_nonfinite(
+            photometry,
+            expected_cols=len(self.band_names),
+            name="photometry",
+        )
+        sigma_arr = _broadcast_native_state(
+            sigma,
+            shape=flux.shape,
+            name="sigma",
+            dtype=float,
+            required=True,
+        )
+        measurement_arr = _broadcast_native_state(
+            measurement_mask,
+            shape=flux.shape,
+            name="measurement_mask",
+            dtype=bool,
+            default=True,
+        )
+        upper_arr = _broadcast_native_state(
+            upper_limit,
+            shape=flux.shape,
+            name="upper_limit",
+            dtype=float,
+            default=np.nan,
+        )
+        upper_mask_arr = _broadcast_native_state(
+            upper_limit_mask,
+            shape=flux.shape,
+            name="upper_limit_mask",
+            dtype=bool,
+            default=False,
+        )
+        return self.training_set.encode_diffusion_observation(
+            flux,
+            sigma_arr,
+            measurement_arr,
+            upper_arr,
+            upper_mask_arr,
+            conditions=conditions,
         )
 
     def diagnostics(
@@ -800,7 +1545,7 @@ class TrainedDiffusionSBI:
 
 @dataclass
 class TrainedMAFSBI:
-    """Trained MAF posterior estimator for parameters given observations."""
+    """Trained fixed-context neural posterior for parameters given observations."""
 
     estimator: MAFPosteriorEstimator
     training_set: PhotometricTrainingSet | None
@@ -812,20 +1557,28 @@ class TrainedMAFSBI:
     def __post_init__(self) -> None:
         if self.target_transform is None:
             if self.training_set is None:
-                raise ValueError("Loaded MAF state requires an explicit target_transform.")
+                raise ValueError(
+                    "Loaded fixed-context SBI state requires an explicit target_transform."
+                )
             self.target_transform = self.training_set.theta_transform
         if self.training_set is not None:
             generated_schema = _maf_schema_from_training_set(self.training_set)
             if self.schema and dict(self.schema) != generated_schema:
-                raise ValueError("Provided MAF schema does not match the training set.")
+                raise ValueError(
+                    "Provided fixed-context SBI schema does not match the training set."
+                )
             self.schema = generated_schema
         else:
             self.schema = dict(self.schema)
             _validate_maf_schema(self.schema)
         if self.estimator.theta_dim != len(self.theta_names) or self.estimator.x_dim != len(self.x_names):
-            raise ValueError("MAF estimator dimensions do not match the saved scientific schema.")
+            raise ValueError(
+                "Neural posterior dimensions do not match the saved scientific schema."
+            )
         if tuple(self.target_transform.names) != self.theta_names:
-            raise ValueError("MAF target transform names do not match the saved parameter order.")
+            raise ValueError(
+                "Neural-posterior target-transform names do not match the saved parameter order."
+            )
         self.metadata = dict(self.metadata)
         self.history = {str(key): list(value) for key, value in self.history.items()}
 
@@ -840,6 +1593,10 @@ class TrainedMAFSBI:
     @property
     def x_names(self) -> tuple[str, ...]:
         return tuple(self.schema["x_names"])
+
+    @property
+    def condition_names(self) -> tuple[str, ...]:
+        return tuple(self.schema.get("condition_names", ()))
 
     @property
     def context(self) -> PhotometricContext | None:
@@ -857,6 +1614,7 @@ class TrainedMAFSBI:
         photometry: np.ndarray | SEDDataset,
         *,
         sigma: np.ndarray | None = None,
+        conditions=None,
         input_units: str = "features",
         num_samples: int = 512,
         batch_size: int | None = None,
@@ -870,13 +1628,18 @@ class TrainedMAFSBI:
         the trained context conditions on uncertainty.
         """
 
-        x = self._context_features(photometry, sigma=sigma, input_units=input_units)
+        x = self._context_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            input_units=input_units,
+        )
         n_object = x.shape[0]
         if batch_size is None:
             batch_size = n_object
         batch_size = int(batch_size)
         if batch_size <= 0:
-            raise ValueError("MAF inference batch_size must be positive.")
+            raise ValueError("SBI inference batch_size must be positive.")
         if seed is not None:
             self.estimator.torch.manual_seed(int(seed))
             if self.estimator.torch.cuda.is_available():
@@ -889,7 +1652,7 @@ class TrainedMAFSBI:
                 samples = samples[None, :, :]
             if samples.shape != (chunk.shape[0], int(num_samples), len(self.theta_names)):
                 raise ValueError(
-                    "MAF estimator returned sample shape "
+                    "Neural posterior returned sample shape "
                     f"{samples.shape}; expected {(chunk.shape[0], int(num_samples), len(self.theta_names))}."
                 )
             cubes.append(samples)
@@ -902,11 +1665,17 @@ class TrainedMAFSBI:
         photometry: np.ndarray | SEDDataset,
         *,
         sigma: np.ndarray | None = None,
+        conditions=None,
         input_units: str = "features",
     ) -> np.ndarray | float:
         """Evaluate the learned posterior density in physical parameter units."""
 
-        x = self._context_features(photometry, sigma=sigma, input_units=input_units)
+        x = self._context_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            input_units=input_units,
+        )
         transformed = self.target_transform.transform(theta)
         logp = self.estimator.log_prob(transformed, x)
         return logp + self.target_transform.log_abs_det_forward(theta)
@@ -916,6 +1685,7 @@ class TrainedMAFSBI:
         photometry: np.ndarray | SEDDataset,
         *,
         sigma: np.ndarray | None = None,
+        conditions=None,
         input_units: str = "features",
         num_samples: int = 128,
         batch_size: int = 8192,
@@ -925,13 +1695,18 @@ class TrainedMAFSBI:
     ) -> "MAFCatalogSummary":
         """Sample and summarize a large catalog without retaining its sample cube."""
 
-        x = self._context_features(photometry, sigma=sigma, input_units=input_units)
+        x = self._context_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            input_units=input_units,
+        )
         levels = np.asarray(quantiles, dtype=float)
         if levels.ndim != 1 or levels.size == 0 or np.any((levels < 0.0) | (levels > 1.0)):
             raise ValueError("quantiles must be non-empty one-dimensional values in [0, 1].")
         batch_size = int(batch_size)
         if batch_size <= 0:
-            raise ValueError("MAF catalog summary batch_size must be positive.")
+            raise ValueError("SBI catalog summary batch_size must be positive.")
 
         n_object = x.shape[0]
         n_parameter = len(self.theta_names)
@@ -974,11 +1749,14 @@ class TrainedMAFSBI:
         photometry: np.ndarray | SEDDataset,
         *,
         sigma: np.ndarray | None,
+        conditions,
         input_units: str,
     ) -> np.ndarray:
         if isinstance(photometry, SEDDataset):
             if np.any(photometry.active_upper_limit_mask):
-                raise NotImplementedError("Stable MAF inference does not yet encode censored upper-limit bands.")
+                raise NotImplementedError(
+                    "Stable fixed-context SBI does not yet encode censored upper-limit bands."
+                )
             flux, data_sigma, _, names = photometry.active_arrays()
             if tuple(names) != self.band_names:
                 raise ValueError(
@@ -996,21 +1774,68 @@ class TrainedMAFSBI:
             input_units = "native"
 
         if input_units == "features":
-            return _as_2d(photometry, expected_cols=len(self.x_names), name="context features")
+            array = np.asarray(photometry, dtype=float)
+            if array.ndim == 1:
+                array = array[None, :]
+            if array.ndim != 2 or not np.all(np.isfinite(array)):
+                raise ValueError(
+                    "context features must be a finite one- or two-dimensional array."
+                )
+            n_condition = len(self.condition_names)
+            full_size = len(self.x_names)
+            base_size = full_size - n_condition
+            if array.shape[1] == full_size:
+                if conditions is not None and n_condition:
+                    supplied = _condition_matrix(
+                        conditions,
+                        condition_names=self.condition_names,
+                        n_object=array.shape[0],
+                    )
+                    if not np.allclose(
+                        array[:, base_size:],
+                        supplied,
+                        rtol=0.0,
+                        atol=0.0,
+                    ):
+                        raise ValueError(
+                            "Condition values do not match the condition columns "
+                            "already present in context features."
+                        )
+                return array
+            if n_condition and array.shape[1] == base_size:
+                supplied = _condition_matrix(
+                    conditions,
+                    condition_names=self.condition_names,
+                    n_object=array.shape[0],
+                )
+                return np.column_stack([array, supplied])
+            raise ValueError(
+                "context features have shape "
+                f"{array.shape}; expected (*, {full_size})"
+                + (
+                    f" or (*, {base_size}) with explicit conditions."
+                    if n_condition
+                    else "."
+                )
+            )
         if input_units not in {"flux", "native"}:
             raise ValueError("input_units must be 'features' or 'native'.")
         flux = _as_2d(photometry, expected_cols=len(self.band_names), name="photometry")
         context = self.context
         if context is None:
             if sigma is not None:
-                raise ValueError("This precomputed-feature MAF has no native uncertainty encoding schema.")
+                raise ValueError(
+                    "This precomputed-feature neural posterior has no native uncertainty encoding schema."
+                )
             if not bool(self.schema.get("native_input_supported", False)):
-                raise ValueError("This loaded MAF accepts pre-encoded context features only.")
-            return transform_photometry(flux, self.feature_transform)
-        if sigma is None:
+                raise ValueError(
+                    "This loaded neural posterior accepts pre-encoded context features only."
+                )
+            base = transform_photometry(flux, self.feature_transform)
+        elif sigma is None:
             if context.conditions_on_sigma:
                 raise ValueError(
-                    f"MAF context {context.mode!r} requires sigma for every native photometric input."
+                    f"SBI context {context.mode!r} requires sigma for every native photometric input."
                 )
             sigma_arr = np.zeros_like(flux)
         else:
@@ -1019,11 +1844,24 @@ class TrainedMAFSBI:
                 sigma_arr = np.repeat(sigma_arr, flux.shape[0], axis=0)
             if sigma_arr.shape != flux.shape:
                 raise ValueError("sigma must have one row or the same row count as photometry.")
-        if context.mode == "flux" and self.feature_transform not in {"features", "flux", "identity"}:
+        if context is None:
+            pass
+        elif context.mode == "flux" and self.feature_transform not in {"features", "flux", "identity"}:
             if self.training_set is None:
                 raise ValueError("A custom callable feature transform cannot be reconstructed from a checkpoint.")
-            return transform_photometry(flux, self.feature_transform)
-        return context.encode(flux, sigma_arr)
+            base = transform_photometry(flux, self.feature_transform)
+        else:
+            base = context.encode(flux, sigma_arr)
+        condition_values = _condition_matrix(
+            conditions,
+            condition_names=self.condition_names,
+            n_object=base.shape[0],
+        )
+        return (
+            base
+            if condition_values.shape[1] == 0
+            else np.column_stack([base, condition_values])
+        )
 
     def save(self, path: str | Path, *, overwrite: bool = False) -> Path:
         """Save an auditable MAF checkpoint directory without training rows."""
@@ -1104,7 +1942,7 @@ class TrainedMAFSBI:
         output_dir: str | Path | None = None,
         make_plots: bool = True,
     ) -> dict[str, Any]:
-        """Run generic SBI diagnostics on MAF posterior samples."""
+        """Run generic SBI diagnostics on posterior samples."""
 
         return run_sbi_diagnostics(
             posterior_samples=samples,
@@ -1113,6 +1951,91 @@ class TrainedMAFSBI:
             theta_names=self.theta_names,
             output_dir=output_dir,
             make_plots=make_plots,
+        )
+
+
+@dataclass
+class TrainedMDNSBI(TrainedMAFSBI):
+    """Trained conditional Gaussian-mixture posterior estimator."""
+
+    estimator: MDNPosteriorEstimator
+
+    def save(self, path: str | Path, *, overwrite: bool = False) -> Path:
+        """Save an auditable MDN checkpoint directory without training rows."""
+
+        path = Path(path)
+        if path.exists() and not path.is_dir():
+            raise FileExistsError(f"MDN checkpoint path exists and is not a directory: {path}")
+        if path.exists() and any(path.iterdir()) and not overwrite:
+            raise FileExistsError(f"MDN checkpoint path already exists and is not empty: {path}")
+        path.mkdir(parents=True, exist_ok=True)
+        if self.estimator.theta_standardizer is None or self.estimator.x_standardizer is None:
+            raise RuntimeError("Cannot save an unfitted MDN estimator.")
+
+        np.savez_compressed(
+            path / "standardizers.npz",
+            theta_mean=self.estimator.theta_standardizer.mean,
+            theta_std=self.estimator.theta_standardizer.std,
+            x_mean=self.estimator.x_standardizer.mean,
+            x_std=self.estimator.x_standardizer.std,
+        )
+        weights = {
+            name: tensor.detach().cpu()
+            for name, tensor in self.estimator.network.state_dict().items()
+        }
+        self.estimator.torch.save(weights, path / "weights.pt")
+
+        manifest = {
+            "format": "composed.mdn.v1",
+            "composed_version": _distribution_version("composed"),
+            "torch_version": str(getattr(self.estimator.torch, "__version__", "unknown")),
+            "estimator": self.estimator.configuration(),
+            "schema": dict(self.schema),
+            "target_transform": self.target_transform.specification(),
+            "history": self.history,
+            "metadata": self.metadata,
+        }
+        with (path / "manifest.json").open("w", encoding="utf-8") as handle:
+            json.dump(_json_safe(manifest), handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path, *, device: str | None = "auto") -> "TrainedMDNSBI":
+        """Load a normalized MDN checkpoint on the requested torch device."""
+
+        path = Path(path)
+        with (path / "manifest.json").open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        if manifest.get("format") != "composed.mdn.v1":
+            raise ValueError(f"Unsupported MDN checkpoint format {manifest.get('format')!r}.")
+        config = dict(manifest["estimator"])
+        config["device"] = device
+        estimator = MDNPosteriorEstimator(**config)
+        with np.load(path / "standardizers.npz", allow_pickle=False) as arrays:
+            estimator.theta_standardizer = Standardizer(arrays["theta_mean"], arrays["theta_std"])
+            estimator.x_standardizer = Standardizer(arrays["x_mean"], arrays["x_std"])
+        try:
+            state = estimator.torch.load(
+                path / "weights.pt", map_location="cpu", weights_only=True
+            )
+        except TypeError:
+            state = estimator.torch.load(path / "weights.pt", map_location="cpu")
+        estimator.network.load_state_dict(state)
+        estimator.network.eval()
+        estimator.history = {
+            str(key): list(value)
+            for key, value in manifest.get("history", {}).items()
+        }
+        return cls(
+            estimator=estimator,
+            training_set=None,
+            history=estimator.history,
+            metadata=dict(manifest.get("metadata", {})),
+            target_transform=PriorSupportTransform.from_specification(
+                manifest["target_transform"]
+            ),
+            schema=dict(manifest["schema"]),
         )
 
 
@@ -1176,6 +2099,7 @@ class MAFCatalogSummary:
 # Compatibility names used by the first photometric SBI notebooks.
 DiffusionPhotometricSBIResult = TrainedDiffusionSBI
 MAFPhotometricSBIResult = TrainedMAFSBI
+MDNPhotometricSBIResult = TrainedMDNSBI
 
 
 def simulate_sbi_training_set(
@@ -1189,8 +2113,10 @@ def simulate_sbi_training_set(
     The observed feature vector is exactly the active photometric vector used
     by the problem likelihood.  Backend parameter mapping, flux units, masks,
     and mass normalization therefore follow the same path as deterministic
-    inference.  Upper-limit encodings are not guessed: censored observations
-    require a future explicit SBI observation encoder.
+    inference. Bands declared as upper limits in the observed Problem define
+    survey thresholds for training simulations. A simulated measurement at or
+    below its threshold is represented by the threshold and a censoring flag,
+    never by its latent noisy flux.
     """
 
     from composed.problem import Problem
@@ -1201,11 +2127,6 @@ def simulate_sbi_training_set(
         raise TypeError("simulation must be composed.Simulate(...).")
     if not isinstance(problem.data, SEDDataset):
         raise NotImplementedError("Problem-driven SBI currently supports photometric SEDDataset observations.")
-    if np.any(problem.data.active_upper_limit_mask):
-        raise NotImplementedError(
-            "Problem-driven SBI does not yet infer an upper-limit feature encoding. "
-            "Use detections or construct an explicit standalone SBITrainingSet with censoring features."
-        )
 
     generator = np.random.default_rng(rng)
     theta_full, x_native, sigma_native, sim_metadata = simulate_training_set(
@@ -1222,22 +2143,81 @@ def simulate_sbi_training_set(
         mp_context=simulation.mp_context,
         return_sigma=True,
     )
+    condition_names = _ordered_parameter_subset(
+        problem.parameters.names,
+        simulation.condition_on,
+        label="condition_on",
+    )
+    inferred_request = (
+        tuple(
+            name
+            for name in problem.parameters.names
+            if name not in set(condition_names)
+        )
+        if simulation.infer is None
+        else tuple(str(name) for name in simulation.infer)
+    )
+    overlap = sorted(set(inferred_request) & set(condition_names))
+    if overlap:
+        raise ValueError(
+            "Parameters cannot be both inferred and conditioned: "
+            + ", ".join(overlap)
+        )
+    if not inferred_request:
+        raise ValueError("SBI requires at least one inferred parameter.")
     inferred_names, theta = _select_inferred_parameters(
         theta_full,
         problem.parameters.names,
-        simulation.infer,
+        inferred_request,
+    )
+    parameter_index = {
+        name: index for index, name in enumerate(problem.parameters.names)
+    }
+    condition_values = np.asarray(
+        theta_full[:, [parameter_index[name] for name in condition_names]],
+        dtype=float,
     )
     context = _coerce_photometric_context(simulation.context, flux_unit=problem.data.flux_unit)
-    if context.mode == "flux" and simulation.feature_transform is not None:
-        x_features = transform_photometry(x_native, simulation.feature_transform)
-        x_names = tuple(problem.data.active_band_names)
-        observation_groups = {"photometry": x_names}
-        transform_name = _transform_name(simulation.feature_transform)
-    else:
-        x_features = context.encode(x_native, sigma_native)
-        x_names = context.feature_names(problem.data.active_band_names)
-        observation_groups = context.observation_groups(problem.data.active_band_names)
-        transform_name = context.mode
+    band_names = tuple(problem.data.active_band_names)
+    measurement_mask = np.ones(x_native.shape, dtype=bool)
+    candidate_limit = np.asarray(problem.data.active_upper_limit_mask, dtype=bool)
+    limit_values = np.where(
+        candidate_limit,
+        np.asarray(problem.data.active_upper_limit, dtype=float),
+        np.nan,
+    )
+    upper_limit = np.broadcast_to(limit_values, x_native.shape).copy()
+    upper_limit_mask = np.broadcast_to(candidate_limit, x_native.shape) & (
+        x_native <= upper_limit
+    )
+    observed_flux = np.asarray(x_native, dtype=float).copy()
+    observed_flux[upper_limit_mask] = np.nan
+
+    feature_transform = simulation.feature_transform or "features"
+    encoded, _, _ = _encode_photometric_state(
+        observed_flux,
+        sigma_native,
+        measurement_mask,
+        upper_limit,
+        upper_limit_mask,
+        context=context,
+        band_names=band_names,
+        feature_transform=feature_transform,
+    )
+    photometric_names = context.feature_names(band_names)
+    x_features = encoded[:, : len(photometric_names)]
+    condition_features = tuple(f"condition:{name}" for name in condition_names)
+    if condition_names:
+        x_features = np.column_stack([x_features, condition_values])
+    x_names = photometric_names + condition_features
+    observation_groups = context.observation_groups(band_names)
+    if condition_names:
+        observation_groups["conditions"] = condition_features
+    transform_name = (
+        _transform_name(simulation.feature_transform)
+        if context.mode == "flux" and simulation.feature_transform is not None
+        else context.mode
+    )
     theta_transform = PriorSupportTransform.from_parameter_space(problem.parameters, inferred_names)
     return SBITrainingSet(
         theta=theta,
@@ -1245,12 +2225,17 @@ def simulate_sbi_training_set(
         theta_names=inferred_names,
         x_names=x_names,
         source="composed.problem.simulate",
+        condition_names=condition_names,
+        condition_values=condition_values,
         theta_full=theta_full,
         full_parameter_names=problem.parameters.names,
-        x_native=x_native,
+        x_native=observed_flux,
         sigma_native=sigma_native,
-        native_names=problem.data.active_band_names,
-        feature_transform=simulation.feature_transform or "features",
+        measurement_mask_native=measurement_mask,
+        upper_limit_native=upper_limit,
+        upper_limit_mask_native=upper_limit_mask,
+        native_names=band_names,
+        feature_transform=feature_transform,
         context=context,
         theta_transform=theta_transform,
         observation_group="photometry",
@@ -1260,10 +2245,21 @@ def simulate_sbi_training_set(
             "simulator": "Problem.simulate",
             "noise_model": _transform_name(simulation.noise_fn),
             "requested_training_rows": int(simulation.n),
-            "active_band_names": problem.data.active_band_names,
+            "active_band_names": band_names,
             "flux_unit": problem.data.flux_unit,
             "feature_transform": transform_name,
             "photometric_context": context.specification(),
+            "conditioned_parameter_names": condition_names,
+            "observation_state": {
+                "availability": "1 for every active simulated band",
+                "censoring_rule": "measured_flux <= upper_limit",
+                "upper_limit_candidate_bands": tuple(
+                    name for name, is_candidate in zip(band_names, candidate_limit) if is_candidate
+                ),
+                "censored_fraction_by_band": tuple(
+                    float(value) for value in np.mean(upper_limit_mask, axis=0)
+                ),
+            },
             "simulate_training_set": sim_metadata,
         },
     )
@@ -1451,12 +2447,61 @@ def train_maf_photometric_sbi(
     )
 
 
+def train_mdn_photometric_sbi(
+    training_set: SBITrainingSet,
+    *,
+    n_components: int = 8,
+    hidden_features: int = 128,
+    num_blocks: int = 3,
+    min_scale: float = 1.0e-3,
+    learning_rate: float = 1.0e-3,
+    device: str | None = "auto",
+    standardize: bool = True,
+    max_grad_norm: float | None = None,
+    restore_best: bool = True,
+    epochs: int = 100,
+    batch_size: int = 256,
+    validation_split: float = 0.1,
+    patience: int | None = 20,
+    min_delta: float = 0.0,
+    seed: int | None = None,
+    verbose: bool = False,
+    **kwargs,
+) -> TrainedMDNSBI:
+    """Compatibility wrapper around :func:`train_sbi` for an MDN."""
+
+    if kwargs:
+        unknown = ", ".join(sorted(kwargs))
+        raise TypeError(f"Unsupported MDN training option(s): {unknown}.")
+    return train_sbi(
+        training_set,
+        MDN(
+            n_components=n_components,
+            hidden_features=hidden_features,
+            num_blocks=num_blocks,
+            min_scale=min_scale,
+            learning_rate=learning_rate,
+            device=device,
+            standardize=standardize,
+            max_grad_norm=max_grad_norm,
+            restore_best=restore_best,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=validation_split,
+            patience=patience,
+            min_delta=min_delta,
+            verbose=verbose,
+        ),
+        seed=seed,
+    )
+
+
 def train_sbi(
     training_set: SBITrainingSet,
-    method: MAF | Diffusion,
+    method: MAF | MDN | Diffusion,
     *,
     seed: int | None = None,
-) -> TrainedMAFSBI | TrainedDiffusionSBI:
+) -> TrainedMAFSBI | TrainedMDNSBI | TrainedDiffusionSBI:
     """Train SBI from a declared paired dataset.
 
     This is the standalone route for presampled forward models, simulations,
@@ -1470,16 +2515,21 @@ def train_sbi(
 
     if isinstance(method, MAF):
         return _train_maf(training_set, method, seed=seed)
+    if isinstance(method, MDN):
+        return _train_mdn(training_set, method, seed=seed)
     if isinstance(method, Diffusion):
         return _train_diffusion(training_set, method, seed=seed)
-    raise TypeError("method must be composed.MAF(...) or composed.Diffusion(...).")
+    raise TypeError(
+        "method must be composed.MAF(...), composed.MDN(...), or composed.Diffusion(...)."
+    )
 
 
 def fit_sbi_problem(
     problem,
-    method: MAF | Diffusion,
+    method: MAF | MDN | Diffusion,
     simulation: Simulate,
     *,
+    conditions: Mapping[str, float] | None = None,
     seed: int | None = None,
 ):
     """Train from a Problem simulator and infer that Problem's observed SED."""
@@ -1489,47 +2539,146 @@ def fit_sbi_problem(
 
     if not isinstance(problem, Problem):
         raise TypeError("fit_sbi_problem requires a composed.Problem.")
-    if not isinstance(method, (MAF, Diffusion)):
-        raise TypeError("method must be composed.MAF(...) or composed.Diffusion(...).")
+    if not isinstance(method, (MAF, MDN, Diffusion)):
+        raise TypeError(
+            "method must be composed.MAF(...), composed.MDN(...), or composed.Diffusion(...)."
+        )
     if not isinstance(simulation, Simulate):
         raise TypeError(
             "Problem-based SBI requires training=Simulate(...). "
             "For existing paired arrays use train_sbi(SBITrainingSet.from_arrays(...), method)."
         )
+    if not isinstance(problem.data, SEDDataset):
+        raise NotImplementedError(
+            "Problem-driven SBI currently supports photometric SEDDataset observations."
+        )
 
-    inferred_names = problem.parameters.names if simulation.infer is None else tuple(simulation.infer)
-    _validate_continuous_sbi_targets(problem.parameters, inferred_names)
-    if isinstance(method, Diffusion):
-        context_mode = simulation.context.mode if isinstance(simulation.context, PhotometricContext) else str(simulation.context)
-        if str(context_mode).lower() != "flux":
+    supplied_conditions = {} if conditions is None else dict(conditions)
+    condition_names = _ordered_parameter_subset(
+        problem.parameters.names,
+        tuple(supplied_conditions),
+        label="conditions",
+    )
+    declared_condition_names = _ordered_parameter_subset(
+        problem.parameters.names,
+        simulation.condition_on,
+        label="condition_on",
+    )
+    if declared_condition_names and not supplied_conditions:
+        raise ValueError(
+            "Problem-based SBI requires fit(..., conditions=...) values for every "
+            "Simulate.condition_on parameter."
+        )
+    if declared_condition_names and declared_condition_names != condition_names:
+        raise ValueError(
+            "Simulate.condition_on must match the names supplied to fit(..., "
+            "conditions=...)."
+        )
+
+    canonical_conditions = {}
+    for name in condition_names:
+        value = float(supplied_conditions[name])
+        if not np.isfinite(value):
+            raise ValueError(f"Conditioned parameter {name!r} must be finite.")
+        if not np.isfinite(problem.parameters.priors[name].logpdf(value)):
             raise ValueError(
-                "Experimental diffusion currently requires Simulate(context='flux'). "
-                "The stable uncertainty-conditioned context is implemented for MAF."
+                f"Conditioned value {value:.8g} for {name!r} lies outside its "
+                "declared prior support."
             )
+        canonical_conditions[name] = value
 
-    training_set = simulate_sbi_training_set(problem, simulation, rng=seed)
+    inferred_names = (
+        tuple(
+            name
+            for name in problem.parameters.names
+            if name not in set(condition_names)
+        )
+        if simulation.infer is None
+        else tuple(str(name) for name in simulation.infer)
+    )
+    if len(set(inferred_names)) != len(inferred_names):
+        raise ValueError("infer parameter names must be unique.")
+    unknown_inferred = sorted(
+        set(inferred_names) - set(problem.parameters.names)
+    )
+    if unknown_inferred:
+        raise ValueError(
+            "infer contains unknown parameter(s): "
+            + ", ".join(unknown_inferred)
+        )
+    overlap = sorted(set(inferred_names) & set(condition_names))
+    if overlap:
+        raise ValueError(
+            "Parameters cannot be both inferred and conditioned: "
+            + ", ".join(overlap)
+        )
+    if not inferred_names:
+        raise ValueError("SBI requires at least one inferred parameter.")
+    _validate_continuous_sbi_targets(problem.parameters, inferred_names)
+    if isinstance(method, (MAF, MDN)) and np.any(problem.data.active_upper_limit_mask):
+        raise NotImplementedError(
+            "MAF does not yet encode censored upper limits, and neither does MDN. "
+            "Use Diffusion or a detections-only Problem."
+        )
+
+    effective_simulation = replace(
+        simulation,
+        infer=inferred_names,
+        condition_on=condition_names,
+    )
+    training_set = simulate_sbi_training_set(
+        problem,
+        effective_simulation,
+        rng=seed,
+    )
     trained = train_sbi(training_set, method, seed=seed)
-    samples = _sample_problem_posterior(problem, trained, method, seed=seed)
+    samples = _sample_problem_posterior(
+        problem,
+        trained,
+        method,
+        conditions=canonical_conditions,
+        seed=seed,
+    )
+    if isinstance(method, Diffusion):
+        observation_names = training_set.diffusion_feature_metadata.names[
+            : training_set.diffusion_observation_size
+        ]
+        observation_groups = training_set.diffusion_observation_groups
+    else:
+        observation_names = training_set.x_names
+        observation_groups = training_set.observation_groups
 
     return InferenceResult(
         samples=samples,
         logp=None,
         weights=np.ones(samples.shape[0], dtype=float),
         parameter_names=training_set.theta_names,
-        sampler_name="maf" if isinstance(method, MAF) else "diffusion",
+        sampler_name=(
+            "maf"
+            if isinstance(method, MAF)
+            else "mdn"
+            if isinstance(method, MDN)
+            else "diffusion"
+        ),
         metadata={
             "problem": problem.specification(),
             "training_source": training_set.source,
             "training_rows": int(training_set.theta.shape[0]),
-            "observation_names": training_set.x_names,
+            "observation_names": observation_names,
+            "observation_groups": observation_groups,
             "feature_transform": training_set.feature_transform_name,
             "photometric_context": (
                 None if training_set.context is None else training_set.context.specification()
             ),
             "target_transform": training_set.theta_transform.specification(),
+            "conditions": canonical_conditions,
+            "conditioned_parameter_names": condition_names,
+            "inferred_parameter_names": training_set.theta_names,
             "device": str(getattr(trained.estimator, "device", "unknown")),
             "inference_batch_size": (
-                method.inference_batch_size if isinstance(method, MAF) else method.sample_batch_size
+                method.inference_batch_size
+                if isinstance(method, (MAF, MDN))
+                else method.sample_batch_size
             ),
             "history": trained.history,
             "logp_available": False,
@@ -1541,6 +2690,14 @@ def fit_sbi_problem(
 
 
 def _train_maf(training_set: SBITrainingSet, method: MAF, *, seed: int | None) -> TrainedMAFSBI:
+    if training_set.has_photometric_state:
+        has_missing = not np.all(training_set.measurement_mask_native)
+        has_limit_depth = np.any(np.isfinite(training_set.upper_limit_native))
+        if has_missing or has_limit_depth:
+            raise NotImplementedError(
+                "Stable MAF does not yet consume availability or upper-limit state channels. "
+                "Use Diffusion for censored or row-masked photometry."
+            )
     target_transform = training_set.theta_transform or PriorSupportTransform.identity(training_set.theta_names)
     unconstrained_theta = target_transform.transform(training_set.theta)
     estimator, metadata = train_maf_posterior_from_dataset(
@@ -1582,14 +2739,72 @@ def _train_maf(training_set: SBITrainingSet, method: MAF, *, seed: int | None) -
     )
 
 
+def _train_mdn(training_set: SBITrainingSet, method: MDN, *, seed: int | None) -> TrainedMDNSBI:
+    if training_set.has_photometric_state:
+        has_missing = not np.all(training_set.measurement_mask_native)
+        has_limit_depth = np.any(np.isfinite(training_set.upper_limit_native))
+        if has_missing or has_limit_depth:
+            raise NotImplementedError(
+                "Stable MDN does not yet consume availability or upper-limit state channels. "
+                "Use Diffusion for censored or row-masked photometry."
+            )
+    target_transform = (
+        training_set.theta_transform
+        or PriorSupportTransform.identity(training_set.theta_names)
+    )
+    unconstrained_theta = target_transform.transform(training_set.theta)
+    estimator, metadata = train_mdn_posterior_from_dataset(
+        unconstrained_theta,
+        training_set.x,
+        theta_names=training_set.theta_names,
+        x_names=training_set.x_names,
+        source=training_set.source,
+        finite="raise",
+        shuffle=False,
+        return_metadata=True,
+        n_components=method.n_components,
+        hidden_features=method.hidden_features,
+        num_blocks=method.num_blocks,
+        min_scale=method.min_scale,
+        learning_rate=method.learning_rate,
+        device=method.device,
+        standardize=method.standardize,
+        max_grad_norm=method.max_grad_norm,
+        restore_best=method.restore_best,
+        epochs=method.epochs,
+        batch_size=method.batch_size,
+        validation_split=method.validation_split,
+        patience=method.patience,
+        min_delta=method.min_delta,
+        seed=seed,
+        verbose=method.verbose,
+    )
+    history = dict(getattr(estimator, "history", {}))
+    return TrainedMDNSBI(
+        estimator=estimator,
+        training_set=training_set,
+        history=history,
+        metadata={
+            **metadata,
+            "training_source": training_set.source,
+            "training_set_metadata": _checkpoint_training_metadata(
+                training_set.metadata
+            ),
+        },
+        target_transform=target_transform,
+    )
+
+
 def _train_diffusion(
     training_set: SBITrainingSet,
     method: Diffusion,
     *,
     seed: int | None,
 ) -> TrainedDiffusionSBI:
+    feature_metadata = training_set.diffusion_feature_metadata
+    joint_features = training_set.diffusion_joint_features
     estimator = ConditionalDiffusionEstimator(
-        training_set.feature_metadata,
+        feature_metadata,
         model=method.model,
         hidden_features=method.hidden_features,
         model_config=method.model_config,
@@ -1601,10 +2816,16 @@ def _train_diffusion(
     )
     fit_mask_config = dict(
         method.mask_config
-        or default_diffusion_mask(observation_groups=tuple(training_set.observation_groups))
+        or default_diffusion_mask(
+            observation_groups=tuple(training_set.diffusion_observation_groups)
+        )
     )
+    if training_set.has_photometric_state and "tie_groups" not in fit_mask_config:
+        fit_mask_config["tie_groups"] = tuple(
+            training_set.diffusion_observation_groups
+        )
     history = estimator.fit(
-        training_set.joint_features,
+        joint_features,
         mask_config=fit_mask_config,
         epochs=method.epochs,
         batch_size=method.batch_size,
@@ -1625,17 +2846,19 @@ def _train_diffusion(
 def _sample_problem_posterior(
     problem,
     trained,
-    method: MAF | Diffusion,
+    method: MAF | MDN | Diffusion,
     *,
+    conditions: Mapping[str, float] | None = None,
     seed: int | None = None,
 ) -> np.ndarray:
     requested = int(method.num_samples)
     if requested <= 0:
         raise ValueError("SBI num_samples must be positive.")
 
-    if isinstance(method, MAF):
+    if isinstance(method, (MAF, MDN)):
         cube = trained.sample(
             problem.data,
+            conditions=conditions,
             num_samples=requested,
             batch_size=method.inference_batch_size,
             seed=seed,
@@ -1644,34 +2867,28 @@ def _sample_problem_posterior(
         valid = _samples_within_declared_priors(draws, problem.parameters, trained.theta_names)
         if not np.all(valid):
             raise FloatingPointError(
-                "Bounded MAF target transform produced samples outside declared prior support."
+                "Bounded neural target transform produced samples outside declared prior support."
             )
         return draws
 
-    observed = np.asarray(problem.data.active_flux, dtype=float)
-    accepted = []
-    n_accepted = 0
-    for _ in range(12):
-        draw_n = max(requested - n_accepted, min(requested, 256))
-        cube = trained.sample(
-            observed,
-            input_units="native",
-            num_samples=draw_n,
-            steps=method.steps,
-            sampler=method.sampler,
-            batch_size=method.sample_batch_size,
-        )
-        draws = np.asarray(cube[0], dtype=float)
-        valid = _samples_within_declared_priors(draws, problem.parameters, trained.theta_names)
-        if np.any(valid):
-            accepted.append(draws[valid])
-            n_accepted += int(np.sum(valid))
-        if n_accepted >= requested:
-            return np.concatenate(accepted, axis=0)[:requested]
-    raise RuntimeError(
-        f"SBI generated only {n_accepted}/{requested} samples inside the declared prior support. "
-        "Inspect training coverage and neural diagnostics."
+    cube = trained.sample(
+        problem.data,
+        conditions=conditions,
+        num_samples=requested,
+        steps=method.steps,
+        sampler=method.sampler,
+        batch_size=method.sample_batch_size,
     )
+    draws = np.asarray(cube[0], dtype=float)
+    valid = _samples_within_declared_priors(
+        draws, problem.parameters, trained.theta_names
+    )
+    if not np.all(valid):
+        raise FloatingPointError(
+            "Diffusion prior-support transform produced non-finite or out-of-support "
+            "physical samples."
+        )
+    return draws
 
 
 def _validate_continuous_sbi_targets(parameter_space: ParameterSpace, theta_names: Sequence[str]) -> None:
@@ -1682,7 +2899,7 @@ def _validate_continuous_sbi_targets(parameter_space: ParameterSpace, theta_name
             unsupported.append(f"{name} ({prior_name})")
     if unsupported:
         raise ValueError(
-            "MAF and diffusion currently require continuous inferred parameters; unsupported: "
+            "MAF, MDN, and diffusion currently require continuous inferred parameters; unsupported: "
             + ", ".join(unsupported)
         )
 
@@ -1786,6 +3003,7 @@ def _maf_schema_from_training_set(training_set: SBITrainingSet) -> dict[str, obj
         "theta_names": list(training_set.theta_names),
         "x_names": list(training_set.x_names),
         "band_names": list(training_set.band_names),
+        "condition_names": list(training_set.condition_names),
         "photometric_context": None if context is None else context.specification(),
         "feature_transform": _transform_name(feature_transform),
         "native_input_supported": bool(native_supported),
@@ -1802,6 +3020,16 @@ def _validate_maf_schema(schema: Mapping[str, object]) -> None:
         names = tuple(str(name) for name in schema[key])
         if not names or len(set(names)) != len(names):
             raise ValueError(f"MAF checkpoint {key} must be non-empty and unique.")
+    condition_names = tuple(str(name) for name in schema.get("condition_names", ()))
+    if len(set(condition_names)) != len(condition_names):
+        raise ValueError("MAF checkpoint condition_names must be unique.")
+    if condition_names:
+        expected = tuple(f"condition:{name}" for name in condition_names)
+        x_names = tuple(str(name) for name in schema["x_names"])
+        if x_names[-len(expected) :] != expected:
+            raise ValueError(
+                "MAF checkpoint condition columns do not match condition_names."
+            )
     context = schema.get("photometric_context")
     if context is not None:
         PhotometricContext.from_specification(context)
@@ -1861,6 +3089,104 @@ def _transform_name(transform: PhotometryTransform) -> str:
     return str(transform)
 
 
+def _ordered_parameter_subset(
+    parameter_names: Sequence[str],
+    selected: Sequence[str] | None,
+    *,
+    label: str,
+) -> tuple[str, ...]:
+    """Validate names and return them in canonical model-parameter order."""
+
+    parameter_names = tuple(str(name) for name in parameter_names)
+    if selected is None:
+        return ()
+    requested = tuple(str(name) for name in selected)
+    if len(set(requested)) != len(requested):
+        raise ValueError(f"{label} parameter names must be unique.")
+    unknown = sorted(set(requested) - set(parameter_names))
+    if unknown:
+        raise ValueError(
+            f"{label} contains unknown parameter(s): " + ", ".join(unknown)
+        )
+    requested_set = set(requested)
+    return tuple(name for name in parameter_names if name in requested_set)
+
+
+def _condition_matrix(
+    values,
+    *,
+    condition_names: Sequence[str],
+    n_object: int,
+) -> np.ndarray:
+    """Return finite condition values with shape ``(n_object, n_condition)``."""
+
+    names = tuple(str(name) for name in condition_names)
+    n_object = int(n_object)
+    if not names:
+        if isinstance(values, Mapping) and not values:
+            values = None
+        if values is not None:
+            supplied = np.asarray(values)
+            if supplied.size:
+                raise ValueError(
+                    "This SBI estimator was not trained with condition variables."
+                )
+        return np.empty((n_object, 0), dtype=float)
+    if values is None:
+        raise ValueError(
+            "This SBI estimator requires condition values for: "
+            + ", ".join(names)
+        )
+
+    if isinstance(values, Mapping):
+        missing = [name for name in names if name not in values]
+        unknown = sorted(set(values) - set(names))
+        if missing:
+            raise ValueError(
+                "Missing SBI condition value(s): " + ", ".join(missing)
+            )
+        if unknown:
+            raise ValueError(
+                "Unknown SBI condition value(s): " + ", ".join(unknown)
+            )
+        columns = []
+        for name in names:
+            column = np.asarray(values[name], dtype=float)
+            if column.ndim == 0:
+                column = np.full(n_object, float(column), dtype=float)
+            elif column.shape == (1,):
+                column = np.full(n_object, float(column[0]), dtype=float)
+            elif column.shape != (n_object,):
+                raise ValueError(
+                    f"Condition {name!r} must be scalar or have shape "
+                    f"{(n_object,)}; got {column.shape}."
+                )
+            columns.append(column)
+        matrix = np.column_stack(columns)
+    else:
+        matrix = np.asarray(values, dtype=float)
+        if matrix.ndim == 0 and len(names) == 1:
+            matrix = np.full((n_object, 1), float(matrix), dtype=float)
+        elif matrix.ndim == 1:
+            if matrix.shape != (len(names),):
+                raise ValueError(
+                    f"Condition vector must have shape {(len(names),)}; "
+                    f"got {matrix.shape}."
+                )
+            matrix = np.broadcast_to(matrix[None, :], (n_object, len(names))).copy()
+        elif matrix.shape == (1, len(names)):
+            matrix = np.broadcast_to(matrix, (n_object, len(names))).copy()
+        elif matrix.shape != (n_object, len(names)):
+            raise ValueError(
+                "Condition matrix must have shape "
+                f"{(n_object, len(names))}; got {matrix.shape}."
+            )
+
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError("SBI condition values must be finite.")
+    return np.asarray(matrix, dtype=float)
+
+
 def _select_inferred_parameters(
     theta_full: np.ndarray,
     parameter_names: Sequence[str],
@@ -1887,3 +3213,50 @@ def _as_2d(values: np.ndarray, *, expected_cols: int, name: str) -> np.ndarray:
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} contains NaN or inf values.")
     return arr
+
+
+def _as_2d_allow_nonfinite(
+    values: np.ndarray,
+    *,
+    expected_cols: int,
+    name: str,
+) -> np.ndarray:
+    """Coerce native observations whose missing/censored entries may be NaN."""
+
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    if arr.ndim != 2 or arr.shape[1] != int(expected_cols):
+        raise ValueError(
+            f"{name} must have shape ({expected_cols},) or "
+            f"(n, {expected_cols}); got {arr.shape}."
+        )
+    return arr
+
+
+def _broadcast_native_state(
+    values,
+    *,
+    shape: tuple[int, int],
+    name: str,
+    dtype,
+    required: bool = False,
+    default=None,
+) -> np.ndarray:
+    """Broadcast one native state row across a catalog when requested."""
+
+    if values is None:
+        if required:
+            raise ValueError(f"State-aware native diffusion input requires {name}.")
+        return np.full(shape, default, dtype=dtype)
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim == 1:
+        array = array[None, :]
+    if array.shape == (1, shape[1]) and shape[0] > 1:
+        array = np.broadcast_to(array, shape)
+    if array.shape != shape:
+        raise ValueError(
+            f"{name} must have shape {shape}, {(shape[1],)}, or one row "
+            f"{(1, shape[1])}; got {array.shape}."
+        )
+    return np.asarray(array, dtype=dtype)

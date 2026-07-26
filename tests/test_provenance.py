@@ -30,39 +30,24 @@ def test_file_hash_changes_when_contents_change(tmp_path):
 
 
 def test_collect_run_provenance_records_seed_args_and_artifact_hash(tmp_path):
-    artifact = tmp_path / "cue_table.npy"
+    artifact = tmp_path / "model_table.npy"
     np.save(artifact, np.asarray([1.0, 2.0, 3.0]))
 
     provenance = collect_run_provenance(
-        paths={"cue_table": artifact},
+        paths={"model_table": artifact},
         seed=123,
-        command_args={"stage": "cue", "n_draws": 4},
+        command_args={"stage": "reference", "n_draws": 4},
         extra={"purpose": "unit-test"},
     )
 
     assert provenance["schema"] == "composed.provenance.v1"
     assert provenance["seed"] == 123
-    assert provenance["command_args"]["stage"] == "cue"
+    assert provenance["command_args"]["stage"] == "reference"
     assert provenance["extra"]["purpose"] == "unit-test"
-    assert provenance["artifacts"]["cue_table"]["exists"]
-    assert provenance["artifacts"]["cue_table"]["sha256"] == sha256_file(artifact)
+    assert provenance["artifacts"]["model_table"]["exists"]
+    assert provenance["artifacts"]["model_table"]["sha256"] == sha256_file(artifact)
     assert "numpy" in provenance["packages"]
     assert "commit" in provenance["git"] or provenance["git"]["available"] is False
-
-
-def test_collect_run_provenance_hashes_science_resource_environment_paths(tmp_path, monkeypatch):
-    ssp = tmp_path / "ssp.h5"
-    ssp.write_bytes(b"ssp data")
-    cue = tmp_path / "cue"
-    cue.mkdir()
-    (cue / "weights.pkl").write_bytes(b"cue data")
-    monkeypatch.setenv("DSPS_CONTINUUM_SSP_FILE", str(ssp))
-    monkeypatch.setenv("CUE_DATA_DIR", str(cue))
-
-    provenance = collect_run_provenance(repo_root=tmp_path)
-
-    assert provenance["artifacts"]["DSPS_CONTINUUM_SSP_FILE"]["sha256"] == sha256_file(ssp)
-    assert provenance["artifacts"]["CUE_DATA_DIR"]["n_files"] == 1
 
 
 def test_save_npz_with_provenance_writes_sidecar_and_requires_it(tmp_path):
@@ -132,12 +117,3 @@ def test_save_inference_result_embeds_basic_provenance(tmp_path):
     assert loaded.metadata["filters"] == ["g"]
     assert loaded.metadata["provenance"]["schema"] == "composed.provenance.v1"
     assert loaded.metadata["provenance"]["extra"]["sampler_name"] == "toy"
-
-
-def test_backend_validation_plot_stage_requires_provenance(tmp_path):
-    from examples.validation_backend_cross_validation import run_plot_stage
-
-    np.savez(tmp_path / "reference_spectra.npz", rest_wave_nm=np.asarray([100.0]))
-
-    with pytest.raises(FileNotFoundError, match="Missing provenance sidecar"):
-        run_plot_stage([], tmp_path)

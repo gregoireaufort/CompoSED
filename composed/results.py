@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import json
@@ -232,6 +233,52 @@ def load_inference_result(path: str | Path) -> InferenceResult:
         chain=arrays.get("chain"),
         metadata=payload.get("metadata", {}),
     )
+
+
+def problem_fingerprint(problem_or_specification: object) -> str:
+    """Return a deterministic digest of a Problem's scientific specification.
+
+    The fingerprint is based on the JSON-safe value returned by
+    ``Problem.specification()``. It therefore records the backend
+    configuration, ordered priors, filters, and observed arrays without
+    embedding those arrays in a result sidecar.
+    """
+
+    if hasattr(problem_or_specification, "specification"):
+        specification = problem_or_specification.specification()
+    elif isinstance(problem_or_specification, Mapping):
+        specification = problem_or_specification
+    else:
+        raise TypeError("problem_fingerprint expects a Problem or specification mapping.")
+    payload = json.dumps(
+        _json_safe(specification),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
+def require_result_matches_problem(result: InferenceResult, problem: object) -> InferenceResult:
+    """Reject a cached result that was produced for a different Problem.
+
+    Returning ``result`` makes the helper convenient in notebook load paths.
+    A missing specification is treated as stale rather than silently trusted.
+    """
+
+    saved_specification = result.metadata.get("problem")
+    if saved_specification is None:
+        raise ValueError(
+            "Saved inference result has no Problem specification and cannot be validated. "
+            "Rerun the inference."
+        )
+    saved = problem_fingerprint(saved_specification)
+    current = problem_fingerprint(problem)
+    if saved != current:
+        raise ValueError(
+            "Saved inference result does not match the current backend, priors, filters, or data. "
+            "Rerun the inference."
+        )
+    return result
 
 
 def _normalize_weights(weights: Sequence[float], n_expected: int) -> np.ndarray:

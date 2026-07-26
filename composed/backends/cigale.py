@@ -125,6 +125,13 @@ class CIGALEBackend(SEDBackend):
         self.module_parameters = module_parameters
         self._entries = _resolve_parameter_entries(modules, module_parameters)
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize configuration while discarding process-local CIGALE state."""
+
+        state = self.__dict__.copy()
+        state["_warehouse"] = None
+        return state
+
     def predict_photometry(self, params: Mapping[str, Any], filters: FilterSet | Sequence[object]) -> ModelPhotometry:
         """Predict observed-frame filter photometry in maggies."""
 
