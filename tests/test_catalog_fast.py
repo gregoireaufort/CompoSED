@@ -301,6 +301,10 @@ def test_restframe_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.samples, rest_grid.samples)
     assert np.allclose(loaded.log_prior, rest_grid.log_prior)
     assert np.array_equal(loaded.valid, rest_grid.valid)
+    assert loaded.meta["schema"] == "composed.restframe_spectral_grid.v2"
+    specification = loaded.meta["scientific_specification"]
+    assert specification["backend"]["type"].endswith("ToyRestBackend")
+    assert specification["parameters"] == ["log10_mass", "template"]
     assert provenance_path_for(path).exists()
     locked = load_restframe_spectral_grid(path, require_provenance_sidecar=True)
     assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
@@ -322,7 +326,7 @@ def test_legacy_formed_mass_rest_grid_is_rejected(tmp_path):
     )
 
     with pytest.raises(ValueError, match="Legacy rest-frame spectral grid"):
-        load_restframe_spectral_grid(path)
+        load_restframe_spectral_grid(path, require_provenance_sidecar=False)
 
 
 @pytest.mark.cigale

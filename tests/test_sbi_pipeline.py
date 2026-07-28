@@ -593,6 +593,11 @@ def test_simulate_configuration_rejects_negative_retry_budget():
         Simulate(n=8, noise_fn=small_noise, max_retries=-1)
 
 
+def test_simulate_configuration_rejects_unknown_failure_policy():
+    with pytest.raises(ValueError, match="failure_policy"):
+        Simulate(n=8, noise_fn=small_noise, failure_policy="ignore")
+
+
 def test_preexisting_photometry_encodes_availability_and_upper_limits_explicitly():
     training = SBITrainingSet.from_photometry(
         theta=np.asarray([[0.2], [0.7]]),

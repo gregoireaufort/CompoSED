@@ -13,6 +13,7 @@ from typing import ClassVar, Literal, Mapping, Sequence
 import numpy as np
 
 from composed._numerics import trapezoid
+from composed.errors import ModelDomainError
 from composed.transforms.sfh import normalize_sfh_to_formed_mass
 
 
@@ -299,7 +300,7 @@ class ContinuitySFH(SFHModel):
         )
         fixed_edges = np.asarray(self.lookback_edges_gyr, dtype=float)
         if age_gyr <= fixed_edges[-1]:
-            raise ValueError(
+            raise ModelDomainError(
                 f"Continuity SFH age {age_gyr:.6g} Gyr must exceed the oldest fixed "
                 f"lookback edge {fixed_edges[-1]:.6g} Gyr."
             )
@@ -310,7 +311,7 @@ class ContinuitySFH(SFHModel):
             for i, ratio in enumerate(ratios):
                 sfr_recent_to_old[i + 1] = sfr_recent_to_old[i] / (10.0**ratio)
         if not np.all(np.isfinite(sfr_recent_to_old)) or np.any(sfr_recent_to_old <= 0.0):
-            raise ValueError("Continuity SFH ratios produced a non-finite or non-positive SFR.")
+            raise ModelDomainError("Continuity SFH ratios produced a non-finite or non-positive SFR.")
 
         time_parts = []
         sfr_parts = []
@@ -479,16 +480,16 @@ def _resolve_age_gyr(
     raw_age = _finite_parameter(params, parameter)
     if age_kind == "fraction_of_universe":
         if not 0.0 < raw_age <= 1.0:
-            raise ValueError(f"SFH age fraction {parameter!r} must lie in (0, 1].")
+            raise ModelDomainError(f"SFH age fraction {parameter!r} must lie in (0, 1].")
         universe_age = _universe_age_gyr(redshift, cosmology)
         age_gyr = raw_age * universe_age
     else:
         age_gyr = raw_age
         universe_age = None if redshift is None else _universe_age_gyr(redshift, cosmology)
     if not np.isfinite(age_gyr) or age_gyr <= 0.0:
-        raise ValueError(f"SFH age parameter {parameter!r} must produce a positive finite age.")
+        raise ModelDomainError(f"SFH age parameter {parameter!r} must produce a positive finite age.")
     if universe_age is not None and age_gyr > universe_age + 1.0e-10:
-        raise ValueError(
+        raise ModelDomainError(
             f"SFH age {age_gyr:.6g} Gyr exceeds the Universe age "
             f"{universe_age:.6g} Gyr at z={float(redshift):.6g}."
         )
@@ -529,7 +530,7 @@ def _finite_parameter(params: Mapping[str, object], name: str) -> float:
 def _cigale_age_myr(age_gyr: float) -> int:
     age_myr = int(np.rint(1000.0 * float(age_gyr)))
     if age_myr < 2:
-        raise ValueError("CIGALE named SFHs require a galaxy age of at least 2 Myr.")
+        raise ModelDomainError("CIGALE named SFHs require a galaxy age of at least 2 Myr.")
     return age_myr
 
 

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from composed import Gaussian, Problem, SEDDataset
+import composed.problem as problem_module
 from composed.backends.base import ModelPhotometry, SEDBackend
 from composed.filters import FilterSet
 from inftools.core import SamplingResult
@@ -34,6 +35,16 @@ class ConfigurableBackend(SEDBackend):
         del filters
         flux = self.amplitude_scale * float(params["amplitude"])
         return ModelPhotometry(("g",), np.asarray([flux]))
+
+
+GLOBAL_TRANSFORM_SCALE = 1.0
+
+
+def transform_with_referenced_global(params):
+    return {
+        **params,
+        "amplitude": GLOBAL_TRANSFORM_SCALE * float(params["amplitude"]),
+    }
 
 
 def make_problem(*, observed_flux=2.0, amplitude_scale=1.0):
@@ -104,6 +115,51 @@ def test_problem_fingerprint_is_stable_across_json_roundtrip():
     restored = json.loads(json.dumps(specification))
 
     assert problem_fingerprint(specification) == problem_fingerprint(restored)
+
+
+def test_problem_fingerprint_tracks_referenced_global_transform_values(monkeypatch):
+    problem = make_problem()
+    problem.parameter_transform = transform_with_referenced_global
+    problem.__post_init__()
+    first_fingerprint = problem_fingerprint(problem)
+    first_log_likelihood = problem.log_likelihood([2.0])
+
+    monkeypatch.setitem(
+        transform_with_referenced_global.__globals__,
+        "GLOBAL_TRANSFORM_SCALE",
+        2.0,
+    )
+    second_fingerprint = problem_fingerprint(problem)
+    second_log_likelihood = problem.log_likelihood([2.0])
+
+    assert second_fingerprint != first_fingerprint
+    assert second_log_likelihood != first_log_likelihood
+
+
+def test_engine_identity_hashes_source_without_recording_install_path(monkeypatch, tmp_path):
+    source = tmp_path / "engine.py"
+    source.write_text("ENGINE_VALUE = 1\n")
+    specification = type("Specification", (), {"origin": str(source)})()
+    monkeypatch.setattr(problem_module.importlib.util, "find_spec", lambda name: specification)
+
+    first = problem_module._module_identity("example_engine")
+    source.write_text("ENGINE_VALUE = 2\n")
+    second = problem_module._module_identity("example_engine")
+
+    assert first["source_name"] == "engine.py"
+    assert first["source_sha256"] != second["source_sha256"]
+    assert "origin" not in first
+    assert str(tmp_path) not in json.dumps(first)
+
+
+def test_external_engine_identity_does_not_record_machine_local_path(tmp_path):
+    engine_tree = tmp_path / "FSPS"
+    engine_tree.mkdir()
+
+    identity = problem_module._scientific_directory_identity(str(engine_tree))
+
+    assert identity == {"configured": True, "exists": True}
+    assert str(tmp_path) not in json.dumps(identity)
 
 
 def test_cached_result_must_match_backend_filters_and_observed_data():

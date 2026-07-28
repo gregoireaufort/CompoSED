@@ -7,7 +7,11 @@ from typing import Any, Mapping, Sequence
 import json
 
 import numpy as np
-from composed.provenance import collect_run_provenance
+from composed.provenance import (
+    artifact_provenance,
+    collect_run_provenance,
+    verify_artifact_provenance,
+)
 
 
 class InferenceFailure(RuntimeError):
@@ -176,17 +180,6 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
     """Save arrays to ``.npz`` and metadata to a JSON sidecar."""
 
     npz_path, json_path = _result_paths(path)
-    metadata = dict(result.metadata)
-    metadata.setdefault(
-        "provenance",
-        collect_run_provenance(
-            extra={
-                "sampler_name": result.sampler_name,
-                "parameter_names": tuple(result.parameter_names),
-                "n_sample": int(result.samples.shape[0]),
-            }
-        ),
-    )
     arrays = {
         "samples": result.samples,
         "weights": result.weights,
@@ -201,6 +194,20 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
         arrays["chain"] = result.chain
     npz_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(npz_path, **arrays)
+    metadata = dict(result.metadata)
+    provenance = dict(
+        metadata.get("provenance")
+        or collect_run_provenance(
+            extra={
+                "artifact_type": "InferenceResult",
+                "sampler_name": result.sampler_name,
+                "parameter_names": tuple(result.parameter_names),
+                "n_sample": int(result.samples.shape[0]),
+            }
+        )
+    )
+    provenance["output_artifact"] = artifact_provenance(npz_path)
+    metadata["provenance"] = provenance
     json_path.write_text(
         json.dumps(
             {
@@ -215,13 +222,31 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
     return npz_path, json_path
 
 
-def load_inference_result(path: str | Path) -> InferenceResult:
-    """Load a result saved by ``save_inference_result``."""
+def load_inference_result(
+    path: str | Path,
+    *,
+    verify_provenance: bool = True,
+) -> InferenceResult:
+    """Load a result saved by :func:`save_inference_result`.
+
+    Verification is strict by default. Pass ``verify_provenance=False`` only
+    to inspect a legacy result that predates content-hashed artifacts.
+    """
 
     npz_path, json_path = _result_paths(path)
+    payload = json.loads(json_path.read_text()) if json_path.exists() else {}
+    if verify_provenance:
+        provenance = payload.get("metadata", {}).get("provenance")
+        if not isinstance(provenance, Mapping):
+            raise ValueError(
+                f"Saved inference result {npz_path} has no provenance record. "
+                "Rerun it, or pass verify_provenance=False only for legacy inspection."
+            )
+        if provenance.get("schema") != "composed.provenance.v1":
+            raise ValueError(f"Unsupported inference-result provenance schema for {npz_path}.")
+        verify_artifact_provenance(npz_path, provenance)
     with np.load(npz_path, allow_pickle=False) as data:
         arrays = {key: data[key] for key in data.files}
-    payload = json.loads(json_path.read_text()) if json_path.exists() else {}
     return InferenceResult(
         samples=arrays["samples"],
         logp=arrays.get("logp"),

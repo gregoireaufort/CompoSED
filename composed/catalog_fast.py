@@ -17,8 +17,10 @@ from composed.catalog import (
     evaluate_catalog_model_grid_likelihood,
 )
 from composed.data import SEDDataset
+from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.priors import Prior
+from composed.problem import _backend_configuration, _stable_value
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import (
     MASS_CONVENTION_SCHEMA,
@@ -116,9 +118,9 @@ def save_restframe_spectral_grid(grid: RestFrameSpectralGrid, path: str | Path) 
 def load_restframe_spectral_grid(
     path: str | Path,
     *,
-    require_provenance_sidecar: bool = False,
+    require_provenance_sidecar: bool = True,
 ) -> RestFrameSpectralGrid:
-    """Load a rest-frame spectral grid saved by ``save_restframe_spectral_grid``."""
+    """Load and verify a rest-frame grid saved by ``save_restframe_spectral_grid``."""
 
     path = Path(path)
     provenance = None
@@ -133,6 +135,11 @@ def load_restframe_spectral_grid(
             "CompoSED version; older grids were normalized by formed mass."
         )
     meta = _decode_saved_meta(data["meta"].item()) if "meta" in data.files else {}
+    if require_provenance_sidecar and meta.get("schema") != "composed.restframe_spectral_grid.v2":
+        raise ValueError(
+            "Rest-frame spectral grid lacks the v0.1.1 scientific specification. "
+            "Rebuild it before scientific reuse."
+        )
     if provenance is not None:
         meta["provenance"] = provenance
     return RestFrameSpectralGrid(
@@ -251,7 +258,7 @@ def build_restframe_spectral_grid(
                 wavelength_grid = wave_nm
             elif not np.array_equal(wave_nm, wavelength_grid):
                 luminosity_w_per_nm = np.interp(wavelength_grid, wave_nm, luminosity_w_per_nm, left=np.nan, right=np.nan)
-        except (FloatingPointError, OverflowError, ZeroDivisionError):
+        except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         spectra[i] = luminosity_w_per_nm
         valid[i] = np.all(np.isfinite(luminosity_w_per_nm)) and np.all(luminosity_w_per_nm >= 0.0)
@@ -273,7 +280,25 @@ def build_restframe_spectral_grid(
         mass_normalization=mass_norm,
         mass_reference=mass_reference,
         meta={
+            "schema": "composed.restframe_spectral_grid.v2",
             "excluded_parameters": tuple(excluded_parameters),
+            "scientific_specification": {
+                "backend": _backend_configuration(backend),
+                "parameters": list(parameter_space.names),
+                "priors": {
+                    name: _stable_value(parameter_space.priors[name])
+                    for name in parameter_space.names
+                },
+                "requested_wavelength_nm": (
+                    None
+                    if requested_wave is None
+                    else {
+                        "shape": list(requested_wave.shape),
+                        "minimum": float(requested_wave[0]),
+                        "maximum": float(requested_wave[-1]),
+                    }
+                ),
+            },
             "wavelength_unit": "nm",
             "luminosity_unit": "W/nm",
             "mass_scale_applied": False,

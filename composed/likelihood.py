@@ -8,6 +8,7 @@ from typing import Sequence
 import numpy as np
 
 from composed.data import SEDDataset, SpectrumDataset
+from composed.errors import ModelDomainError
 from composed.parameters import ParameterSpace
 from composed.units import MassNormalization, backend_mass_reference, convert_photometric_flux
 
@@ -81,7 +82,7 @@ class GaussianPhotometricLikelihood:
 
         try:
             model_flux = self._predict_active_model_flux(theta, idx=idx, active_bands=active_bands)
-        except (FloatingPointError, OverflowError, ZeroDivisionError):
+        except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             return -np.inf
 
         if model_flux.shape != f_obs.shape:
@@ -274,7 +275,7 @@ class GaussianSpectralLikelihood:
 
         try:
             model_flux = self._predict_active_model_flux(theta, wavelength)
-        except (FloatingPointError, OverflowError, ZeroDivisionError):
+        except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             return -np.inf
 
         if model_flux.shape != f_obs.shape:

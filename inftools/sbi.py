@@ -838,6 +838,7 @@ def simulate_training_set(
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator | None = None,
     max_retries: int = 100,
+    failure_policy: Literal["raise", "resample"] = "raise",
     return_metadata: bool = False,
     batch_size: int = 1,
     n_workers: int = 1,
@@ -852,7 +853,12 @@ def simulate_training_set(
     expose ``simulate_with_uncertainty`` and the exact Gaussian sigma used for
     every realization is returned alongside ``x``. For expensive backends such as FSPS, set
     ``n_workers > 1`` and a modest ``batch_size`` so each worker keeps its own
-    backend instance alive across many forward-model calls.  Process execution
+    backend instance alive across many forward-model calls. By default, the
+    first failed prior draw raises: silently replacing failed rows would train
+    on the declared prior conditioned on simulator success. Set
+    ``failure_policy="resample"`` only when that conditioning is scientifically
+    intended; the returned metadata records the failures and acceptance
+    fraction. Process execution
     requires ``simulator`` and ``noise_fn`` to be pickleable; in notebooks,
     define them as top-level functions/classes or use ``executor="thread"``
     only for thread-safe simulators.
@@ -866,6 +872,9 @@ def simulate_training_set(
     max_retries = int(max_retries)
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative.")
+    failure_policy = str(failure_policy).lower()
+    if failure_policy not in {"raise", "resample"}:
+        raise ValueError("failure_policy must be 'raise' or 'resample'.")
     batch_size = int(batch_size)
     n_workers = int(n_workers)
     if batch_size <= 0:
@@ -883,6 +892,10 @@ def simulate_training_set(
             return (*output, {
                 "attempts": 0,
                 "failures": [],
+                "n_failures": 0,
+                "acceptance_fraction": 1.0,
+                "failure_policy": failure_policy,
+                "returned_prior": "declared_prior",
                 "batch_size": batch_size,
                 "n_workers": n_workers,
                 "executor": executor,
@@ -899,6 +912,7 @@ def simulate_training_set(
             noise_fn=noise_fn,
             rng=rng,
             max_retries=max_retries,
+            failure_policy=failure_policy,
             return_sigma=bool(return_sigma),
         )
     else:
@@ -909,6 +923,7 @@ def simulate_training_set(
             noise_fn=noise_fn,
             rng=rng,
             max_retries=max_retries,
+            failure_policy=failure_policy,
             batch_size=batch_size,
             n_workers=n_workers,
             executor=executor,
@@ -918,6 +933,14 @@ def simulate_training_set(
 
     metadata.update(
         {
+            "n_failures": len(metadata["failures"]),
+            "acceptance_fraction": float(n / metadata["attempts"]),
+            "failure_policy": failure_policy,
+            "returned_prior": (
+                "simulator_success_conditioned"
+                if metadata["failures"]
+                else "declared_prior"
+            ),
             "batch_size": batch_size,
             "n_workers": n_workers,
             "executor": executor,
@@ -925,6 +948,14 @@ def simulate_training_set(
             "returned_sigma": bool(return_sigma),
         }
     )
+    if failure_policy == "resample" and metadata["failures"]:
+        warnings.warn(
+            f"Replaced {len(metadata['failures'])} failed simulation(s). Returned theta rows "
+            "are draws from the declared prior conditioned on simulator success; inspect "
+            "metadata['failures'] before training.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if return_metadata:
         if return_sigma:
             return theta_out, x_out, sigma_out, metadata
@@ -942,6 +973,7 @@ def _simulate_training_set_serial(
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator,
     max_retries: int,
+    failure_policy: Literal["raise", "resample"],
     return_sigma: bool,
 ):
     failures = []
@@ -970,7 +1002,19 @@ def _simulate_training_set_serial(
                 if sigma.shape != x.shape or not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
                     raise ValueError("Simulator returned invalid uncertainty values.")
         except Exception as exc:
-            failures.append({"theta": theta, "error": repr(exc)})
+            failure = {
+                "theta": np.asarray(theta, dtype=float),
+                "error_type": f"{type(exc).__module__}.{type(exc).__name__}",
+                "error": str(exc),
+            }
+            if failure_policy == "raise":
+                raise RuntimeError(
+                    "Training simulation failed for a draw from the declared prior. "
+                    f"theta={np.asarray(theta, dtype=float).tolist()}, error={type(exc).__name__}: {exc}. "
+                    "Fix the prior/parameterization or explicitly set "
+                    "failure_policy='resample' to train on the simulator-success-conditioned prior."
+                ) from exc
+            failures.append(failure)
             continue
         theta_rows.append(theta)
         x_rows.append(x)
@@ -990,6 +1034,7 @@ def _simulate_training_set_parallel(
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator,
     max_retries: int,
+    failure_policy: Literal["raise", "resample"],
     batch_size: int,
     n_workers: int,
     executor: Literal["process", "thread"],
@@ -1047,6 +1092,15 @@ def _simulate_training_set_parallel(
                 x_rows.extend(good_x)
                 sigma_rows.extend(good_sigma)
                 failures.extend(bad)
+                if failure_policy == "raise" and bad:
+                    first = bad[0]
+                    raise RuntimeError(
+                        "Training simulation failed for a draw from the declared prior. "
+                        f"theta={np.asarray(first['theta'], dtype=float).tolist()}, "
+                        f"error={first['error_type']}: {first['error']}. "
+                        "Fix the prior/parameterization or explicitly set "
+                        "failure_policy='resample' to train on the simulator-success-conditioned prior."
+                    )
 
             if len(theta_rows) < n and len(failures) > max_retries:
                 raise RuntimeError(
@@ -1402,7 +1456,13 @@ def _simulate_chunk_from_worker(payload):
                 if sigma.shape != x.shape or not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
                     raise ValueError("Simulator returned invalid uncertainty values.")
         except Exception as exc:
-            failures.append({"theta": np.asarray(theta, dtype=float), "error": repr(exc)})
+            failures.append(
+                {
+                    "theta": np.asarray(theta, dtype=float),
+                    "error_type": f"{type(exc).__module__}.{type(exc).__name__}",
+                    "error": str(exc),
+                }
+            )
             continue
         good_theta.append(np.asarray(theta, dtype=float))
         good_x.append(x)

@@ -300,6 +300,11 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.flux, grid.flux)
     assert np.allclose(loaded.log_prior, grid.log_prior)
     assert np.array_equal(loaded.valid, grid.valid)
+    assert loaded.meta["schema"] == "composed.photometric_model_grid.v2"
+    specification = loaded.meta["scientific_specification"]
+    assert specification["backend"]["type"].endswith("PerMassTemplateBackend")
+    assert specification["parameters"] == ["template"]
+    assert specification["band_names"] == ["u", "g"]
     assert provenance_path_for(path).exists()
     locked = load_photometric_model_grid(path, require_provenance_sidecar=True)
     assert locked.meta["provenance"]["schema"] == "composed.provenance.v1"
@@ -322,7 +327,7 @@ def test_legacy_formed_mass_photometric_grid_is_rejected(tmp_path):
     )
 
     with pytest.raises(ValueError, match="Legacy photometric model grid"):
-        load_photometric_model_grid(path)
+        load_photometric_model_grid(path, require_provenance_sidecar=False)
 
 
 def test_mass_grid_profiles_complete_upper_limit_likelihood():

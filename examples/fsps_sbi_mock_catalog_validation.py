@@ -152,7 +152,6 @@ def generate_fsps_mock_catalog(
     n_train: int,
     n_test: int,
     seed: int,
-    max_retries: int = 100,
     simulation_batch_size: int = 1,
     n_workers: int = 1,
     executor: str = "serial",
@@ -173,7 +172,6 @@ def generate_fsps_mock_catalog(
             infer=INFERRED_THETA_NAMES,
             context="flux",
             feature_transform=flux_to_abmag_features,
-            max_retries=max_retries,
             batch_size=simulation_batch_size,
             n_workers=n_workers,
             executor=executor,
@@ -396,7 +394,6 @@ def run_validation(
     steps: int = 32,
     seed: int = 20260706,
     regenerate: bool = False,
-    max_retries: int = 100,
     simulation_batch_size: int = 1,
     n_workers: int = 1,
     executor: str = "serial",
@@ -419,7 +416,6 @@ def run_validation(
             n_train=n_train,
             n_test=n_test,
             seed=seed,
-            max_retries=max_retries,
             simulation_batch_size=simulation_batch_size,
             n_workers=n_workers,
             executor=executor,
@@ -433,7 +429,6 @@ def run_validation(
                 "n_train": int(n_train),
                 "n_test": int(n_test),
                 "seed": int(seed),
-                "max_retries": int(max_retries),
                 "simulation_batch_size": int(simulation_batch_size),
                 "n_workers": int(n_workers),
                 "executor": executor,
@@ -462,7 +457,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int, default=256)
     parser.add_argument("--steps", type=int, default=32)
     parser.add_argument("--seed", type=int, default=20260706)
-    parser.add_argument("--max-retries", type=int, default=100)
     parser.add_argument("--simulation-batch-size", type=int, default=1)
     parser.add_argument("--n-workers", type=int, default=1)
     parser.add_argument("--executor", choices=["serial", "thread", "process"], default="serial")
@@ -483,7 +477,6 @@ def main() -> None:
         steps=args.steps,
         seed=args.seed,
         regenerate=args.regenerate,
-        max_retries=args.max_retries,
         simulation_batch_size=args.simulation_batch_size,
         n_workers=args.n_workers,
         executor=args.executor,

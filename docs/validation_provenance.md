@@ -28,6 +28,10 @@ This writes:
 - `reference_spectra.npz`: numerical arrays;
 - `reference_spectra.provenance.json`: code, environment, and input hashes.
 
+The sidecar also stores the SHA256 of `reference_spectra.npz` itself. The
+default loader therefore detects a cache that was edited, truncated, or
+replaced after the provenance was written.
+
 Plotting or downstream validation cells should fail loudly when the sidecar is
 missing:
 
@@ -37,6 +41,12 @@ from composed.provenance import require_provenance
 require_provenance(output_dir / "reference_spectra.npz")
 data = np.load(output_dir / "reference_spectra.npz")
 ```
+
+`load_inference_result`, `load_photometric_model_grid`, and
+`load_restframe_spectral_grid` perform the equivalent verification by default.
+Their explicit `verify_provenance=False` or
+`require_provenance_sidecar=False` escape hatches exist only for inspecting
+legacy products; do not use an unverified artifact for a reported result.
 
 The sidecar records:
 
@@ -48,6 +58,14 @@ The sidecar records:
 - random seed;
 - command arguments;
 - any extra stage-specific metadata.
+
+`Problem.specification()` separately fingerprints the scientific calculation:
+data/noise arrays, units, masks, priors, backend configuration and engine
+versions, filter curves, and parameter-transform code including referenced
+global values. It uses engine source hashes and revision information rather
+than absolute installation paths, so equivalent calculations can be compared
+across machines. The sidecar still records local paths for provenance and
+debugging.
 
 For science validation, treat SSP grids, filter curves, catalogs, and cached
 reference spectra as model inputs. They should be included in

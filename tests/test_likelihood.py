@@ -3,6 +3,7 @@ import pytest
 
 from composed.backends.mock import MockBackend
 from composed.data import SEDDataset
+from composed.errors import ModelDomainError
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
 from composed.priors import DeltaPrior, NormalPrior, UniformPrior
@@ -279,6 +280,22 @@ def test_backend_numerical_error_returns_minus_inf():
     backend = MockBackend([1.0], band_names=["g"], fail_on_call=True)
     ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
     assert GaussianPhotometricLikelihood(backend, data, ps).log_prob([0.0]) == -np.inf
+
+
+def test_controlled_model_domain_error_returns_minus_inf_but_simulation_is_loud():
+    class DomainLimitedBackend(MockBackend):
+        def predict_photometry(self, params, filters):
+            del params, filters
+            raise ModelDomainError("galaxy age exceeds Universe age")
+
+    data = SEDDataset(["g"], flux=np.array([1.0]), sigma=np.array([0.1]))
+    backend = DomainLimitedBackend([1.0], band_names=["g"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+    likelihood = GaussianPhotometricLikelihood(backend, data, ps)
+
+    assert likelihood.log_prob([0.0]) == -np.inf
+    with pytest.raises(ModelDomainError, match="exceeds Universe age"):
+        likelihood.simulate([0.0], noise_fn=lambda flux: np.zeros_like(flux))
 
 
 @pytest.mark.parametrize("bad_flux", [[np.nan], [np.inf]])

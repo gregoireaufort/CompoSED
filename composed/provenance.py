@@ -158,7 +158,12 @@ def read_provenance(path: str | Path) -> dict[str, Any]:
 
 
 def require_provenance(artifact_path: str | Path) -> dict[str, Any]:
-    """Load an artifact's provenance sidecar, raising a clear error if missing."""
+    """Load and verify an artifact's provenance sidecar.
+
+    New CompoSED artifacts record the SHA256 of the output file itself. A
+    sidecar without that record is not accepted as verified provenance; legacy
+    products must be loaded through an explicitly unverified code path.
+    """
 
     provenance_path = provenance_path_for(artifact_path)
     if not provenance_path.exists():
@@ -169,7 +174,32 @@ def require_provenance(artifact_path: str | Path) -> dict[str, Any]:
     provenance = read_provenance(provenance_path)
     if provenance.get("schema") != "composed.provenance.v1":
         raise ValueError(f"Unsupported provenance schema in {provenance_path}.")
+    verify_artifact_provenance(artifact_path, provenance)
     return provenance
+
+
+def verify_artifact_provenance(
+    artifact_path: str | Path,
+    provenance: Mapping[str, Any],
+) -> None:
+    """Raise if ``artifact_path`` does not match its recorded content hash."""
+
+    recorded = provenance.get("output_artifact")
+    if not isinstance(recorded, Mapping) or recorded.get("kind") != "file":
+        raise ValueError(
+            f"Provenance for {artifact_path} has no verified output_artifact hash. "
+            "Regenerate the artifact with this CompoSED version."
+        )
+    artifact_path = Path(artifact_path)
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Provenance refers to missing artifact {artifact_path}.")
+    expected = str(recorded.get("sha256", ""))
+    actual = sha256_file(artifact_path)
+    if not expected or actual != expected:
+        raise ValueError(
+            f"Artifact hash mismatch for {artifact_path}. The file no longer matches "
+            "its provenance sidecar."
+        )
 
 
 def save_npz_with_provenance(
@@ -196,6 +226,8 @@ def save_npz_with_provenance(
             command_args=command_args,
             extra=extra,
         )
+    provenance = dict(provenance)
+    provenance["output_artifact"] = artifact_provenance(path)
     provenance_path = write_provenance(provenance, provenance_path_for(path))
     return path, provenance_path
 

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 import importlib.metadata
 import json
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 import numpy as np
 
@@ -1140,6 +1140,7 @@ class Simulate:
     context: PhotometricContext | str = "snr_logsigma"
     feature_transform: ObservationTransform | None = None
     max_retries: int = 100
+    failure_policy: Literal["raise", "resample"] = "raise"
     batch_size: int = 1
     n_workers: int = 1
     executor: str = "serial"
@@ -1152,6 +1153,10 @@ class Simulate:
             raise TypeError("Simulate.noise_fn must be callable.")
         if int(self.max_retries) < 0:
             raise ValueError("Simulate.max_retries must be non-negative.")
+        failure_policy = str(self.failure_policy).lower()
+        if failure_policy not in {"raise", "resample"}:
+            raise ValueError("Simulate.failure_policy must be 'raise' or 'resample'.")
+        object.__setattr__(self, "failure_policy", failure_policy)
         if self.condition_on is not None:
             condition_names = tuple(str(name) for name in self.condition_on)
             if len(set(condition_names)) != len(condition_names):
@@ -2136,6 +2141,7 @@ def simulate_sbi_training_set(
         noise_fn=simulation.noise_fn,
         rng=generator,
         max_retries=int(simulation.max_retries),
+        failure_policy=simulation.failure_policy,
         return_metadata=True,
         batch_size=int(simulation.batch_size),
         n_workers=int(simulation.n_workers),
@@ -2278,6 +2284,7 @@ def simulate_photometric_training_set(
     context: PhotometricContext | str = "flux",
     rng: np.random.Generator | int | None = None,
     max_retries: int = 100,
+    failure_policy: Literal["raise", "resample"] = "raise",
     simulation_batch_size: int = 1,
     n_workers: int = 1,
     executor: str = "serial",
@@ -2325,6 +2332,7 @@ def simulate_photometric_training_set(
             context=context,
             feature_transform=feature_transform,
             max_retries=max_retries,
+            failure_policy=failure_policy,
             batch_size=simulation_batch_size,
             n_workers=n_workers,
             executor=executor,
@@ -2346,6 +2354,7 @@ def train_diffusion_photometric_sbi(
     feature_transform: PhotometryTransform = "flux",
     rng: np.random.Generator | int | None = None,
     max_retries: int = 100,
+    failure_policy: Literal["raise", "resample"] = "raise",
     simulation_batch_size: int = 1,
     n_workers: int = 1,
     executor: str = "serial",
@@ -2376,6 +2385,7 @@ def train_diffusion_photometric_sbi(
         feature_transform=feature_transform,
         rng=rng,
         max_retries=max_retries,
+        failure_policy=failure_policy,
         simulation_batch_size=simulation_batch_size,
         n_workers=n_workers,
         executor=executor,

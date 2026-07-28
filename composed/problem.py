@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from hashlib import sha256
+import importlib.metadata
+import importlib.util
+import inspect
+import json
+import os
 from pathlib import Path
+import subprocess
+from types import ModuleType
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -205,13 +212,17 @@ class Problem:
         mass_normalization = getattr(self.backend, "mass_normalization", None)
         mass_reference = backend_mass_reference(self.backend)
         return {
+            "schema": "composed.problem.v2",
             "backend": f"{type(self.backend).__module__}.{type(self.backend).__name__}",
             "backend_configuration": _backend_configuration(self.backend),
             "mass_normalization": getattr(mass_normalization, "value", mass_normalization),
             "mass_reference": getattr(mass_reference, "value", mass_reference),
             "mass_convention": MASS_CONVENTION_SCHEMA,
             "parameters": tuple(self.parameters.names),
-            "priors": {name: repr(self.parameters.priors[name]) for name in self.parameters.names},
+            "priors": {
+                name: _stable_value(self.parameters.priors[name])
+                for name in self.parameters.names
+            },
             "data": type(self.data).__name__,
             "data_configuration": _dataset_specification(self.data),
             "filters": _filter_specification(self.filters),
@@ -838,7 +849,7 @@ def _filter_specification(filters: object | None) -> dict[str, object] | None:
 
 
 def _backend_configuration(backend: object) -> dict[str, object]:
-    """Extract constructor-level backend configuration, excluding live state."""
+    """Extract constructor configuration and engine identity, excluding live state."""
 
     type_name = f"{type(backend).__module__}.{type(backend).__name__}"
     if is_dataclass(backend):
@@ -854,19 +865,77 @@ def _backend_configuration(backend: object) -> dict[str, object]:
             for name, value in backend_state.items()
             if not name.startswith("_")
         }
-    return {"type": type_name, "configuration": configuration}
+    module_name = type(backend).__module__.lower()
+    package_names: tuple[str, ...] = ("composed",)
+    environment: dict[str, object] = {}
+    if module_name.endswith(".fsps"):
+        package_names += ("fsps", "sedpy", "astropy")
+        environment["SPS_HOME"] = _scientific_directory_identity(os.environ.get("SPS_HOME"))
+    elif module_name.endswith(".cigale"):
+        package_names += ("pcigale", "cigale", "sedpy", "astropy")
+
+    return {
+        "type": type_name,
+        "configuration": configuration,
+        "package_versions": {
+            name: _distribution_version(name)
+            for name in package_names
+        },
+        "engine_modules": {
+            name: _module_identity(name)
+            for name in package_names
+            if name != "composed"
+        },
+        "environment": environment,
+    }
 
 
-def _callable_specification(function: object | None) -> dict[str, object] | None:
-    """Identify a parameter transform and hash its Python operations."""
+def _callable_specification(
+    function: object | None,
+    *,
+    _seen: set[int] | None = None,
+) -> dict[str, object] | None:
+    """Identify a callable, including referenced closure and global values."""
 
     if function is None:
         return None
     name = f"{getattr(function, '__module__', type(function).__module__)}."
     name += getattr(function, "__qualname__", type(function).__qualname__)
+    if _seen is None:
+        _seen = set()
+    identity = id(function)
+    if identity in _seen:
+        return {"name": name, "recursive_reference": True}
+    _seen.add(identity)
+
     code = getattr(function, "__code__", None)
     if code is None:
-        return {"name": name, "configuration": _stable_value(function)}
+        state = getattr(function, "__dict__", None)
+        return {
+            "name": name,
+            "type": f"{type(function).__module__}.{type(function).__name__}",
+            "configuration": _stable_value(state) if state else None,
+        }
+
+    try:
+        closure_variables = inspect.getclosurevars(function)
+    except TypeError:
+        closure_variables = None
+    dependencies: dict[str, object] = {
+        "nonlocals": {},
+        "globals": {},
+        "unbound": [],
+    }
+    if closure_variables is not None:
+        dependencies["nonlocals"] = {
+            key: _callable_dependency_specification(value, _seen)
+            for key, value in sorted(closure_variables.nonlocals.items())
+        }
+        dependencies["globals"] = {
+            key: _callable_dependency_specification(value, _seen)
+            for key, value in sorted(closure_variables.globals.items())
+        }
+        dependencies["unbound"] = sorted(closure_variables.unbound)
 
     digest = sha256()
     digest.update(code.co_code)
@@ -877,7 +946,100 @@ def _callable_specification(function: object | None) -> dict[str, object] | None
     closure = getattr(function, "__closure__", None)
     if closure:
         digest.update(repr([_stable_value(cell.cell_contents) for cell in closure]).encode("utf-8"))
-    return {"name": name, "code_sha256": digest.hexdigest()}
+    digest.update(
+        json.dumps(dependencies, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    )
+    return {
+        "name": name,
+        "code_sha256": digest.hexdigest(),
+        "dependencies": dependencies,
+    }
+
+
+def _callable_dependency_specification(value: object, seen: set[int]) -> object:
+    if isinstance(value, ModuleType):
+        return {
+            "module": value.__name__,
+            "version": getattr(value, "__version__", _distribution_version(value.__name__.split(".")[0])),
+        }
+    if callable(value):
+        return _callable_specification(value, _seen=set(seen))
+    return _stable_value(value)
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _module_identity(name: str) -> dict[str, object]:
+    try:
+        specification = importlib.util.find_spec(name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        specification = None
+    if specification is None:
+        return {"available": False}
+
+    identity: dict[str, object] = {"available": True}
+    origin = specification.origin
+    if origin not in {None, "built-in", "frozen"}:
+        source_path = Path(origin)
+        identity["source_name"] = source_path.name
+        if source_path.is_file():
+            identity["source_sha256"] = _sha256_file(source_path)
+    return identity
+
+
+def _scientific_directory_identity(path: str | None) -> dict[str, object]:
+    """Describe an external engine tree without encoding its machine-local path."""
+
+    if not path:
+        return {"configured": False}
+    directory = Path(path).expanduser()
+    identity: dict[str, object] = {
+        "configured": True,
+        "exists": directory.is_dir(),
+    }
+    if not directory.is_dir():
+        return identity
+
+    commit = _run_git(directory, "rev-parse", "HEAD")
+    if commit is not None:
+        identity["git_commit"] = commit
+        status = _run_git(directory, "status", "--porcelain", "--untracked-files=no")
+        identity["git_dirty"] = bool(status)
+        if status:
+            diff = _run_git(directory, "diff", "--binary", "HEAD")
+            if diff is not None:
+                identity["git_diff_sha256"] = sha256(diff.encode("utf-8")).hexdigest()
+    return identity
+
+
+def _run_git(directory: Path, *args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(directory), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stable_value(value: object) -> object:

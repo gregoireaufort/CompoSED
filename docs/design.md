@@ -164,6 +164,16 @@ mapping, units, masks, and mass normalization. The default
 recorded reference flux, accepts negative noisy flux, and makes heterogeneous
 catalog depths explicit.
 
+Training simulation does not silently repair an invalid prior. The default
+`Simulate.failure_policy` is `"raise"`: one failed forward model stops the run
+and reports its parameter vector. A scientist may explicitly select
+`failure_policy="resample"`, but the resulting theta table is then sampled from
+the declared prior conditional on simulator success. That fact, the acceptance
+fraction, and failure examples are stored in the training metadata. For coupled
+physical support such as age versus redshift, prefer a valid
+parameterization such as `age_kind="fraction_of_universe"` rather than
+success-conditioned rejection.
+
 Uniform and log-uniform inferred parameters are mapped to an unconstrained
 neural target space before MAF training and mapped back after sampling. This
 prevents out-of-prior samples without rejection. Normal-prior parameters use an
@@ -188,6 +198,17 @@ parameter/band/context schema, prior transforms, package versions, and training
 history. They deliberately do not duplicate the simulation table. Loading a
 checkpoint reconstructs the same physical parameter bounds and native
 photometry encoding. Catalog sampling batches objects inside nflows.
+
+`Problem.specification()` is the immutable scientific identity used to compare
+results. It includes observed-array hashes, masks, units, structured priors,
+backend configuration and engine versions, filter-curve hashes, and the code
+plus referenced closure/global values of `parameter_transform`. Saved model
+grids additionally record this model-building specification. Numerical result
+archives and grids are content-hashed and verified on load by default. Engine
+source files are identified by content hash, and an FSPS tree by its git
+revision and tracked dirty state, so identical installations at different
+absolute paths have the same scientific identity. Machine-local paths remain
+available in the separate run-provenance sidecar.
 The high-level fit seed controls prior/noise simulation, MAF weight
 initialization, minibatch order, and the initial posterior draw. Reused catalog
 sampling accepts its own explicit seed.

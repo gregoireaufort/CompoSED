@@ -295,6 +295,26 @@ posterior = result.inference_state
 posterior.save("runs/photoz_maf")
 ```
 
+Simulation fails on the first invalid prior draw by default. This prevents a
+backend failure from silently changing the training distribution. If replacing
+failed simulations is scientifically intended, request it explicitly:
+
+```python
+training = Simulate(
+    n=100_000,
+    noise_fn=noise_fn,
+    infer=["zred", "log10_mass"],
+    failure_policy="resample",
+    max_retries=100,
+)
+```
+
+The returned training metadata then labels the theta distribution
+`"simulator_success_conditioned"` and records its acceptance fraction and
+failure examples. For redshift-dependent galaxy ages, use the named SFH
+`age_kind="fraction_of_universe"` parameterization so prior draws are valid by
+construction.
+
 Use the same workflow with a small, closed-form mixture posterior by changing
 only the method:
 

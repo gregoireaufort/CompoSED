@@ -374,24 +374,29 @@ def test_process_training_simulation_does_not_run_unused_retry_reserve():
 def test_process_training_simulation_replaces_only_failed_rows():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
 
-    theta, x, meta = simulate_training_set(
-        ps,
-        threshold_simulator,
-        n=17,
-        noise_fn=zero_noise,
-        rng=np.random.default_rng(15),
-        max_retries=100,
-        batch_size=4,
-        n_workers=2,
-        executor="process",
-        mp_context="spawn",
-        return_metadata=True,
-    )
+    with pytest.warns(RuntimeWarning, match="conditioned on simulator success"):
+        theta, x, meta = simulate_training_set(
+            ps,
+            threshold_simulator,
+            n=17,
+            noise_fn=zero_noise,
+            rng=np.random.default_rng(15),
+            max_retries=100,
+            failure_policy="resample",
+            batch_size=4,
+            n_workers=2,
+            executor="process",
+            mp_context="spawn",
+            return_metadata=True,
+        )
 
     assert theta.shape == x.shape == (17, 1)
     assert np.all(theta[:, 0] >= 0.25)
     assert len(meta["failures"]) > 0
     assert meta["attempts"] == 17 + len(meta["failures"])
+    assert meta["failure_policy"] == "resample"
+    assert meta["returned_prior"] == "simulator_success_conditioned"
+    assert meta["acceptance_fraction"] == pytest.approx(17 / meta["attempts"])
 
 
 def test_parallel_training_simulation_returns_matching_sigma_rows():
@@ -430,18 +435,61 @@ def test_simulate_training_set_retries_failures():
             raise ValueError("first one fails")
         return np.array([42.0])
 
-    theta, x, meta = simulate_training_set(
-        ps,
-        simulator,
-        n=2,
-        noise_fn=lambda flux: np.zeros_like(flux),
-        rng=np.random.default_rng(4),
-        max_retries=3,
-        return_metadata=True,
-    )
+    with pytest.warns(RuntimeWarning, match="conditioned on simulator success"):
+        theta, x, meta = simulate_training_set(
+            ps,
+            simulator,
+            n=2,
+            noise_fn=lambda flux: np.zeros_like(flux),
+            rng=np.random.default_rng(4),
+            max_retries=3,
+            failure_policy="resample",
+            return_metadata=True,
+        )
     assert theta.shape == (2, 1)
     assert x.shape == (2, 1)
     assert len(meta["failures"]) == 1
+    assert meta["returned_prior"] == "simulator_success_conditioned"
+
+
+def test_simulate_training_set_fails_loudly_by_default():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    def simulator(theta, noise_fn=None, rng=None):
+        del theta, noise_fn, rng
+        raise ValueError("invalid toy model")
+
+    with pytest.raises(RuntimeError, match="failure_policy='resample'") as error:
+        simulate_training_set(
+            ps,
+            simulator,
+            n=2,
+            noise_fn=zero_noise,
+            rng=np.random.default_rng(41),
+        )
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_successful_training_set_retains_exact_declared_prior_draws():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(-2.0, 3.0)})
+    seed = 84
+
+    theta, x, meta = simulate_training_set(
+        ps,
+        identity_simulator,
+        n=12,
+        noise_fn=zero_noise,
+        rng=np.random.default_rng(seed),
+        return_metadata=True,
+    )
+    reference_rng = np.random.default_rng(seed)
+    expected = np.vstack([ps.sample_prior(1, reference_rng)[0] for _ in range(12)])
+
+    assert np.array_equal(theta, expected)
+    assert np.array_equal(x, expected)
+    assert meta["returned_prior"] == "declared_prior"
+    assert meta["n_failures"] == 0
+    assert meta["acceptance_fraction"] == 1.0
 
 
 def test_simulate_training_set_raises_after_too_many_failures():
@@ -451,7 +499,14 @@ def test_simulate_training_set_raises_after_too_many_failures():
         raise ValueError("always fails")
 
     with pytest.raises(RuntimeError, match="Too many failed simulations"):
-        simulate_training_set(ps, simulator, n=1, noise_fn=lambda flux: flux, max_retries=1)
+        simulate_training_set(
+            ps,
+            simulator,
+            n=1,
+            noise_fn=lambda flux: flux,
+            max_retries=1,
+            failure_policy="resample",
+        )
 
 
 def test_simulate_training_set_rejects_negative_retry_budget():
@@ -464,6 +519,19 @@ def test_simulate_training_set_rejects_negative_retry_budget():
             n=1,
             noise_fn=lambda flux: flux,
             max_retries=-1,
+        )
+
+
+def test_simulate_training_set_rejects_unknown_failure_policy():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    with pytest.raises(ValueError, match="failure_policy"):
+        simulate_training_set(
+            ps,
+            identity_simulator,
+            n=1,
+            noise_fn=zero_noise,
+            failure_policy="ignore",
         )
 
 

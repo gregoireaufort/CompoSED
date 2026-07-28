@@ -69,8 +69,21 @@ def test_save_npz_with_provenance_writes_sidecar_and_requires_it(tmp_path):
     assert provenance_path == provenance_path_for(data_path)
     assert loaded_provenance["seed"] == 7
     assert loaded_provenance["artifacts"]["input"]["sha256"] == sha256_file(input_path)
+    assert loaded_provenance["output_artifact"]["sha256"] == sha256_file(archive_path)
     with np.load(archive_path) as data:
         assert np.allclose(data["rest_wave_nm"], [100.0, 200.0])
+
+
+def test_require_provenance_rejects_modified_artifact(tmp_path):
+    archive_path, _ = save_npz_with_provenance(
+        tmp_path / "reference.npz",
+        x=np.asarray([1.0]),
+    )
+    with archive_path.open("ab") as handle:
+        handle.write(b"changed")
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        require_provenance(archive_path)
 
 
 def test_require_provenance_fails_loudly_when_sidecar_is_missing(tmp_path):
@@ -117,3 +130,21 @@ def test_save_inference_result_embeds_basic_provenance(tmp_path):
     assert loaded.metadata["filters"] == ["g"]
     assert loaded.metadata["provenance"]["schema"] == "composed.provenance.v1"
     assert loaded.metadata["provenance"]["extra"]["sampler_name"] == "toy"
+    assert loaded.metadata["provenance"]["output_artifact"]["sha256"] == sha256_file(npz_path)
+
+
+def test_load_inference_result_rejects_modified_archive(tmp_path):
+    result = InferenceResult(
+        samples=np.asarray([[0.0], [1.0]]),
+        logp=np.asarray([-1.0, 0.0]),
+        weights=np.ones(2),
+        parameter_names=("z",),
+    )
+    npz_path, _ = save_inference_result(result, tmp_path / "run")
+    with npz_path.open("ab") as handle:
+        handle.write(b"changed")
+
+    with pytest.raises(ValueError, match="hash mismatch"):
+        load_inference_result(npz_path)
+    legacy = load_inference_result(npz_path, verify_provenance=False)
+    assert legacy.samples.shape == (2, 1)

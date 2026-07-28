@@ -263,7 +263,6 @@ def main() -> None:
         batch_size=128,
         executor="process" if args.n_workers > 1 else "serial",
         mp_context="spawn" if args.n_workers > 1 else None,
-        max_retries=max(1000, args.n_test),
     )
     start = time.perf_counter()
     held_out = simulate_sbi_training_set(problem, simulation, rng=args.seed)

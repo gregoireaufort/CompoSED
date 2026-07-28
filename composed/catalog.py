@@ -9,8 +9,10 @@ import numpy as np
 
 from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
+from composed.errors import ModelDomainError
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
 from composed.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, LogUniformPrior, Prior, UniformPrior
+from composed.problem import _backend_configuration, _filter_specification, _stable_value
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import (
     MASS_CONVENTION_SCHEMA,
@@ -155,7 +157,7 @@ def build_photometric_model_grid(
                 getattr(model, "flux_unit", "maggies"),
                 "maggies",
             )
-        except (FloatingPointError, OverflowError, ZeroDivisionError):
+        except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         model_flux[i] = aligned
         model_valid[i] = np.all(np.isfinite(aligned)) and np.all(aligned >= 0.0)
@@ -171,7 +173,18 @@ def build_photometric_model_grid(
         mass_reference=mass_reference,
         flux_unit="maggies",
         meta={
+            "schema": "composed.photometric_model_grid.v2",
             "excluded_parameters": excluded,
+            "scientific_specification": {
+                "backend": _backend_configuration(backend),
+                "parameters": list(parameter_space.names),
+                "priors": {
+                    name: _stable_value(parameter_space.priors[name])
+                    for name in parameter_space.names
+                },
+                "filters": _filter_specification(filters),
+                "band_names": list(band_names),
+            },
             "units": "maggies",
             "mass_scale_applied": False,
             "mass_reference": getattr(mass_reference, "value", None),
@@ -352,9 +365,13 @@ def save_photometric_model_grid(grid: PhotometricModelGrid, path: str | Path) ->
 def load_photometric_model_grid(
     path: str | Path,
     *,
-    require_provenance_sidecar: bool = False,
+    require_provenance_sidecar: bool = True,
 ) -> PhotometricModelGrid:
-    """Load a model grid saved by :func:`save_photometric_model_grid`."""
+    """Load a model grid saved by :func:`save_photometric_model_grid`.
+
+    Provenance and the archive content hash are verified by default. Set
+    ``require_provenance_sidecar=False`` only to inspect a legacy grid.
+    """
 
     path = Path(path)
     provenance = None
@@ -369,6 +386,11 @@ def load_photometric_model_grid(
             "CompoSED version; older grids were normalized by formed mass."
         )
     meta = json.loads(str(data["meta"].item())) if "meta" in data.files else {}
+    if require_provenance_sidecar and meta.get("schema") != "composed.photometric_model_grid.v2":
+        raise ValueError(
+            "Photometric model grid lacks the v0.1.1 scientific specification. "
+            "Rebuild it before scientific reuse."
+        )
     if provenance is not None:
         meta["provenance"] = provenance
     return PhotometricModelGrid(

@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
 from composed.derived import DerivedSFHQuantities, derive_sfh_quantities
+from composed.errors import ModelDomainError
 from composed.catalog import CatalogGridResult, run_photometric_grid_catalog
 from composed.catalog_fast import (
     NativeCatalogFitResult,
@@ -51,6 +52,7 @@ from composed.provenance import (
     require_provenance,
     save_npz_with_provenance,
     sha256_file,
+    verify_artifact_provenance,
     write_provenance,
 )
 from composed.results import (
@@ -127,6 +129,7 @@ __all__ = [
     "LogUniformPrior",
     "MassNormalization",
     "MassReference",
+    "ModelDomainError",
     "MAF",
     "MAFCatalogSummary",
     "MAFPhotometricSBIResult",
@@ -182,6 +185,7 @@ __all__ = [
     "save_npz_with_provenance",
     "save_restframe_spectral_grid",
     "sha256_file",
+    "verify_artifact_provenance",
     "train_maf_photometric_sbi",
     "train_mdn_photometric_sbi",
     "train_sbi",

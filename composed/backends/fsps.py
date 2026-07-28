@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 import numpy as np
 
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
+from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.sfh import SFHModel, TabularSFH, coerce_sfh_model
 from composed.transforms.sfh import normalize_sfh_to_formed_mass
@@ -362,7 +363,7 @@ class FSPSBackend(SEDBackend):
 
         age_universe_gyr = self._age_of_universe_gyr(z)
         if time_gyr[-1] > age_universe_gyr + float(self.age_tolerance_gyr):
-            raise ValueError(
+            raise ModelDomainError(
                 "tabular_time_gyr exceeds the age of the Universe at the requested redshift "
                 f"({time_gyr[-1]:.6g} Gyr > {age_universe_gyr:.6g} Gyr at z={z:.6g})."
             )

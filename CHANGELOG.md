@@ -27,6 +27,18 @@ Scientific-safety patch release.
 - Problem-driven PocoMC no longer accepts a sampler-specific replacement
   prior. Conditioned SBI results restore condition columns and identify
   marginalized nuisance parameters.
+- Physically invalid parameter combinations use a dedicated
+  `ModelDomainError`: likelihoods map them to `-inf`, while configuration and
+  shape errors remain visible.
+- SBI simulation now fails on the first unsuccessful prior draw by default.
+  Success-conditioned replacement draws require an explicit
+  `failure_policy="resample"` and are recorded in training metadata.
+- `Problem` fingerprints include referenced transform globals, structured
+  priors, backend engine versions, and filter-curve hashes.
+- Saved inference results and model grids include and verify a SHA256 of the
+  numerical artifact. Model-grid loading verifies provenance by default.
+- GitHub Actions now gates the core Python matrix, stable sampler adapters,
+  neural SBI tests, notebook hygiene, and isolated wheel installation.
 
 ### Experimental status
 
