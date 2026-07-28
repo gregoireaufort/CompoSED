@@ -174,7 +174,7 @@ class _TauSFH(_AgeParameterizedSFH):
     def _tau_gyr(self, params: Mapping[str, object]) -> float:
         tau = _finite_parameter(params, self.tau)
         if tau <= 0.0:
-            raise ValueError(f"SFH parameter {self.tau!r} must be positive.")
+            raise ModelDomainError(f"SFH parameter {self.tau!r} must be positive.")
         return tau
 
     def evaluate(self, params, *, redshift=None, cosmology=None) -> SFHHistory:
@@ -501,7 +501,7 @@ def _universe_age_gyr(redshift: float | None, cosmology) -> float:
         raise ValueError("This SFH age convention requires a redshift.")
     z = float(redshift)
     if not np.isfinite(z) or z < 0.0:
-        raise ValueError("SFH redshift must be finite and non-negative.")
+        raise ModelDomainError("SFH redshift must be finite and non-negative.")
     if cosmology is None:
         from astropy.cosmology import Planck18
 
@@ -511,7 +511,7 @@ def _universe_age_gyr(redshift: float | None, cosmology) -> float:
         age = age.to("Gyr")
     value = float(getattr(age, "value", age))
     if not np.isfinite(value) or value <= 0.0:
-        raise ValueError(f"Cosmology returned invalid Universe age {value!r} at z={z}.")
+        raise FloatingPointError(f"Cosmology returned invalid Universe age {value!r} at z={z}.")
     return value
 
 
@@ -523,7 +523,7 @@ def _finite_parameter(params: Mapping[str, object], name: str) -> float:
         raise ValueError(f"SFH parameter {name!r} must be scalar; got shape {value.shape}.")
     scalar = float(value)
     if not np.isfinite(scalar):
-        raise ValueError(f"SFH parameter {name!r} must be finite.")
+        raise ModelDomainError(f"SFH parameter {name!r} must be finite.")
     return scalar
 
 
@@ -540,12 +540,12 @@ def _validate_history_arrays(time: np.ndarray, sfr: np.ndarray) -> None:
     if time.size < 2:
         raise ValueError("SFH history must contain at least two time points.")
     if not np.all(np.isfinite(time)) or np.any(time < 0.0) or np.any(np.diff(time) <= 0.0):
-        raise ValueError("SFH time must be finite, non-negative, and strictly increasing.")
+        raise ModelDomainError("SFH time must be finite, non-negative, and strictly increasing.")
     if not np.all(np.isfinite(sfr)) or np.any(sfr < 0.0):
-        raise ValueError("SFH SFR must be finite and non-negative.")
+        raise ModelDomainError("SFH SFR must be finite and non-negative.")
     formed_mass = _trapz(sfr, time) * 1.0e9
     if not np.isfinite(formed_mass) or formed_mass <= 0.0:
-        raise ValueError("SFH must form a positive finite stellar mass.")
+        raise ModelDomainError("SFH must form a positive finite stellar mass.")
 
 
 def _trapz(y: np.ndarray, x: np.ndarray) -> float:

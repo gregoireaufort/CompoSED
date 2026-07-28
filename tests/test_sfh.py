@@ -12,7 +12,15 @@ from composed import (
     available_sfh_models,
     make_sfh,
 )
+from composed.backends.base import ModelPhotometry, SEDBackend
+from composed.data import SEDDataset
+from composed.errors import ModelDomainError
+from composed.likelihood import GaussianPhotometricLikelihood
+from composed.parameters import ParameterSpace
+from composed.priors import UniformPrior
 from composed.sfh import coerce_sfh_model
+from composed.transforms.sfh import normalize_sfh_to_formed_mass
+from composed.units import MassNormalization
 
 
 @pytest.mark.parametrize(
@@ -41,6 +49,30 @@ def test_parametric_sfh_shapes_follow_the_documented_equations():
     assert delayed.sfr_msun_per_yr[0] == 0.0
     peak_time = delayed.time_gyr[np.argmax(delayed.sfr_msun_per_yr)]
     assert peak_time == pytest.approx(2.0, abs=0.05)
+
+
+def test_nonpositive_tau_is_a_model_domain_rejection_and_likelihood_returns_minus_infinity():
+    model = DelayedTauSFH()
+    with pytest.raises(ModelDomainError, match="must be positive"):
+        model.evaluate({"tage_gyr": 4.0, "tau_gyr": -0.5})
+
+    backend = SFHToyBackend(model)
+    space = ParameterSpace(
+        names=("tau_gyr",),
+        priors={"tau_gyr": UniformPrior(-1.0, 1.0)},
+    )
+    dataset = SEDDataset(("g",), np.asarray([1.0]), np.asarray([0.1]))
+    likelihood = GaussianPhotometricLikelihood(backend, dataset, space, filters=("g",))
+
+    assert likelihood.log_prob([-0.5]) == -np.inf
+
+
+def test_zero_formed_mass_normalization_is_a_model_domain_rejection():
+    with pytest.raises(ModelDomainError, match="Invalid formed mass"):
+        normalize_sfh_to_formed_mass(
+            np.asarray([0.0, 1.0]),
+            np.asarray([0.0, 0.0]),
+        )
 
 
 def test_age_fraction_uses_universe_age_and_rejects_unphysical_absolute_age():
@@ -173,3 +205,15 @@ class FakeCosmology:
     def age(self, redshift):
         del redshift
         return self.age_gyr
+
+
+class SFHToyBackend(SEDBackend):
+    mass_normalization = MassNormalization.ABSOLUTE
+
+    def __init__(self, sfh):
+        self.sfh = sfh
+
+    def predict_photometry(self, params, filters):
+        del filters
+        self.sfh.evaluate({"tage_gyr": 4.0, **params})
+        return ModelPhotometry(("g",), np.asarray([1.0]))

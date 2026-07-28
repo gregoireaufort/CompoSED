@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 
 import numpy as np
 
+from composed._numerics import trapezoid
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.errors import ModelDomainError
 from composed.filters import FilterSet
@@ -280,7 +281,7 @@ class FSPSBackend(SEDBackend):
                 raise ValueError(f"FSPS parameter {key!r} must be scalar; got shape {scalar.shape}.")
             scalar_value = scalar.item()
             if isinstance(scalar_value, (float, np.floating)) and not np.isfinite(scalar_value):
-                raise ValueError(f"FSPS parameter {key!r} must be finite.")
+                raise ModelDomainError(f"FSPS parameter {key!r} must be finite.")
             overrides[key] = scalar_value
 
         if unknown:
@@ -299,7 +300,7 @@ class FSPSBackend(SEDBackend):
             if key in params:
                 z = float(params[key])
                 if not np.isfinite(z) or z < 0.0:
-                    raise ValueError(f"Redshift parameter {key!r} must be finite and non-negative.")
+                    raise ModelDomainError(f"Redshift parameter {key!r} must be finite and non-negative.")
                 return z
         raise ValueError("Missing redshift parameter. Provide one of: z, zred, redshift.")
 
@@ -351,15 +352,18 @@ class FSPSBackend(SEDBackend):
         if time_gyr.size < 2:
             raise ValueError("tabular_time_gyr must contain at least two time points.")
         if not np.all(np.isfinite(time_gyr)):
-            raise ValueError("tabular_time_gyr must be finite.")
+            raise ModelDomainError("tabular_time_gyr must be finite.")
         if np.any(time_gyr < 0.0):
-            raise ValueError("tabular_time_gyr must be non-negative cosmic time in Gyr.")
+            raise ModelDomainError("tabular_time_gyr must be non-negative cosmic time in Gyr.")
         if np.any(np.diff(time_gyr) <= 0.0):
-            raise ValueError("tabular_time_gyr must be strictly increasing.")
+            raise ModelDomainError("tabular_time_gyr must be strictly increasing.")
         if not np.all(np.isfinite(sfr_msun_per_yr)):
-            raise ValueError("tabular_sfr_msun_per_yr must be finite.")
+            raise ModelDomainError("tabular_sfr_msun_per_yr must be finite.")
         if np.any(sfr_msun_per_yr < 0.0):
-            raise ValueError("tabular_sfr_msun_per_yr must be non-negative.")
+            raise ModelDomainError("tabular_sfr_msun_per_yr must be non-negative.")
+        formed_mass_msun = float(trapezoid(sfr_msun_per_yr, time_gyr)) * 1.0e9
+        if not np.isfinite(formed_mass_msun) or formed_mass_msun <= 0.0:
+            raise ModelDomainError("tabular_sfr_msun_per_yr must form a positive finite stellar mass.")
 
         age_universe_gyr = self._age_of_universe_gyr(z)
         if time_gyr[-1] > age_universe_gyr + float(self.age_tolerance_gyr):

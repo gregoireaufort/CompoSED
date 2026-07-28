@@ -3,6 +3,7 @@ import importlib.util
 import numpy as np
 import pytest
 
+from composed._numerics import trapezoid
 from inftools.sbi import (
     MAFPosteriorEstimator,
     MDNPosteriorEstimator,
@@ -290,7 +291,7 @@ def test_mdn_density_is_normalized_and_sampling_is_finite():
 
     grid = np.linspace(-20.0, 20.0, 10_001)
     log_density = estimator.log_prob(grid[:, None], np.asarray([[0.0]]))
-    integral = np.trapz(np.exp(log_density), grid)
+    integral = trapezoid(np.exp(log_density), grid)
     assert integral == pytest.approx(1.0, abs=2.0e-3)
 
 

@@ -13,6 +13,7 @@ from composed.backends.cigale import (
     build_cigale_parameter_space,
 )
 from composed.data import SEDDataset
+from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.priors import DeltaPrior, UniformPrior
@@ -32,6 +33,16 @@ def test_constructing_cigale_backend_raises_helpful_error_if_pcigale_missing(mon
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: False)
     with pytest.raises(ImportError, match="pcigale"):
         CIGALEBackend(modules=["sfhdelayed", "redshifting"])
+
+
+def test_invalid_sampled_cigale_redshift_is_a_model_domain_error(monkeypatch):
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
+
+    with pytest.raises(ModelDomainError, match="finite and non-negative"):
+        backend._get_redshift({"z": -0.1})
 
 
 def test_cigale_backend_rejects_absolute_mass_normalization(monkeypatch):

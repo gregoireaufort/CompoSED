@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from composed.backends.fsps import FSPSBackend
+from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.sfh import ContinuitySFH, DelayedTauSFH, TabularSFH
 from composed.units import MassNormalization, MassReference
@@ -31,7 +32,7 @@ def test_invalid_sfh_time_grid_raises_clear_error(monkeypatch):
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend()
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ModelDomainError, match="strictly increasing"):
         backend.predict_photometry(
             {
                 "z": 0.0,
@@ -47,7 +48,7 @@ def test_negative_sfr_raises_clear_error(monkeypatch):
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend()
-    with pytest.raises(ValueError, match="non-negative"):
+    with pytest.raises(ModelDomainError, match="non-negative"):
         backend.predict_photometry(
             {
                 "zred": 0.0,
@@ -63,7 +64,7 @@ def test_sfh_age_exceeding_universe_age_raises_clear_error(monkeypatch):
 
     monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
     backend = FSPSBackend(cosmology=FakeCosmology(age_gyr=1.0))
-    with pytest.raises(ValueError, match="age of the Universe"):
+    with pytest.raises(ModelDomainError, match="age of the Universe"):
         backend.predict_photometry(
             {
                 "redshift": 8.0,
@@ -84,6 +85,40 @@ def test_missing_redshift_raises_clear_error(monkeypatch):
             {
                 "tabular_time_gyr": [0.0, 1.0],
                 "tabular_sfr_msun_per_yr": [1.0, 1.0],
+            },
+            FilterSet([], names=[]),
+        )
+
+
+def test_invalid_sampled_redshift_is_a_model_domain_error(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend()
+
+    with pytest.raises(ModelDomainError, match="finite and non-negative"):
+        backend.predict_photometry(
+            {
+                "z": -0.1,
+                "tabular_time_gyr": [0.0, 1.0],
+                "tabular_sfr_msun_per_yr": [1.0, 1.0],
+            },
+            FilterSet([], names=[]),
+        )
+
+
+def test_zero_tabular_sfh_is_a_model_domain_error(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend()
+
+    with pytest.raises(ModelDomainError, match="positive finite stellar mass"):
+        backend.predict_photometry(
+            {
+                "z": 0.0,
+                "tabular_time_gyr": [0.0, 1.0],
+                "tabular_sfr_msun_per_yr": [0.0, 0.0],
             },
             FilterSet([], names=[]),
         )

@@ -160,7 +160,10 @@ def build_photometric_model_grid(
         except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         model_flux[i] = aligned
-        model_valid[i] = np.all(np.isfinite(aligned)) and np.all(aligned >= 0.0)
+        # A successful backend evaluation makes this a valid grid row.
+        # Individual catalog objects may mask different bands, so flux
+        # finiteness is checked later against each object's active mask.
+        model_valid[i] = True
 
     return PhotometricModelGrid(
         samples=samples,
@@ -173,7 +176,7 @@ def build_photometric_model_grid(
         mass_reference=mass_reference,
         flux_unit="maggies",
         meta={
-            "schema": "composed.photometric_model_grid.v2",
+            "schema": "composed.photometric_model_grid.v3",
             "excluded_parameters": excluded,
             "scientific_specification": {
                 "backend": _backend_configuration(backend),
@@ -386,9 +389,9 @@ def load_photometric_model_grid(
             "CompoSED version; older grids were normalized by formed mass."
         )
     meta = json.loads(str(data["meta"].item())) if "meta" in data.files else {}
-    if require_provenance_sidecar and meta.get("schema") != "composed.photometric_model_grid.v2":
+    if meta.get("schema") != "composed.photometric_model_grid.v3":
         raise ValueError(
-            "Photometric model grid lacks the v0.1.1 scientific specification. "
+            "Photometric model grid does not use the current per-object mask semantics. "
             "Rebuild it before scientific reuse."
         )
     if provenance is not None:
@@ -672,10 +675,12 @@ def _predict_model_grid_flux(backend, samples, parameter_space, filters, band_na
                 getattr(model, "flux_unit", "maggies"),
                 "maggies",
             )
-        except (FloatingPointError, OverflowError, ZeroDivisionError):
+        except (ModelDomainError, FloatingPointError, OverflowError, ZeroDivisionError):
             continue
         model_flux[i] = mass_scale * aligned
-        model_valid[i] = np.all(np.isfinite(model_flux[i]))
+        # As in the scalar likelihood, a non-finite value matters only when
+        # that band is active for the object being evaluated.
+        model_valid[i] = True
     return model_flux, model_valid
 
 
@@ -722,19 +727,48 @@ def _catalog_gaussian_logp(
         model = model_flux[grid_indices]
         for o0 in range(0, n_objects, object_chunk_size):
             o1 = min(o0 + object_chunk_size, n_objects)
-            diff = data_flux[o0:o1, None, :] - model[None, :, :]
+            local_active = active_mask[o0:o1]
+            object_model_valid = _object_model_finite(local_active, model)
+            local_detection = detection_mask[o0:o1, None, :]
+            diff = np.where(
+                local_detection,
+                data_flux[o0:o1, None, :] - model[None, :, :],
+                0.0,
+            )
             chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, :], axis=2)
             log_like = -0.5 * (chi2 + logdet[o0:o1, None])
             local_upper_mask = upper_limit_mask[o0:o1]
             if np.any(local_upper_mask):
-                z = (upper_limit[o0:o1, None, :] - model[None, :, :]) / data_sigma[o0:o1, None, :]
+                z = np.where(
+                    local_upper_mask[:, None, :],
+                    (upper_limit[o0:o1, None, :] - model[None, :, :])
+                    / data_sigma[o0:o1, None, :],
+                    0.0,
+                )
                 log_like += np.sum(np.where(local_upper_mask[:, None, :], _normal_logcdf(z), 0.0), axis=2)
-            logp[o0:o1, grid_indices] = log_prior[grid_indices][None, :] + log_like
+            values = log_prior[grid_indices][None, :] + log_like
+            logp[o0:o1, grid_indices] = np.where(object_model_valid, values, -np.inf)
 
     if not np.all(np.any(np.isfinite(logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(logp), axis=1))[0]
         raise RuntimeError(f"No finite grid point for catalog object(s): {bad.tolist()}")
     return logp
+
+
+def _object_model_finite(active_mask: np.ndarray, model_flux: np.ndarray) -> np.ndarray:
+    """Return finite-model validity for every object/model pair.
+
+    ``active_mask`` has shape ``(n_object, n_band)`` and ``model_flux`` has
+    shape ``(n_model, n_band)``. A non-finite model value invalidates only
+    objects that actually use that band, matching the scalar likelihood.
+    """
+
+    active_mask = np.asarray(active_mask, dtype=bool)
+    model_flux = np.asarray(model_flux, dtype=float)
+    return np.all(
+        (~active_mask[:, None, :]) | np.isfinite(model_flux)[None, :, :],
+        axis=2,
+    )
 
 
 def _prepare_mass_grid_and_prior(*, log10_mass_grid, log10_mass_bounds, log10_mass_prior):
@@ -900,8 +934,18 @@ def _catalog_profile_mass_logp(
         model = model_flux[grid_indices]
         for o0 in range(0, n_objects, object_chunk_size):
             o1 = min(o0 + object_chunk_size, n_objects)
-            numerator = np.sum(data_flux[o0:o1, None, :] * model[None, :, :] * inv_sigma2[o0:o1, None, :], axis=2)
-            denominator = np.sum(model[None, :, :] ** 2 * inv_sigma2[o0:o1, None, :], axis=2)
+            local_active = active_mask[o0:o1]
+            object_model_valid = _object_model_finite(local_active, model)
+            local_detection = detection_mask[o0:o1, None, :]
+            model_detection = np.where(local_detection, model[None, :, :], 0.0)
+            numerator = np.sum(
+                data_flux[o0:o1, None, :] * model_detection * inv_sigma2[o0:o1, None, :],
+                axis=2,
+            )
+            denominator = np.sum(
+                model_detection**2 * inv_sigma2[o0:o1, None, :],
+                axis=2,
+            )
             unconstrained_scale = np.divide(
                 numerator,
                 denominator,
@@ -910,21 +954,21 @@ def _catalog_profile_mass_logp(
             )
             scale = _clip_mass_scale(unconstrained_scale, log10_mass_bounds)
             at_boundary = _mass_scale_boundary_mask(unconstrained_scale, log10_mass_bounds)
-            model_scaled = scale[:, :, None] * model[None, :, :]
-            diff = data_flux[o0:o1, None, :] - model_scaled
+            model_scaled = scale[:, :, None] * model_detection
+            diff = np.where(
+                local_detection,
+                data_flux[o0:o1, None, :] - model_scaled,
+                0.0,
+            )
             chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, :], axis=2)
             log_like = -0.5 * (chi2 + logdet[o0:o1, None])
-            local_upper_mask = upper_limit_mask[o0:o1]
-            if np.any(local_upper_mask):
-                z = (upper_limit[o0:o1, None, :] - model_scaled) / data_sigma[o0:o1, None, :]
-                log_like += np.sum(np.where(local_upper_mask[:, None, :], _normal_logcdf(z), 0.0), axis=2)
-            finite_scale = np.isfinite(scale) & (scale > 0.0)
+            finite_scale = np.isfinite(scale) & (scale > 0.0) & object_model_valid
             values = log_prior[grid_indices][None, :] + log_like
             values = np.where(finite_scale, values, -np.inf)
             profile_logp[o0:o1, grid_indices] = values
-            mass_scale[o0:o1, grid_indices] = scale
+            mass_scale[o0:o1, grid_indices] = np.where(finite_scale, scale, np.nan)
             log10_mass[o0:o1, grid_indices] = np.where(finite_scale, np.log10(scale), np.nan)
-            mass_at_boundary[o0:o1, grid_indices] = at_boundary
+            mass_at_boundary[o0:o1, grid_indices] = at_boundary & finite_scale
 
     if require_finite and not np.all(np.any(np.isfinite(profile_logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(profile_logp), axis=1))[0]
@@ -981,24 +1025,34 @@ def _catalog_grid_profile_mass_logp(
         model = model_flux[grid_indices]
         for o0 in range(0, n_objects, object_chunk_size):
             o1 = min(o0 + object_chunk_size, n_objects)
+            object_model_valid = _object_model_finite(active_mask[o0:o1], model)
             best_values = np.full((o1 - o0, grid_indices.size), -np.inf, dtype=float)
             best_mass_index = np.zeros((o1 - o0, grid_indices.size), dtype=int)
             for m0 in range(0, scales.size, mass_chunk_size):
                 m1 = min(m0 + mass_chunk_size, scales.size)
                 scaled = model[:, None, :] * scales[None, m0:m1, None]
-                diff = data_flux[o0:o1, None, None, :] - scaled[None, :, :, :]
+                local_detection = detection_mask[o0:o1, None, None, :]
+                diff = np.where(
+                    local_detection,
+                    data_flux[o0:o1, None, None, :] - scaled[None, :, :, :],
+                    0.0,
+                )
                 chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, None, :], axis=3)
                 values = -0.5 * (chi2 + logdet[o0:o1, None, None])
                 local_upper_mask = upper_limit_mask[o0:o1]
                 if np.any(local_upper_mask):
-                    z = (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :]) / data_sigma[
-                        o0:o1, None, None, :
-                    ]
+                    z = np.where(
+                        local_upper_mask[:, None, None, :],
+                        (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :])
+                        / data_sigma[o0:o1, None, None, :],
+                        0.0,
+                    )
                     values += np.sum(
                         np.where(local_upper_mask[:, None, None, :], _normal_logcdf(z), 0.0),
                         axis=3,
                     )
                 values += log_prior[grid_indices][None, :, None]
+                values = np.where(object_model_valid[:, :, None], values, -np.inf)
                 local_index = np.argmax(values, axis=2)
                 local_best = np.take_along_axis(values, local_index[:, :, None], axis=2)[:, :, 0]
                 improve = local_best > best_values
@@ -1006,10 +1060,19 @@ def _catalog_grid_profile_mass_logp(
                 best_mass_index = np.where(improve, m0 + local_index, best_mass_index)
 
             profile_logp[o0:o1, grid_indices] = best_values
-            log10_mass[o0:o1, grid_indices] = log10_mass_grid[best_mass_index]
-            mass_scale[o0:o1, grid_indices] = scales[best_mass_index]
-            mass_at_boundary[o0:o1, grid_indices] = (best_mass_index == 0) | (
-                best_mass_index == scales.size - 1
+            finite_best = np.isfinite(best_values)
+            log10_mass[o0:o1, grid_indices] = np.where(
+                finite_best,
+                log10_mass_grid[best_mass_index],
+                np.nan,
+            )
+            mass_scale[o0:o1, grid_indices] = np.where(
+                finite_best,
+                scales[best_mass_index],
+                np.nan,
+            )
+            mass_at_boundary[o0:o1, grid_indices] = finite_best & (
+                (best_mass_index == 0) | (best_mass_index == scales.size - 1)
             )
 
     if not np.all(np.any(np.isfinite(profile_logp), axis=1)):
@@ -1083,26 +1146,40 @@ def _catalog_marginal_mass_logp(
         model = model_flux[grid_indices]
         for o0 in range(0, n_objects, object_chunk_size):
             o1 = min(o0 + object_chunk_size, n_objects)
+            object_model_valid = _object_model_finite(active_mask[o0:o1], model)
             local_mass_logp = np.full((o1 - o0, grid_indices.size, n_mass), -np.inf, dtype=float)
             for m0 in range(0, n_mass, mass_chunk_size):
                 m1 = min(m0 + mass_chunk_size, n_mass)
                 scaled = mass_scales[m0:m1][None, :, None] * model[:, None, :]
-                diff = data_flux[o0:o1, None, None, :] - scaled[None, :, :, :]
+                local_detection = detection_mask[o0:o1, None, None, :]
+                diff = np.where(
+                    local_detection,
+                    data_flux[o0:o1, None, None, :] - scaled[None, :, :, :],
+                    0.0,
+                )
                 chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, None, :], axis=3)
                 log_like = -0.5 * (chi2 + logdet[o0:o1, None, None])
                 local_upper_mask = upper_limit_mask[o0:o1]
                 if np.any(local_upper_mask):
-                    z = (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :]) / data_sigma[
-                        o0:o1, None, None, :
-                    ]
+                    z = np.where(
+                        local_upper_mask[:, None, None, :],
+                        (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :])
+                        / data_sigma[o0:o1, None, None, :],
+                        0.0,
+                    )
                     log_like += np.sum(
                         np.where(local_upper_mask[:, None, None, :], _normal_logcdf(z), 0.0),
                         axis=3,
                     )
-                local_mass_logp[:, :, m0:m1] = (
+                values = (
                     log_prior[grid_indices][None, :, None]
                     + log_like
                     + log_mass_prior_weights[None, None, m0:m1]
+                )
+                local_mass_logp[:, :, m0:m1] = np.where(
+                    object_model_valid[:, :, None],
+                    values,
+                    -np.inf,
                 )
             marginal_logp[o0:o1, grid_indices] = _logsumexp(local_mass_logp, axis=2)
             local_mass_marginal = _logsumexp(local_mass_logp, axis=1)
@@ -1145,9 +1222,11 @@ def _logsumexp(values: np.ndarray, axis=None) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     max_value = np.max(values, axis=axis, keepdims=True)
     finite = np.isfinite(max_value)
-    shifted = np.where(finite, values - max_value, -np.inf)
-    summed = np.sum(np.exp(shifted), axis=axis, keepdims=True)
-    out = max_value + np.log(summed)
+    safe_max = np.where(finite, max_value, 0.0)
+    shifted = np.where(finite, values - safe_max, -np.inf)
+    with np.errstate(divide="ignore", under="ignore"):
+        summed = np.sum(np.exp(shifted), axis=axis, keepdims=True)
+        out = max_value + np.log(summed)
     out = np.where(finite, out, -np.inf)
     if axis is None:
         return np.asarray(out).reshape(()).item()

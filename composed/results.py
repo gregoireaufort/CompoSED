@@ -177,23 +177,15 @@ def posterior_summary(
 
 
 def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Path, Path]:
-    """Save arrays to ``.npz`` and metadata to a JSON sidecar."""
+    """Save arrays and cryptographically bind their scientific metadata.
+
+    The numerical archive stores a SHA-256 digest of the canonical JSON
+    metadata. The JSON sidecar stores the archive's own content hash. Together
+    these checks detect modification of either the posterior arrays or the
+    Problem/sampler/provenance metadata used to interpret them.
+    """
 
     npz_path, json_path = _result_paths(path)
-    arrays = {
-        "samples": result.samples,
-        "weights": result.weights,
-        "parameter_names": np.asarray(result.parameter_names, dtype=str),
-        "posterior_median": result.posterior_median,
-    }
-    if result.logp is not None:
-        arrays["logp"] = result.logp
-    if result.map_estimate is not None:
-        arrays["map_estimate"] = result.map_estimate
-    if result.chain is not None:
-        arrays["chain"] = result.chain
-    npz_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(npz_path, **arrays)
     metadata = dict(result.metadata)
     provenance = dict(
         metadata.get("provenance")
@@ -206,18 +198,35 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
             }
         )
     )
+    metadata["provenance"] = provenance
+    payload = {
+        "sampler_name": result.sampler_name,
+        "metadata": _json_safe(metadata),
+        "posterior_summary": posterior_summary(result),
+    }
+    metadata_sha256 = _result_metadata_sha256(payload)
+
+    arrays = {
+        "samples": result.samples,
+        "weights": result.weights,
+        "parameter_names": np.asarray(result.parameter_names, dtype=str),
+        "posterior_median": result.posterior_median,
+        "metadata_schema": np.asarray("composed.inference_result_metadata.v1"),
+        "metadata_sha256": np.asarray(metadata_sha256),
+    }
+    if result.logp is not None:
+        arrays["logp"] = result.logp
+    if result.map_estimate is not None:
+        arrays["map_estimate"] = result.map_estimate
+    if result.chain is not None:
+        arrays["chain"] = result.chain
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(npz_path, **arrays)
     provenance["output_artifact"] = artifact_provenance(npz_path)
     metadata["provenance"] = provenance
+    payload["metadata"] = _json_safe(metadata)
     json_path.write_text(
-        json.dumps(
-            {
-                "sampler_name": result.sampler_name,
-                "metadata": _json_safe(metadata),
-                "posterior_summary": posterior_summary(result),
-            },
-            indent=2,
-            sort_keys=True,
-        )
+        json.dumps(payload, indent=2, sort_keys=True)
     )
     return npz_path, json_path
 
@@ -235,7 +244,25 @@ def load_inference_result(
 
     npz_path, json_path = _result_paths(path)
     payload = json.loads(json_path.read_text()) if json_path.exists() else {}
+    with np.load(npz_path, allow_pickle=False) as data:
+        arrays = {key: data[key] for key in data.files}
     if verify_provenance:
+        metadata_schema = arrays.get("metadata_schema")
+        metadata_sha256 = arrays.get("metadata_sha256")
+        if metadata_schema is None or metadata_sha256 is None:
+            raise ValueError(
+                f"Saved inference result {npz_path} does not bind its scientific metadata. "
+                "Rerun it, or pass verify_provenance=False only for legacy inspection."
+            )
+        if str(np.asarray(metadata_schema).item()) != "composed.inference_result_metadata.v1":
+            raise ValueError(f"Unsupported inference-result metadata schema for {npz_path}.")
+        expected_metadata_sha256 = str(np.asarray(metadata_sha256).item())
+        actual_metadata_sha256 = _result_metadata_sha256(payload)
+        if actual_metadata_sha256 != expected_metadata_sha256:
+            raise ValueError(
+                f"Saved inference result metadata hash mismatch for {json_path}. "
+                "The scientific sidecar was changed after the posterior was saved."
+            )
         provenance = payload.get("metadata", {}).get("provenance")
         if not isinstance(provenance, Mapping):
             raise ValueError(
@@ -245,8 +272,6 @@ def load_inference_result(
         if provenance.get("schema") != "composed.provenance.v1":
             raise ValueError(f"Unsupported inference-result provenance schema for {npz_path}.")
         verify_artifact_provenance(npz_path, provenance)
-    with np.load(npz_path, allow_pickle=False) as data:
-        arrays = {key: data[key] for key in data.files}
     return InferenceResult(
         samples=arrays["samples"],
         logp=arrays.get("logp"),
@@ -347,6 +372,23 @@ def _result_paths(path: str | Path) -> tuple[Path, Path]:
         npz_path = path / "inference_result.npz"
         json_path = path / "inference_result.json"
     return npz_path, json_path
+
+
+def _result_metadata_sha256(payload: Mapping[str, Any]) -> str:
+    """Digest scientific result metadata without its self-referential NPZ hash."""
+
+    canonical_payload = _json_safe(payload)
+    metadata = canonical_payload.get("metadata")
+    if isinstance(metadata, dict):
+        provenance = metadata.get("provenance")
+        if isinstance(provenance, dict):
+            provenance.pop("output_artifact", None)
+    encoded = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def _json_safe(value):

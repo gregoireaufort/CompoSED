@@ -13,6 +13,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 import numpy as np
 
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
+from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, IntegerUniformPrior, LogUniformPrior, Prior, UniformPrior
@@ -356,7 +357,7 @@ class CIGALEBackend(SEDBackend):
             if key in params:
                 z = float(params[key])
                 if not np.isfinite(z) or z < 0.0:
-                    raise ValueError(f"Redshift parameter {key!r} must be finite and non-negative.")
+                    raise ModelDomainError(f"Redshift parameter {key!r} must be finite and non-negative.")
                 return z
         redshift_module = _first_redshifting_module(self.modules)
         for entry in self._entries:
@@ -370,7 +371,9 @@ class CIGALEBackend(SEDBackend):
             if entry.flat_name in params:
                 z = float(params[entry.flat_name])
                 if not np.isfinite(z) or z < 0.0:
-                    raise ValueError(f"Redshift parameter {entry.flat_name!r} must be finite and non-negative.")
+                    raise ModelDomainError(
+                        f"Redshift parameter {entry.flat_name!r} must be finite and non-negative."
+                    )
                 return z
         if self.sfh is not None and self.sfh.requires_redshift:
             raise ValueError(
@@ -416,7 +419,7 @@ class CIGALEBackend(SEDBackend):
             if key in params:
                 z = float(params[key])
                 if not np.isfinite(z) or z < 0.0:
-                    raise ValueError(f"Redshift parameter {key!r} must be finite and non-negative.")
+                    raise ModelDomainError(f"Redshift parameter {key!r} must be finite and non-negative.")
                 return key, z
         raise ValueError("Missing redshift parameter. Provide one of: z, zred, redshift.")
 

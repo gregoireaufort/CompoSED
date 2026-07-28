@@ -37,6 +37,17 @@ Scientific-safety patch release.
   priors, backend engine versions, and filter-curve hashes.
 - Saved inference results and model grids include and verify a SHA256 of the
   numerical artifact. Model-grid loading verifies provenance by default.
+- Catalog grid likelihoods now assess model finiteness in each object's active
+  bands, so a non-finite value in a masked band cannot reject an otherwise
+  valid model. Cached photometric grids use schema v3 and older grids must be
+  rebuilt.
+- Saved inference results bind the scientific JSON metadata to the NPZ archive;
+  changing the Problem, sampler identity, or posterior summary is detected at
+  strict load time.
+- Nonpositive SFH timescales and invalid sampled redshifts or tabular histories
+  consistently raise `ModelDomainError` and therefore receive zero posterior
+  probability rather than aborting inference.
+- MDN density validation uses the NumPy 1.x/2.x-compatible trapezoid helper.
 - GitHub Actions now gates the core Python matrix, stable sampler adapters,
   neural SBI tests, notebook hygiene, and isolated wheel installation.
 

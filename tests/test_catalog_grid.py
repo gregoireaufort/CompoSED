@@ -15,6 +15,7 @@ from composed.catalog import (
 )
 from composed.data import SEDDataset
 from composed.backends.base import ModelPhotometry, SEDBackend
+from composed.errors import ModelDomainError
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, UniformPrior
@@ -88,6 +89,60 @@ class TwoBandBackend(SEDBackend):
     def predict_photometry(self, params, filters):
         del params, filters
         return ModelPhotometry(band_names=("g", "fuv"), flux=np.asarray(self.flux, dtype=float))
+
+
+@dataclass
+class PartiallyInvalidBackend(SEDBackend):
+    mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+
+    def predict_photometry(self, params, filters):
+        del filters
+        template = int(round(float(params["template"])))
+        fluxes = {
+            0: np.asarray([1.0, np.nan]),
+            1: np.asarray([2.0, 3.0]),
+        }
+        return ModelPhotometry(("g", "r"), fluxes[template])
+
+
+@dataclass
+class PartiallyInvalidPerMassBackend(SEDBackend):
+    mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
+
+    def predict_photometry(self, params, filters):
+        del filters
+        template = int(round(float(params["template"])))
+        fluxes = {
+            0: np.asarray([1.0, np.nan]),
+            1: np.asarray([2.0, 3.0]),
+        }
+        return ModelPhotometry(("g", "r"), fluxes[template])
+
+
+@dataclass
+class DomainRejectingBackend(SEDBackend):
+    mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
+
+    def predict_photometry(self, params, filters):
+        del filters
+        template = int(round(float(params["template"])))
+        if template == 0:
+            raise ModelDomainError("template is outside the toy physical domain")
+        return ModelPhotometry(("g",), np.asarray([1.0]))
+
+
+@dataclass
+class DomainRejectingPerMassBackend(SEDBackend):
+    mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
+
+    def predict_photometry(self, params, filters):
+        del filters
+        template = int(round(float(params["template"])))
+        if template == 0:
+            raise ModelDomainError("template is outside the toy physical domain")
+        return ModelPhotometry(("g",), np.asarray([1.0]))
 
 
 def test_photometric_grid_catalog_matches_single_object_grid_likelihoods():
@@ -184,6 +239,113 @@ def test_photometric_grid_catalog_handles_mixed_detection_and_upper_limit_like_s
 
     assert np.allclose(catalog.logp[0], [scalar])
     assert np.all(np.isfinite(catalog.logp[0]))
+
+
+def test_catalog_model_finiteness_is_checked_only_in_each_objects_active_bands():
+    backend = PartiallyInvalidBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
+    masked = SEDDataset(
+        band_names=("g", "r"),
+        flux=np.asarray([1.0, 999.0]),
+        sigma=np.asarray([0.2, 0.2]),
+        mask=np.asarray([True, False]),
+    )
+    unmasked = SEDDataset(
+        band_names=("g", "r"),
+        flux=np.asarray([2.0, 3.0]),
+        sigma=np.asarray([0.2, 0.2]),
+    )
+
+    catalog = run_photometric_grid_catalog(
+        backend,
+        [masked, unmasked],
+        space,
+        filters=("g", "r"),
+        model_chunk_size=1,
+        object_chunk_size=1,
+    )
+
+    for object_index, dataset in enumerate((masked, unmasked)):
+        scalar = GaussianPhotometricLikelihood(backend, dataset, space, filters=("g", "r"))
+        expected = np.asarray([scalar.log_prob([template]) for template in (0.0, 1.0)])
+        assert np.allclose(catalog.logp[object_index], expected)
+    assert np.isfinite(catalog.logp[0, 0])
+    assert np.isneginf(catalog.logp[1, 0])
+
+
+def test_cached_mass_grid_uses_the_same_per_object_finite_band_rule():
+    backend = PartiallyInvalidPerMassBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
+    masked = SEDDataset(
+        band_names=("g", "r"),
+        flux=np.asarray([1.0, 999.0]),
+        sigma=np.asarray([0.2, 0.2]),
+        mask=np.asarray([True, False]),
+    )
+    unmasked = SEDDataset(
+        band_names=("g", "r"),
+        flux=np.asarray([2.0, 3.0]),
+        sigma=np.asarray([0.2, 0.2]),
+    )
+    grid = build_photometric_model_grid(
+        backend,
+        space,
+        filters=("g", "r"),
+        band_names=("g", "r"),
+    )
+
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [masked, unmasked],
+        log10_mass_grid=np.linspace(-1.0, 1.0, 41),
+        log10_mass_prior=UniformPrior(-1.0, 1.0),
+        model_chunk_size=1,
+        object_chunk_size=1,
+        mass_chunk_size=7,
+    )
+
+    assert np.array_equal(grid.valid, [True, True])
+    assert np.isfinite(result.profile_logp[0, 0])
+    assert np.isfinite(result.marginal_logp[0, 0])
+    assert np.isneginf(result.profile_logp[1, 0])
+    assert np.isneginf(result.marginal_logp[1, 0])
+    assert np.isnan(result.log10_mass_profile[1, 0])
+
+
+def test_model_domain_rejection_has_zero_weight_in_scalar_direct_and_cached_grids():
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
+    dataset = SEDDataset(("g",), np.asarray([1.0]), np.asarray([0.2]))
+
+    direct_backend = DomainRejectingBackend()
+    scalar = GaussianPhotometricLikelihood(direct_backend, dataset, space, filters=("g",))
+    direct = run_photometric_grid_catalog(
+        direct_backend,
+        [dataset],
+        space,
+        filters=("g",),
+        model_chunk_size=1,
+        object_chunk_size=1,
+    )
+    assert np.isneginf(scalar.log_prob([0.0]))
+    assert np.isneginf(direct.logp[0, 0])
+    assert np.isfinite(direct.logp[0, 1])
+    assert direct.weights_norm[0, 0] == 0.0
+
+    cached_backend = DomainRejectingPerMassBackend()
+    grid = build_photometric_model_grid(
+        cached_backend,
+        space,
+        filters=("g",),
+        band_names=("g",),
+    )
+    cached = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        log10_mass_bounds=(-1.0, 1.0),
+    )
+    assert np.array_equal(grid.valid, [False, True])
+    assert np.isneginf(cached.profile_logp[0, 0])
+    assert np.isfinite(cached.profile_logp[0, 1])
 
 
 def test_photometric_grid_catalog_rejects_mismatched_band_order():
@@ -300,7 +462,7 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.flux, grid.flux)
     assert np.allclose(loaded.log_prior, grid.log_prior)
     assert np.array_equal(loaded.valid, grid.valid)
-    assert loaded.meta["schema"] == "composed.photometric_model_grid.v2"
+    assert loaded.meta["schema"] == "composed.photometric_model_grid.v3"
     specification = loaded.meta["scientific_specification"]
     assert specification["backend"]["type"].endswith("PerMassTemplateBackend")
     assert specification["parameters"] == ["template"]
@@ -327,6 +489,29 @@ def test_legacy_formed_mass_photometric_grid_is_rejected(tmp_path):
     )
 
     with pytest.raises(ValueError, match="Legacy photometric model grid"):
+        load_photometric_model_grid(path, require_provenance_sidecar=False)
+
+
+def test_v2_model_grid_is_rejected_because_mask_validity_semantics_changed(tmp_path):
+    path = tmp_path / "v2_grid.npz"
+    np.savez(
+        path,
+        samples=np.zeros((1, 1)),
+        flux=np.asarray([[1.0, np.nan]]),
+        log_prior=np.zeros(1),
+        valid=np.zeros(1, dtype=bool),
+        parameter_names=np.asarray(["template"], dtype=object),
+        band_names=np.asarray(["g", "r"], dtype=object),
+        mass_normalization=np.asarray(MassNormalization.PER_SOLAR_MASS.value, dtype=object),
+        mass_reference=np.asarray(MassReference.SURVIVING_STELLAR_MASS.value, dtype=object),
+        flux_unit=np.asarray("maggies", dtype=object),
+        meta=np.asarray(
+            '{"schema": "composed.photometric_model_grid.v2"}',
+            dtype=object,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="per-object mask semantics"):
         load_photometric_model_grid(path, require_provenance_sidecar=False)
 
 

@@ -148,3 +148,29 @@ def test_load_inference_result_rejects_modified_archive(tmp_path):
         load_inference_result(npz_path)
     legacy = load_inference_result(npz_path, verify_provenance=False)
     assert legacy.samples.shape == (2, 1)
+
+
+@pytest.mark.parametrize("field", ["problem", "sampler_name", "posterior_summary"])
+def test_load_inference_result_rejects_modified_scientific_sidecar(tmp_path, field):
+    result = InferenceResult(
+        samples=np.asarray([[0.0], [1.0]]),
+        logp=np.asarray([-1.0, 0.0]),
+        weights=np.ones(2),
+        parameter_names=("z",),
+        sampler_name="toy",
+        metadata={"problem": {"backend": "A", "data": {"flux": [1.0]}}},
+    )
+    npz_path, json_path = save_inference_result(result, tmp_path / f"tampered_{field}")
+    payload = json.loads(json_path.read_text())
+    if field == "problem":
+        payload["metadata"]["problem"]["backend"] = "B"
+    elif field == "sampler_name":
+        payload["sampler_name"] = "different-sampler"
+    else:
+        payload["posterior_summary"]["z"]["median"] = 999.0
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+    with pytest.raises(ValueError, match="metadata hash mismatch"):
+        load_inference_result(npz_path)
+    legacy = load_inference_result(npz_path, verify_provenance=False)
+    assert legacy.samples.shape == (2, 1)
