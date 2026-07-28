@@ -70,6 +70,12 @@ must declare their `MassNormalization`. The likelihood multiplies by
 contract, `log10_mass` is the present-day surviving stellar mass and per-mass
 backend outputs are normalized by that same quantity.
 
+The stable traditional inference paths are grid, random walk, emcee,
+self-contained mixed Gibbs/TAMIS, and PocoMC. The finite-difference Laplace
+runner and the adapter named `TAMIS` for a separately installed historical
+package are experimental in 0.1.1 and emit a warning. Use `MixedTAMIS` for the
+self-contained CompoSED implementation.
+
 ## Acknowledgements and citations
 
 CompoSED is an inference/interface layer around scientific modeling codes. If
@@ -478,6 +484,19 @@ result = run_photometric_grid_catalog(
 z_map = result.map_estimates[:, parameter_space.names.index("z")]
 ```
 
+Cached per-solar-mass grids can profile or marginalize over a separate
+`log10_mass_grid`. For marginalization, that numerical grid is only an
+integration grid: pass the same continuous `Prior` declared by the scientific
+model. CompoSED multiplies its density by each irregular-grid cell width.
+Sampler-specific arrays of mass weights are rejected.
+
+The separate rest-frame fast-projection API is experimental in 0.1.1. It
+accepts only backends that explicitly declare a redshift-independent
+rest-spectrum grid. CIGALE configurations with redshift-independent SFHs can
+support that contract; current FSPS and redshift-aware CIGALE SFHs are rejected
+because their SFH evaluation needs redshift. Every requested filter must be
+covered by the rest wavelength grid.
+
 For independent per-object samplers, use `inftools.fit_many` to run a
 single-object fitting function across a catalog with serial, thread, or process
 execution. For process execution, build fragile backend state such as FSPS or
@@ -505,7 +524,7 @@ from composed import (
 )
 from composed.backends.base import ModelPhotometry, SEDBackend
 from composed.filters import FilterSet
-from composed.plot import plot_corner_hexbin, plot_posterior_predictive_sed, plot_traces
+from composed.plot import plot_corner_hexbin, plot_posterior_predictive, plot_traces
 
 class LinearBackend(SEDBackend):
     mass_normalization = MassNormalization.ABSOLUTE
@@ -545,13 +564,7 @@ save_inference_result(result, "runs/object_001")
 
 plot_corner_hexbin(result)
 plot_traces(result)
-plot_posterior_predictive_sed(
-    result,
-    backend,
-    parameters,
-    photometry=data,
-    filters=filters,
-)
+plot_posterior_predictive(result, problem)
 ```
 
 `parameter_transform` is the auditable physical bridge from sampled values to

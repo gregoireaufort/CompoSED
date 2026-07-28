@@ -39,6 +39,33 @@ def test_stable_notebooks_have_unique_cell_ids_and_no_saved_errors():
         assert not errors, f"{path.name} contains a saved execution error"
 
 
+def test_tutorial_notebooks_ship_without_machine_specific_saved_outputs():
+    for path in sorted((ROOT / "notebooks" / "tutorials").glob("*.ipynb")):
+        payload = notebook_payload(path)
+        for cell in payload["cells"]:
+            assert not cell.get("outputs", []), f"{path.name} contains stale saved output"
+            if cell.get("cell_type") == "code":
+                assert cell.get("execution_count") is None
+
+
+def test_cigale_maf_and_tamis_tutorials_share_noise_and_problem_provenance():
+    maf_path = ROOT / "notebooks" / "tutorials" / "02_cigale_maf_cosmos2020_catalog.ipynb"
+    tamis_path = ROOT / "notebooks" / "tutorials" / "03_cigale_tamis_single_galaxy.ipynb"
+    maf_source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook_payload(maf_path)["cells"]
+    )
+    tamis_source = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook_payload(tamis_path)["cells"]
+    )
+
+    for source in (maf_source, tamis_source):
+        assert "FRACTIONAL_MODEL_ERROR = 0.05" in source
+        assert "sigma_effective" in source
+    assert "fractional_error=0.0" not in maf_source
+    assert "require_result_matches_problem" in maf_source
+    assert 'result_label=f"MAF ({N_TRAIN:,} simulations, 256 x 3)"' in maf_source
+
+
 def test_validation_notebook_npz_outputs_use_provenance_helper():
     for name in ("09_cigale_mixed_prior_validation.ipynb",):
         source = notebook_source(name)

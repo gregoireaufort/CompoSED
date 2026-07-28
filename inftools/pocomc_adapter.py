@@ -48,7 +48,9 @@ def pocomc_prior_from_parameter_space(parameter_space):
         else:
             raise TypeError(
                 f"PocoMC cannot translate prior {type(prior).__name__} for parameter {name!r}. "
-                "Pass PocoMC(prior=...) explicitly for a custom continuous prior."
+                "Problem-driven PocoMC does not permit a sampler-specific replacement prior. "
+                "Use a supported CompoSED Prior, another sampler, or the low-level run_pocomc "
+                "adapter for a deliberately standalone calculation."
             )
         distributions.append(distribution)
     return pc.Prior(distributions)

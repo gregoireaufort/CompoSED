@@ -80,11 +80,15 @@ class SEDBackend:
     ``predict_photometry(params, filters)``. ``PER_SOLAR_MASS`` outputs are per
     one solar mass of present-day surviving stars, as declared by
     ``mass_reference``. Backends should not apply the fitted mass amplitude;
-    that remains centralized in the likelihood.
+    that remains centralized in the likelihood. The experimental fast catalog
+    path additionally requires an explicit
+    ``supports_fast_catalog_restframe = True`` declaration; implementing
+    ``predict_rest_spectrum`` alone is not sufficient.
     """
 
     mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
     mass_reference: MassReference | None = None
+    supports_fast_catalog_restframe: bool = False
 
     def predict_photometry(self, params: Mapping[str, float], filters) -> ModelPhotometry:
         raise NotImplementedError

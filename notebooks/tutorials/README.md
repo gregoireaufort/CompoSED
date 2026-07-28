@@ -19,6 +19,10 @@ artifacts. Set `COMPOSED_TUTORIAL_QUICK=1` before opening an SBI notebook for a
 short installation check; the normal configuration uses 300,000 simulations
 and all 100,000 catalog objects.
 
+The notebooks are distributed with empty output cells so figures and numerical
+summaries cannot be mistaken for results from the current checkout. Execute
+them locally after preparing the shared catalog.
+
 Both MAF notebooks use the same public facade as the sampler tutorials:
 `fit(problem, MAF(...), training=Simulate(...))`. The returned
 `InferenceResult` contains the single-galaxy posterior and retains the trained

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.1.1
+
+Scientific-safety patch release.
+
+### Fixed
+
+- Analytic catalog mass profiling no longer converts a non-positive amplitude
+  into a numerically finite `log10_mass` near -307. Unbounded invalid optima
+  now fail clearly; explicitly bounded fits report whether the optimum was
+  clipped to a mass boundary.
+- Fast rest-frame catalog projection no longer rescales W/nm luminosity merely
+  because the wavelength coordinate was supplied in Angstrom.
+- Fast projection now rejects backends that do not explicitly support a
+  redshift-independent rest-spectrum grid and rejects filters not fully
+  covered by that grid.
+- The CIGALE MAF and TAMIS tutorials now use the same explicit 5% model-error
+  term and validate cached comparison results against the current `Problem`.
+- Tutorial notebooks ship without machine-specific saved outputs.
+- Cached catalog mass marginalization now requires a continuous `Prior` and
+  uses prior-density times irregular-grid cell width.
+- Weighted posterior plots preserve the empirical posterior by resampling with
+  replacement.
+- `plot_posterior_predictive(result, problem)` validates the fitted Problem and
+  reuses its parameter transform, filters, and photometric units.
+- Problem-driven PocoMC no longer accepts a sampler-specific replacement
+  prior. Conditioned SBI results restore condition columns and identify
+  marginalized nuisance parameters.
+
+### Experimental status
+
+- The finite-difference Laplace runner and the adapter for the separately
+  installed historical `TAMIS` package are explicitly experimental and emit
+  warnings when run. CompoSED's self-contained `MixedTAMIS` remains supported.
+- The fast rest-frame catalog path is explicitly experimental in 0.1.1. It is
+  currently enabled only for backends that declare the required capability;
+  current FSPS models are rejected because their SFH evaluation requires
+  redshift.
+
 ## 0.1.0
 
 First public alpha release.
@@ -13,7 +51,7 @@ First public alpha release.
 - FSPS and CIGALE v2022.0 forward-model backends.
 - Named constant, exponential, delayed-tau, continuity, and tabular SFHs where
   supported by the selected backend.
-- Grid, random-walk, emcee, Laplace, TAMIS, mixed TAMIS/Gibbs, and PocoMC
+- Grid, random-walk, emcee, self-contained mixed TAMIS/Gibbs, and PocoMC
   inference adapters.
 - Stable conditional MAF and Gaussian-mixture MDN SBI with explicit
   measurement-noise conditioning, bounded target transforms, catalog batching,
@@ -25,6 +63,9 @@ First public alpha release.
 
 - Conditional diffusion remains in an explicit experimental namespace and is
   not part of the stable 0.1 API.
+- The finite-difference Laplace runner, the adapter for the separately
+  installed historical `TAMIS` package, and fast rest-frame catalog projection
+  are experimental.
 
 ### Known limitations
 

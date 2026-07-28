@@ -61,6 +61,16 @@ class PerMassTemplateBackend(SEDBackend):
 
 
 @dataclass
+class ZeroPerMassBackend(SEDBackend):
+    mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
+    mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
+
+    def predict_photometry(self, params, filters):
+        del params, filters
+        return ModelPhotometry(band_names=("g",), flux=np.asarray([0.0]))
+
+
+@dataclass
 class OneBandBackend(SEDBackend):
     flux: float
     mass_normalization: MassNormalization = MassNormalization.ABSOLUTE
@@ -213,6 +223,7 @@ def test_build_model_grid_excludes_mass_and_profiles_mass_for_catalog():
         [dataset],
         log10_mass_bounds=(0.0, 3.0),
         log10_mass_grid=np.linspace(0.0, 3.0, 301),
+        log10_mass_prior=space.priors["log10_mass"],
         model_chunk_size=1,
         object_chunk_size=1,
         mass_chunk_size=64,
@@ -225,6 +236,51 @@ def test_build_model_grid_excludes_mass_and_profiles_mass_for_catalog():
     assert np.isclose(result.log10_mass_profile[0, result.profile_map_indices[0]], 1.0)
     assert result.marginal_map_estimates[0, 0] == 1.0
     assert np.isclose(result.log10_mass_quantiles[0, 1], 1.0, atol=0.02)
+
+
+def test_unbounded_analytic_mass_profile_rejects_nonpositive_amplitude():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("u", "g"),
+        flux=np.asarray([-1.0, -2.0]),
+        sigma=np.asarray([0.1, 0.1]),
+    )
+    grid = build_photometric_model_grid(
+        backend,
+        space,
+        filters=("u", "g"),
+        band_names=("u", "g"),
+    )
+
+    with pytest.raises(RuntimeError, match="No finite positive analytic mass normalization"):
+        evaluate_catalog_model_grid_likelihood(grid, [dataset])
+
+
+def test_bounded_analytic_mass_profile_flags_clipped_boundary_solution():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(
+        band_names=("u", "g"),
+        flux=np.asarray([-1.0, -2.0]),
+        sigma=np.asarray([0.1, 0.1]),
+    )
+    grid = build_photometric_model_grid(
+        backend,
+        space,
+        filters=("u", "g"),
+        band_names=("u", "g"),
+    )
+
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        log10_mass_bounds=(-2.0, 3.0),
+    )
+
+    assert np.allclose(result.log10_mass_profile, -2.0)
+    assert np.all(result.mass_profile_at_boundary)
+    assert not np.any(result.log10_mass_profile < -2.0)
 
 
 def test_model_grid_save_load_roundtrip(tmp_path):
@@ -285,6 +341,7 @@ def test_mass_grid_profiles_complete_upper_limit_likelihood():
         grid,
         [dataset],
         log10_mass_grid=np.linspace(-3.0, 0.0, 61),
+        log10_mass_prior=UniformPrior(-3.0, 0.0),
         model_chunk_size=1,
         object_chunk_size=1,
         mass_chunk_size=16,
@@ -329,7 +386,12 @@ def test_censored_profile_matches_brute_force_scalar_likelihood_on_mass_grid():
         filters=("u", "g"),
         band_names=("u", "g"),
     )
-    result = evaluate_catalog_model_grid_likelihood(grid, [dataset], log10_mass_grid=mass_grid)
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        log10_mass_grid=mass_grid,
+        log10_mass_prior=UniformPrior(-2.0, 0.5),
+    )
 
     full_space = ParameterSpace(
         names=("log10_mass", "template"),
@@ -353,3 +415,42 @@ def test_profile_grid_requires_per_solar_mass_models():
 
     with pytest.raises(ValueError, match="PER_SOLAR_MASS"):
         evaluate_catalog_model_grid_likelihood(grid, [dataset], log10_mass_grid=np.linspace(0.0, 1.0, 3))
+
+
+def test_mass_marginalization_uses_declared_prior_and_irregular_grid_cell_widths():
+    backend = ZeroPerMassBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(("g",), flux=np.asarray([0.0]), sigma=np.asarray([1.0]))
+    grid = build_photometric_model_grid(backend, space, filters=("g",), band_names=("g",))
+
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        log10_mass_grid=np.asarray([8.0, 9.0, 11.0]),
+        log10_mass_prior=UniformPrior(8.0, 11.0),
+        store_mass_posterior=True,
+    )
+
+    expected_weights = np.asarray([0.5, 1.5, 1.0]) / 3.0
+    assert np.allclose(result.mass_posterior_norm[0, 0], expected_weights)
+    assert result.log10_mass_quantiles[0, 1] == pytest.approx(9.5)
+    assert result.meta["mass_prior"]["type"] == "UniformPrior"
+    assert result.meta["mass_prior"]["quadrature"] == "prior density times midpoint-cell width"
+
+
+def test_mass_grid_requires_a_prior_object_instead_of_implicit_or_array_weights():
+    backend = ZeroPerMassBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+    dataset = SEDDataset(("g",), flux=np.asarray([0.0]), sigma=np.asarray([1.0]))
+    grid = build_photometric_model_grid(backend, space, filters=("g",), band_names=("g",))
+    mass_grid = np.asarray([8.0, 9.0, 11.0])
+
+    with pytest.raises(ValueError, match="numerical grid does not define a prior"):
+        evaluate_catalog_model_grid_likelihood(grid, [dataset], log10_mass_grid=mass_grid)
+    with pytest.raises(TypeError, match="Prior instance"):
+        evaluate_catalog_model_grid_likelihood(
+            grid,
+            [dataset],
+            log10_mass_grid=mass_grid,
+            log10_mass_prior=np.ones(3),
+        )

@@ -10,6 +10,7 @@ import numpy as np
 from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
+from composed.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, LogUniformPrior, Prior, UniformPrior
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import (
     MASS_CONVENTION_SCHEMA,
@@ -82,6 +83,8 @@ class CatalogProfileGridResult:
     If a ``log10_mass_grid`` was supplied, ``marginal_logp`` stores the same
     quantity marginalized over that mass grid with the declared mass prior.
     Every reported ``log10_mass`` is present-day surviving stellar mass.
+    ``mass_profile_at_boundary`` identifies models whose unconstrained
+    analytic amplitude was clipped to an explicitly declared mass bound.
     """
 
     model_grid: PhotometricModelGrid
@@ -91,6 +94,7 @@ class CatalogProfileGridResult:
     profile_map_estimates: np.ndarray
     log10_mass_profile: np.ndarray
     mass_scale_profile: np.ndarray
+    mass_profile_at_boundary: np.ndarray
     marginal_logp: np.ndarray | None = None
     marginal_weights_norm: np.ndarray | None = None
     marginal_map_indices: np.ndarray | None = None
@@ -183,7 +187,7 @@ def evaluate_catalog_model_grid_likelihood(
     sigma_floor: float | None = None,
     log10_mass_grid: Sequence[float] | None = None,
     log10_mass_bounds: tuple[float, float] | None = None,
-    log10_mass_prior: Sequence[float] | None = None,
+    log10_mass_prior: Prior | None = None,
     model_chunk_size: int = 2048,
     object_chunk_size: int = 512,
     mass_chunk_size: int = 128,
@@ -200,7 +204,9 @@ def evaluate_catalog_model_grid_likelihood(
     The analytic normalization is used only for detection-only catalogs. If
     any object contains an upper limit, ``log10_mass_grid`` is required and the
     complete censored likelihood is maximized over that grid. The same grid is
-    also used for mass marginalization with the declared mass prior.
+    also used for mass marginalization. In that case ``log10_mass_prior`` must
+    be a continuous :class:`~composed.priors.Prior`; its density is multiplied
+    by the integration-cell width on the (possibly irregular) mass grid.
     """
 
     if model_grid.mass_normalization != MassNormalization.PER_SOLAR_MASS:
@@ -224,7 +230,7 @@ def evaluate_catalog_model_grid_likelihood(
             f"grid={tuple(model_grid.band_names)}, catalog={band_names}."
         )
 
-    log10_mass_grid_arr, log_mass_prior_weights, mass_bounds = _prepare_mass_grid_and_prior(
+    log10_mass_grid_arr, log_mass_prior_weights, mass_bounds, mass_prior_meta = _prepare_mass_grid_and_prior(
         log10_mass_grid=log10_mass_grid,
         log10_mass_bounds=log10_mass_bounds,
         log10_mass_prior=log10_mass_prior,
@@ -292,6 +298,7 @@ def evaluate_catalog_model_grid_likelihood(
         profile_map_estimates=profile_map_estimates,
         log10_mass_profile=profile["log10_mass_profile"],
         mass_scale_profile=profile["mass_scale_profile"],
+        mass_profile_at_boundary=profile["mass_profile_at_boundary"],
         marginal_logp=marginal_logp,
         marginal_weights_norm=marginal_weights,
         marginal_map_indices=marginal_map_indices,
@@ -306,7 +313,7 @@ def evaluate_catalog_model_grid_likelihood(
             "upper_limit_mask": upper_limit_mask,
             "sigma_floor": sigma_floor,
             "log10_mass_bounds": mass_bounds,
-            "mass_prior": "uniform over supplied log10_mass_grid" if log_mass_prior_weights is not None else None,
+            "mass_prior": mass_prior_meta,
             "mass_reference": model_grid.mass_reference.value,
             "mass_convention": MASS_CONVENTION_SCHEMA,
         },
@@ -709,6 +716,14 @@ def _catalog_gaussian_logp(
 
 
 def _prepare_mass_grid_and_prior(*, log10_mass_grid, log10_mass_bounds, log10_mass_prior):
+    """Prepare a continuous mass-prior quadrature on an explicit grid.
+
+    The supplied grid is only a numerical integration grid. Its points are not
+    interpreted as equally probable discrete choices. The prior density is
+    evaluated at each point and multiplied by the width of that point's
+    midpoint cell before normalization.
+    """
+
     if log10_mass_bounds is not None:
         lo, hi = (float(log10_mass_bounds[0]), float(log10_mass_bounds[1]))
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
@@ -720,33 +735,90 @@ def _prepare_mass_grid_and_prior(*, log10_mass_grid, log10_mass_bounds, log10_ma
     if log10_mass_grid is None:
         if log10_mass_prior is not None:
             raise ValueError("log10_mass_prior requires log10_mass_grid.")
-        return None, None, bounds
+        return None, None, bounds, None
 
     grid = np.asarray(log10_mass_grid, dtype=float)
-    if grid.ndim != 1 or grid.size == 0:
-        raise ValueError("log10_mass_grid must be a non-empty one-dimensional array.")
+    if grid.ndim != 1 or grid.size < 2:
+        raise ValueError("log10_mass_grid must be a one-dimensional array with at least two points.")
     if not np.all(np.isfinite(grid)):
         raise ValueError("log10_mass_grid must be finite.")
     if np.any(np.diff(grid) <= 0.0):
         raise ValueError("log10_mass_grid must be strictly increasing.")
-    if bounds is None:
-        bounds = (float(grid[0]), float(grid[-1]))
-    else:
-        keep = (grid >= bounds[0]) & (grid <= bounds[1])
-        if not np.any(keep):
-            raise ValueError("log10_mass_grid has no values inside log10_mass_bounds.")
-        grid = grid[keep]
-
     if log10_mass_prior is None:
-        log_weights = np.full(grid.size, -np.log(grid.size), dtype=float)
-    else:
-        prior = np.asarray(log10_mass_prior, dtype=float)
-        if prior.shape != grid.shape:
-            raise ValueError("log10_mass_prior must have the same shape as log10_mass_grid.")
-        if not np.all(np.isfinite(prior)) or np.any(prior < 0.0) or np.sum(prior) <= 0.0:
-            raise ValueError("log10_mass_prior must contain finite non-negative weights with positive sum.")
-        log_weights = np.log(prior / np.sum(prior))
-    return grid, log_weights, bounds
+        raise ValueError(
+            "log10_mass_prior must be a continuous Prior when log10_mass_grid is supplied. "
+            "The numerical grid does not define a prior."
+        )
+    if not isinstance(log10_mass_prior, Prior):
+        raise TypeError(
+            "log10_mass_prior must be a composed.priors.Prior instance, not an array of weights."
+        )
+    if isinstance(log10_mass_prior, (ChoicePrior, IntegerUniformPrior, DeltaPrior)):
+        raise TypeError(
+            "Cached mass marginalization requires a continuous log10_mass_prior. "
+            "Put discrete mass choices in the full ParameterSpace grid instead."
+        )
+
+    prior_support = _finite_prior_support(log10_mass_prior)
+    if prior_support is not None:
+        if bounds is None:
+            bounds = prior_support
+        elif not np.allclose(bounds, prior_support, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                "log10_mass_bounds would truncate or extend the declared bounded mass prior. "
+                "Declare the intended bounds on the Prior itself."
+            )
+    elif bounds is None:
+        raise ValueError(
+            "An unbounded log10_mass_prior requires explicit finite log10_mass_bounds "
+            "for numerical marginalization."
+        )
+
+    if not np.isclose(grid[0], bounds[0], rtol=0.0, atol=1e-12) or not np.isclose(
+        grid[-1], bounds[1], rtol=0.0, atol=1e-12
+    ):
+        raise ValueError(
+            "log10_mass_grid endpoints must equal the mass integration bounds. "
+            f"Got grid [{grid[0]}, {grid[-1]}] and bounds {bounds}."
+        )
+
+    log_density = np.asarray([log10_mass_prior.logpdf(value) for value in grid], dtype=float)
+    cell_widths = _grid_cell_widths(grid)
+    log_unnormalized = log_density + np.log(cell_widths)
+    normalization = _logsumexp(log_unnormalized)
+    if not np.isfinite(normalization):
+        raise ValueError("The declared log10_mass_prior has no finite density on log10_mass_grid.")
+    log_weights = log_unnormalized - normalization
+    prior_meta = {
+        "type": type(log10_mass_prior).__name__,
+        "repr": repr(log10_mass_prior),
+        "integration_bounds": tuple(float(value) for value in bounds),
+        "quadrature": "prior density times midpoint-cell width",
+        "normalized_weights": np.exp(log_weights),
+    }
+    return grid, log_weights, bounds, prior_meta
+
+
+def _finite_prior_support(prior: Prior) -> tuple[float, float] | None:
+    """Return finite support for bounded continuous priors."""
+
+    if isinstance(prior, (UniformPrior, LogUniformPrior)):
+        return float(prior.low), float(prior.high)
+    return None
+
+
+def _grid_cell_widths(grid: np.ndarray) -> np.ndarray:
+    """Widths of midpoint cells spanning ``[grid[0], grid[-1]]``."""
+
+    grid = np.asarray(grid, dtype=float)
+    edges = np.empty(grid.size + 1, dtype=float)
+    edges[0] = grid[0]
+    edges[-1] = grid[-1]
+    edges[1:-1] = 0.5 * (grid[:-1] + grid[1:])
+    widths = np.diff(edges)
+    if not np.all(np.isfinite(widths)) or np.any(widths <= 0.0):
+        raise ValueError("log10_mass_grid does not define positive integration cells.")
+    return widths
 
 
 def _catalog_profile_mass_logp(
@@ -792,6 +864,7 @@ def _catalog_profile_mass_logp(
     profile_logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
     mass_scale = np.full((n_objects, n_grid), np.nan, dtype=float)
     log10_mass = np.full((n_objects, n_grid), np.nan, dtype=float)
+    mass_at_boundary = np.zeros((n_objects, n_grid), dtype=bool)
     detection_mask = active_mask & ~upper_limit_mask
     inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
     logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
@@ -807,8 +880,14 @@ def _catalog_profile_mass_logp(
             o1 = min(o0 + object_chunk_size, n_objects)
             numerator = np.sum(data_flux[o0:o1, None, :] * model[None, :, :] * inv_sigma2[o0:o1, None, :], axis=2)
             denominator = np.sum(model[None, :, :] ** 2 * inv_sigma2[o0:o1, None, :], axis=2)
-            scale = np.divide(numerator, denominator, out=np.full_like(numerator, np.nan), where=denominator > 0.0)
-            scale = _clip_mass_scale(scale, log10_mass_bounds)
+            unconstrained_scale = np.divide(
+                numerator,
+                denominator,
+                out=np.full_like(numerator, np.nan),
+                where=denominator > 0.0,
+            )
+            scale = _clip_mass_scale(unconstrained_scale, log10_mass_bounds)
+            at_boundary = _mass_scale_boundary_mask(unconstrained_scale, log10_mass_bounds)
             model_scaled = scale[:, :, None] * model[None, :, :]
             diff = data_flux[o0:o1, None, :] - model_scaled
             chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, :], axis=2)
@@ -823,14 +902,23 @@ def _catalog_profile_mass_logp(
             profile_logp[o0:o1, grid_indices] = values
             mass_scale[o0:o1, grid_indices] = scale
             log10_mass[o0:o1, grid_indices] = np.where(finite_scale, np.log10(scale), np.nan)
+            mass_at_boundary[o0:o1, grid_indices] = at_boundary
 
     if require_finite and not np.all(np.any(np.isfinite(profile_logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(profile_logp), axis=1))[0]
+        if log10_mass_bounds is None:
+            raise RuntimeError(
+                "No finite positive analytic mass normalization for catalog object(s) "
+                f"{bad.tolist()}. A non-positive unconstrained amplitude is not a physical "
+                "stellar-mass estimate. Supply explicit log10_mass_bounds to report a "
+                "flagged boundary solution, or use an explicit log10_mass_grid."
+            )
         raise RuntimeError(f"No finite profiled grid point for catalog object(s): {bad.tolist()}")
     return {
         "profile_logp": profile_logp,
         "mass_scale_profile": mass_scale,
         "log10_mass_profile": log10_mass,
+        "mass_profile_at_boundary": mass_at_boundary,
     }
 
 
@@ -856,6 +944,7 @@ def _catalog_grid_profile_mass_logp(
     profile_logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
     mass_scale = np.full((n_objects, n_grid), np.nan, dtype=float)
     log10_mass = np.full((n_objects, n_grid), np.nan, dtype=float)
+    mass_at_boundary = np.zeros((n_objects, n_grid), dtype=bool)
     detection_mask = active_mask & ~upper_limit_mask
     inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
     logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
@@ -897,6 +986,9 @@ def _catalog_grid_profile_mass_logp(
             profile_logp[o0:o1, grid_indices] = best_values
             log10_mass[o0:o1, grid_indices] = log10_mass_grid[best_mass_index]
             mass_scale[o0:o1, grid_indices] = scales[best_mass_index]
+            mass_at_boundary[o0:o1, grid_indices] = (best_mass_index == 0) | (
+                best_mass_index == scales.size - 1
+            )
 
     if not np.all(np.any(np.isfinite(profile_logp), axis=1)):
         bad = np.where(~np.any(np.isfinite(profile_logp), axis=1))[0]
@@ -905,16 +997,29 @@ def _catalog_grid_profile_mass_logp(
         "profile_logp": profile_logp,
         "mass_scale_profile": mass_scale,
         "log10_mass_profile": log10_mass,
+        "mass_profile_at_boundary": mass_at_boundary,
     }
 
 
 def _clip_mass_scale(scale: np.ndarray, log10_mass_bounds: tuple[float, float] | None) -> np.ndarray:
     scale = np.asarray(scale, dtype=float)
     if log10_mass_bounds is None:
-        tiny = np.finfo(float).tiny
-        return np.where(np.isfinite(scale) & (scale > tiny), scale, tiny)
+        return np.where(np.isfinite(scale) & (scale > 0.0), scale, np.nan)
     lo, hi = log10_mass_bounds
-    return np.clip(scale, 10.0**lo, 10.0**hi)
+    return np.where(np.isfinite(scale), np.clip(scale, 10.0**lo, 10.0**hi), np.nan)
+
+
+def _mass_scale_boundary_mask(
+    unconstrained_scale: np.ndarray,
+    log10_mass_bounds: tuple[float, float] | None,
+) -> np.ndarray:
+    """Flag analytic optima clipped to an explicitly declared mass boundary."""
+
+    scale = np.asarray(unconstrained_scale, dtype=float)
+    if log10_mass_bounds is None:
+        return np.zeros(scale.shape, dtype=bool)
+    lo, hi = log10_mass_bounds
+    return np.isfinite(scale) & ((scale <= 10.0**lo) | (scale >= 10.0**hi))
 
 
 def _catalog_marginal_mass_logp(
@@ -1028,15 +1133,40 @@ def _logsumexp(values: np.ndarray, axis=None) -> np.ndarray:
 
 
 def _weighted_quantile_grid(grid: np.ndarray, weights: np.ndarray, quantiles: Sequence[float]) -> np.ndarray:
+    """Quantiles of a piecewise-constant density over grid midpoint cells."""
+
     grid = np.asarray(grid, dtype=float)
     weights = np.asarray(weights, dtype=float)
     if grid.ndim != 1 or weights.shape != grid.shape:
         raise ValueError("grid and weights must be one-dimensional arrays with matching shape.")
     if not np.isfinite(weights).all() or np.sum(weights) <= 0.0:
         return np.full(len(tuple(quantiles)), np.nan, dtype=float)
+    quantiles = np.asarray(tuple(quantiles), dtype=float)
+    if np.any(~np.isfinite(quantiles)) or np.any((quantiles < 0.0) | (quantiles > 1.0)):
+        raise ValueError("quantiles must lie in [0, 1].")
+
     weights = weights / np.sum(weights)
-    cdf = np.cumsum(weights)
-    return np.interp(np.asarray(tuple(quantiles), dtype=float), cdf, grid)
+    edges = np.empty(grid.size + 1, dtype=float)
+    edges[0] = grid[0]
+    edges[-1] = grid[-1]
+    edges[1:-1] = 0.5 * (grid[:-1] + grid[1:])
+    cdf_edges = np.concatenate(([0.0], np.cumsum(weights)))
+
+    output = np.empty(quantiles.size, dtype=float)
+    for i, quantile in enumerate(quantiles):
+        if quantile <= 0.0:
+            output[i] = edges[0]
+            continue
+        if quantile >= 1.0:
+            output[i] = edges[-1]
+            continue
+        cell = min(int(np.searchsorted(cdf_edges, quantile, side="right") - 1), weights.size - 1)
+        if weights[cell] <= 0.0:
+            output[i] = edges[cell]
+            continue
+        fraction = (quantile - cdf_edges[cell]) / weights[cell]
+        output[i] = edges[cell] + fraction * (edges[cell + 1] - edges[cell])
+    return output
 
 
 def _normalize_logp_rows(logp: np.ndarray) -> np.ndarray:

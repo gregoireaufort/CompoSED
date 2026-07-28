@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -17,6 +18,7 @@ from composed.catalog import (
 )
 from composed.data import SEDDataset
 from composed.filters import FilterSet
+from composed.priors import Prior
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import (
     MASS_CONVENTION_SCHEMA,
@@ -30,6 +32,21 @@ MJY_PER_MAGGIE = 3631.0e3
 AB_ZERO_FNU_W_M2_HZ = 3631.0e-26
 C_NM_PER_S = 299_792_458.0e9
 PARSEC_M = 3.085677581491367e16
+
+
+class ExperimentalFastCatalogWarning(UserWarning):
+    """Warning emitted by the restricted fast rest-frame catalog path."""
+
+
+def _warn_experimental_fast_catalog() -> None:
+    warnings.warn(
+        "Fast rest-frame catalog projection is experimental in CompoSED 0.1.1. "
+        "It currently supports only backends that explicitly declare a "
+        "redshift-independent rest-spectrum capability, and it requires every "
+        "requested filter to be covered by the rest wavelength grid.",
+        ExperimentalFastCatalogWarning,
+        stacklevel=3,
+    )
 
 
 @dataclass
@@ -158,7 +175,8 @@ class NativeCatalogFitResult:
 
     The posterior arrays have the same object/model layout as
     ``CatalogProfileGridResult`` but the observed photometric grids are built
-    on the fly for each rounded redshift group.
+    on the fly for each rounded redshift group. The boolean
+    ``mass_profile_at_boundary`` array flags explicitly bounded mass optima.
     """
 
     rest_grid: RestFrameSpectralGrid
@@ -171,6 +189,7 @@ class NativeCatalogFitResult:
     profile_map_estimates: np.ndarray
     log10_mass_profile: np.ndarray
     mass_scale_profile: np.ndarray
+    mass_profile_at_boundary: np.ndarray
     marginal_logp: np.ndarray | None = None
     marginal_weights_norm: np.ndarray | None = None
     marginal_map_indices: np.ndarray | None = None
@@ -192,11 +211,21 @@ def build_restframe_spectral_grid(
 ) -> RestFrameSpectralGrid:
     """Build the expensive rest-frame SED grid once.
 
-    This is the native CompoSED analogue of CIGALE's cached pre-redshift grid.
-    It enumerates finite non-mass, non-redshift parameters, asks the backend for
-    rest-frame luminosity density, and stores all spectra on one wavelength
-    grid in nm and W/nm.
+    This experimental path is the native CompoSED analogue of CIGALE's cached
+    pre-redshift grid. It enumerates finite non-mass, non-redshift parameters,
+    asks a backend with an explicit capability declaration for rest-frame
+    luminosity density, and stores all spectra on one wavelength grid in nm
+    and W/nm.
     """
+
+    _warn_experimental_fast_catalog()
+    if not bool(getattr(backend, "supports_fast_catalog_restframe", False)):
+        raise NotImplementedError(
+            f"{type(backend).__name__} does not declare support for the experimental "
+            "redshift-independent rest-frame catalog grid. In particular, FSPS SFH "
+            "evaluation currently requires a redshift and must use the ordinary backend "
+            "or cached photometric-grid path."
+        )
 
     samples, names, log_prior = _finite_grid_theta_excluding(
         parameter_space,
@@ -370,6 +399,15 @@ def project_rest_grid_to_photometric_grid(
     validate_mass_reference(rest_grid.mass_normalization, rest_grid.mass_reference)
     if not np.array_equal(rest_grid.wavelength_nm, operator.wavelength_nm):
         raise ValueError("Rest grid wavelength and operator wavelength grids do not match.")
+    if not np.all(operator.valid_bands):
+        unavailable = [
+            name for name, valid in zip(operator.band_names, operator.valid_bands) if not valid
+        ]
+        raise ValueError(
+            "The experimental fast catalog path requires the rest wavelength grid to "
+            "cover every requested filter. Unavailable band(s): "
+            + ", ".join(unavailable)
+        )
     flux = rest_grid.luminosity_w_per_nm @ operator.matrix.T
     valid = rest_grid.valid & np.all(np.isfinite(flux), axis=1) & np.all(flux >= 0.0, axis=1)
     valid &= _age_validity_mask(
@@ -411,7 +449,7 @@ def fit_catalog_with_restframe_grid(
     sigma_floor: float | None = None,
     log10_mass_grid: Sequence[float] | None = None,
     log10_mass_bounds: tuple[float, float] | None = None,
-    log10_mass_prior: Sequence[float] | None = None,
+    log10_mass_prior: Prior | None = None,
     model_chunk_size: int = 2048,
     object_chunk_size: int = 512,
     mass_chunk_size: int = 128,
@@ -421,6 +459,7 @@ def fit_catalog_with_restframe_grid(
 ) -> NativeCatalogFitResult:
     """Fit many catalog objects by redshift-projecting one rest-frame grid."""
 
+    _warn_experimental_fast_catalog()
     datasets = tuple(datasets)
     if not datasets:
         raise ValueError("fit_catalog_with_restframe_grid requires at least one dataset.")
@@ -443,9 +482,12 @@ def fit_catalog_with_restframe_grid(
     profile_logp = np.full((n_objects, n_models), -np.inf, dtype=float)
     log10_mass_profile = np.full((n_objects, n_models), np.nan, dtype=float)
     mass_scale_profile = np.full((n_objects, n_models), np.nan, dtype=float)
+    mass_profile_at_boundary = np.zeros((n_objects, n_models), dtype=bool)
     marginal_logp = None
     mass_posterior_norm = None
     log10_mass_quantiles = None
+    effective_mass_grid = None
+    mass_prior_meta = None
     if log10_mass_grid is not None:
         marginal_logp = np.full((n_objects, n_models), -np.inf, dtype=float)
         log10_mass_quantiles = np.full((n_objects, 3), np.nan, dtype=float)
@@ -484,6 +526,13 @@ def fit_catalog_with_restframe_grid(
         profile_logp[rows] = result.profile_logp
         log10_mass_profile[rows] = result.log10_mass_profile
         mass_scale_profile[rows] = result.mass_scale_profile
+        mass_profile_at_boundary[rows] = result.mass_profile_at_boundary
+        if result.log10_mass_grid is not None:
+            if effective_mass_grid is None:
+                effective_mass_grid = result.log10_mass_grid.copy()
+                mass_prior_meta = result.meta.get("mass_prior")
+            elif not np.array_equal(effective_mass_grid, result.log10_mass_grid):
+                raise RuntimeError("Mass quadrature changed between redshift groups.")
         if marginal_logp is not None and result.marginal_logp is not None:
             marginal_logp[rows] = result.marginal_logp
             log10_mass_quantiles[rows] = result.log10_mass_quantiles
@@ -519,11 +568,12 @@ def fit_catalog_with_restframe_grid(
         profile_map_estimates=profile_map_estimates,
         log10_mass_profile=log10_mass_profile,
         mass_scale_profile=mass_scale_profile,
+        mass_profile_at_boundary=mass_profile_at_boundary,
         marginal_logp=marginal_logp,
         marginal_weights_norm=marginal_weights,
         marginal_map_indices=marginal_map_indices,
         marginal_map_estimates=marginal_map_estimates,
-        log10_mass_grid=None if log10_mass_grid is None else np.asarray(log10_mass_grid, dtype=float),
+        log10_mass_grid=effective_mass_grid,
         mass_posterior_norm=mass_posterior_norm,
         log10_mass_quantiles=log10_mass_quantiles,
         band_names=band_names,
@@ -535,6 +585,7 @@ def fit_catalog_with_restframe_grid(
             "cosmology": _cosmology_label(cosmology),
             "operators_by_redshift": operators,
             "sigma_floor": sigma_floor,
+            "mass_prior": mass_prior_meta,
         },
     )
 
@@ -568,15 +619,14 @@ def _coerce_rest_spectrum_to_w_per_nm(model: ModelSpectrum) -> tuple[np.ndarray,
     flux_unit = str(model.flux_unit).lower()
     if wave_unit in {"angstrom", "a", "aa"}:
         wave = wave / 10.0
-        # L per nm = L per Angstrom * 10 Angstrom/nm.
-        lum = lum * 10.0
     elif wave_unit != "nm":
         raise ValueError(f"Unsupported rest-spectrum wavelength unit {model.wavelength_unit!r}; expected nm or Angstrom.")
     if flux_unit in {"w/nm", "w nm-1"}:
         pass
     elif flux_unit in {"w/angstrom", "w/a", "w/aa"}:
-        # Already handled with the wavelength conversion above.
-        pass
+        # L per nm = L per Angstrom * 10 Angstrom/nm. This conversion depends
+        # on the luminosity-density unit, not on the wavelength-coordinate unit.
+        lum = lum * 10.0
     else:
         raise ValueError(f"Unsupported rest-spectrum luminosity unit {model.flux_unit!r}; expected W/nm.")
     wave = _validate_wavelength_nm(wave)
@@ -728,6 +778,7 @@ def _age_universe_myr(redshift: float, *, cosmology=None) -> float:
 
 
 __all__ = [
+    "ExperimentalFastCatalogWarning",
     "NativeCatalogFitResult",
     "RedshiftFilterOperator",
     "RestFrameSpectralGrid",

@@ -5,11 +5,14 @@ import importlib.util
 import numpy as np
 import pytest
 
+from composed.backends.base import ModelPhotometry, SEDBackend
 from composed.backends.mock import MockBackend
 from composed.data import SEDDataset, SpectrumDataset
 from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
+from composed.problem import Problem
 from composed.results import InferenceResult
+from composed.units import MassNormalization
 
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("matplotlib") is None, reason="matplotlib is not installed")
@@ -24,6 +27,19 @@ def _toy_result():
         sampler_name="toy_mcmc",
         chain=np.asarray([[[0.0, 1.0]], [[0.5, 1.5]], [[1.0, 2.0]]]),
     )
+
+
+class TransformAwareBackend(SEDBackend):
+    mass_normalization = MassNormalization.ABSOLUTE
+    mass_reference = None
+
+    def predict_photometry(self, params, filters):
+        del filters
+        return ModelPhotometry(
+            band_names=("g",),
+            flux=np.asarray([float(params["amplitude"])]),
+            flux_unit="maggies",
+        )
 
 
 def test_corner_hexbin_and_trace_plots_return_figures():
@@ -54,6 +70,14 @@ def test_corner_hexbin_handles_sparse_importance_weights():
 
     assert axes.shape == (2, 2)
     fig.canvas.draw()
+
+
+def test_weighted_plot_resampling_preserves_dominant_posterior_mass():
+    from composed.plot import _resample_indices
+
+    draw = _resample_indices(np.asarray([0.99, 0.01]), 2, seed=0)
+
+    assert np.array_equal(draw, [0, 0])
 
 
 def test_corner_hexbin_overlays_weighted_comparison_on_shared_axes():
@@ -178,3 +202,111 @@ def test_posterior_predictive_sed_plots_upper_limits_separately_from_detections(
     assert len(detection[0].lines[0].get_xdata()) == 1
     assert len(upper[0].lines[0].get_xdata()) == 1
     fig.canvas.draw()
+
+
+def test_problem_driven_posterior_predictive_applies_transform_and_flux_units():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_posterior_predictive
+
+    space = ParameterSpace(names=("latent",), priors={"latent": UniformPrior(0.0, 2.0)})
+    data = SEDDataset(
+        band_names=("g",),
+        flux=np.asarray([7262.0]),
+        sigma=np.asarray([10.0]),
+        flux_unit="jy",
+    )
+
+    def to_backend_params(params):
+        return {"amplitude": 2.0 * params["latent"]}
+
+    problem = Problem(
+        backend=TransformAwareBackend(),
+        parameters=space,
+        data=data,
+        filters=("g",),
+        parameter_transform=to_backend_params,
+    )
+    result = InferenceResult(
+        samples=np.asarray([[1.0], [1.0]]),
+        logp=None,
+        weights=np.ones(2),
+        parameter_names=("latent",),
+        sampler_name="toy",
+        metadata={"problem": problem.specification()},
+    )
+
+    fig, axes = plot_posterior_predictive(result, problem, n_draw=2)
+
+    ax = np.atleast_1d(axes)[0]
+    model = [container for container in ax.containers if container.get_label() == "model photometry"]
+    assert len(model) == 1
+    assert np.asarray(model[0].lines[0].get_ydata()) == pytest.approx([7262.0])
+    assert ax.get_ylabel() == "flux [jy]"
+    fig.canvas.draw()
+
+
+def test_problem_driven_posterior_predictive_rejects_mismatched_problem():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_posterior_predictive
+
+    space = ParameterSpace(names=("latent",), priors={"latent": UniformPrior(0.0, 2.0)})
+    original = Problem(
+        backend=TransformAwareBackend(),
+        parameters=space,
+        data=SEDDataset(("g",), np.asarray([1.0]), np.asarray([0.1])),
+        filters=("g",),
+        parameter_transform=lambda params: {"amplitude": params["latent"]},
+    )
+    changed = Problem(
+        backend=TransformAwareBackend(),
+        parameters=space,
+        data=SEDDataset(("g",), np.asarray([2.0]), np.asarray([0.1])),
+        filters=("g",),
+        parameter_transform=lambda params: {"amplitude": params["latent"]},
+    )
+    result = InferenceResult(
+        samples=np.asarray([[1.0]]),
+        logp=None,
+        weights=np.ones(1),
+        parameter_names=("latent",),
+        metadata={"problem": original.specification()},
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        plot_posterior_predictive(result, changed)
+
+
+def test_problem_driven_posterior_predictive_rejects_marginalized_parameters():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_posterior_predictive
+
+    space = ParameterSpace(
+        names=("latent", "nuisance"),
+        priors={
+            "latent": UniformPrior(0.0, 2.0),
+            "nuisance": UniformPrior(-1.0, 1.0),
+        },
+    )
+    problem = Problem(
+        backend=TransformAwareBackend(),
+        parameters=space,
+        data=SEDDataset(("g",), np.asarray([1.0]), np.asarray([0.1])),
+        filters=("g",),
+        parameter_transform=lambda params: {"amplitude": params["latent"]},
+    )
+    partial_result = InferenceResult(
+        samples=np.asarray([[1.0]]),
+        logp=None,
+        weights=np.ones(1),
+        parameter_names=("latent",),
+        metadata={"problem": problem.specification()},
+    )
+
+    with pytest.raises(ValueError, match="nuisance"):
+        plot_posterior_predictive(partial_result, problem)

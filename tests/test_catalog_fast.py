@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import pytest
 
 from composed.backends.base import ModelSpectrum, SEDBackend
+import composed.catalog_fast as catalog_fast
 from composed.catalog_fast import (
     AB_ZERO_FNU_W_M2_HZ,
     C_NM_PER_S,
+    ExperimentalFastCatalogWarning,
     PARSEC_M,
     RestFrameSpectralGrid,
     build_redshift_filter_operator,
@@ -61,6 +64,7 @@ class FixedDistanceCosmology:
 class ToyRestBackend(SEDBackend):
     mass_normalization: MassNormalization = MassNormalization.PER_SOLAR_MASS
     mass_reference: MassReference = MassReference.SURVIVING_STELLAR_MASS
+    supports_fast_catalog_restframe: ClassVar[bool] = True
 
     def predict_rest_spectrum(self, params, wavelengths=None, wavelength_range=None):
         template = int(round(float(params["template"])))
@@ -86,6 +90,10 @@ class ToyRestBackend(SEDBackend):
             flux_unit="W/nm",
             metadata={"spectrum_frame": "rest"},
         )
+
+
+class UnsupportedRestBackend(ToyRestBackend):
+    supports_fast_catalog_restframe: ClassVar[bool] = False
 
 
 def test_raw_filter_operator_returns_one_maggie_for_flat_ab_standard():
@@ -152,6 +160,63 @@ def test_default_cosmology_does_not_depend_on_cigale_import(monkeypatch):
     assert operator.meta["cosmology"] == "fixed-distance-test"
 
 
+def test_rest_spectrum_angstrom_coordinate_does_not_rescale_w_per_nm_luminosity():
+    model = ModelSpectrum(
+        wavelength=np.asarray([4000.0, 5000.0]),
+        flux=np.asarray([2.0, 3.0]),
+        wavelength_unit="angstrom",
+        flux_unit="W/nm",
+    )
+
+    wavelength_nm, luminosity_w_per_nm = catalog_fast._coerce_rest_spectrum_to_w_per_nm(model)
+
+    assert np.allclose(wavelength_nm, [400.0, 500.0])
+    assert np.allclose(luminosity_w_per_nm, [2.0, 3.0])
+
+
+def test_fast_rest_grid_rejects_backend_without_explicit_capability():
+    backend = UnsupportedRestBackend()
+    space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
+
+    with pytest.warns(ExperimentalFastCatalogWarning):
+        with pytest.raises(NotImplementedError, match="does not declare support"):
+            build_restframe_spectral_grid(backend, space)
+
+
+@pytest.mark.cigale
+def test_fast_rest_grid_rejects_redshift_aware_cigale_sfh():
+    pytest.importorskip("pcigale")
+
+    from composed import DelayedTauSFH
+    from composed.backends.cigale import CIGALEBackend
+
+    backend = CIGALEBackend(
+        modules=("bc03", "redshifting"),
+        module_parameters={
+            "bc03": {"imf": 1, "metallicity": 0.02, "separation_age": 10},
+            "redshifting": {"redshift": {"range": [0.05, 1.0]}},
+        },
+        sfh=DelayedTauSFH(
+            age="age_fraction",
+            age_kind="fraction_of_universe",
+            tau="tau_gyr",
+        ),
+    )
+    space = ParameterSpace(
+        names=("age_fraction", "tau_gyr", "redshift"),
+        priors={
+            "age_fraction": UniformPrior(0.3, 0.95),
+            "tau_gyr": UniformPrior(0.1, 5.0),
+            "redshift": UniformPrior(0.05, 1.0),
+        },
+    )
+
+    assert backend.supports_fast_catalog_restframe is False
+    with pytest.warns(ExperimentalFastCatalogWarning):
+        with pytest.raises(NotImplementedError, match="does not declare support"):
+            build_restframe_spectral_grid(backend, space)
+
+
 def test_build_restframe_grid_and_project_to_photometry():
     backend = ToyRestBackend()
     space = ParameterSpace(
@@ -183,6 +248,32 @@ def test_build_restframe_grid_and_project_to_photometry():
     assert phot_grid.band_names == ("blue", "red")
     assert phot_grid.flux.shape == (2, 2)
     assert np.all(phot_grid.valid)
+
+
+def test_fast_projection_rejects_filter_outside_rest_wavelength_grid():
+    rest_grid = RestFrameSpectralGrid(
+        wavelength_nm=np.asarray([400.0, 500.0, 600.0]),
+        luminosity_w_per_nm=np.ones((1, 3)),
+        samples=np.asarray([[0.0]]),
+        log_prior=np.zeros(1),
+        valid=np.ones(1, dtype=bool),
+        parameter_names=("template",),
+        mass_normalization=MassNormalization.PER_SOLAR_MASS,
+        mass_reference=MassReference.SURVIVING_STELLAR_MASS,
+    )
+    filters = FilterSet(
+        [TabulatedFilter("outside", np.asarray([250.0, 300.0]), np.ones(2))]
+    )
+    operator = build_redshift_filter_operator(
+        rest_grid.wavelength_nm,
+        filters,
+        redshift=0.0,
+        igm_model=None,
+        luminosity_distance_m=10.0 * PARSEC_M,
+    )
+
+    with pytest.raises(ValueError, match=r"Unavailable band\(s\): outside"):
+        project_rest_grid_to_photometric_grid(rest_grid, operator, age_parameter=None)
 
 
 def test_restframe_grid_save_load_roundtrip(tmp_path):

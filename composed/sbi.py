@@ -35,7 +35,7 @@ import numpy as np
 from composed.data import SEDDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
-from composed.priors import LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
+from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
 from composed.provenance import save_npz_with_provenance
 from inftools.diagnostics import run_sbi_diagnostics
 from inftools.experimental.diffusion import ConditionalDiffusionEstimator, FeatureMetadata
@@ -2639,6 +2639,12 @@ def fit_sbi_problem(
         conditions=canonical_conditions,
         seed=seed,
     )
+    samples, reported_names, fixed_names, marginalized_names = _reported_problem_sbi_samples(
+        samples,
+        problem=problem,
+        inferred_names=training_set.theta_names,
+        conditions=canonical_conditions,
+    )
     if isinstance(method, Diffusion):
         observation_names = training_set.diffusion_feature_metadata.names[
             : training_set.diffusion_observation_size
@@ -2652,7 +2658,7 @@ def fit_sbi_problem(
         samples=samples,
         logp=None,
         weights=np.ones(samples.shape[0], dtype=float),
-        parameter_names=training_set.theta_names,
+        parameter_names=reported_names,
         sampler_name=(
             "maf"
             if isinstance(method, MAF)
@@ -2674,6 +2680,8 @@ def fit_sbi_problem(
             "conditions": canonical_conditions,
             "conditioned_parameter_names": condition_names,
             "inferred_parameter_names": training_set.theta_names,
+            "fixed_parameter_names": fixed_names,
+            "marginalized_parameter_names": marginalized_names,
             "device": str(getattr(trained.estimator, "device", "unknown")),
             "inference_batch_size": (
                 method.inference_batch_size
@@ -2687,6 +2695,50 @@ def fit_sbi_problem(
         },
         inference_state=trained,
     )
+
+
+def _reported_problem_sbi_samples(
+    samples: np.ndarray,
+    *,
+    problem,
+    inferred_names: Sequence[str],
+    conditions: Mapping[str, float],
+) -> tuple[np.ndarray, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Restore deterministic columns without fabricating marginalized values."""
+
+    samples = np.asarray(samples, dtype=float)
+    inferred_names = tuple(str(name) for name in inferred_names)
+    if samples.ndim != 2 or samples.shape[1] != len(inferred_names):
+        raise ValueError(
+            "SBI posterior samples do not match the trained inferred-parameter order."
+        )
+    inferred_index = {name: index for index, name in enumerate(inferred_names)}
+    condition_values = {str(name): float(value) for name, value in conditions.items()}
+    fixed_values = {
+        name: float(prior.value)
+        for name, prior in problem.parameters.priors.items()
+        if isinstance(prior, DeltaPrior)
+        and name not in inferred_index
+        and name not in condition_values
+    }
+
+    reported_names = tuple(
+        name
+        for name in problem.parameters.names
+        if name in inferred_index or name in condition_values or name in fixed_values
+    )
+    marginalized_names = tuple(
+        name for name in problem.parameters.names if name not in set(reported_names)
+    )
+    reported = np.empty((samples.shape[0], len(reported_names)), dtype=float)
+    for column, name in enumerate(reported_names):
+        if name in inferred_index:
+            reported[:, column] = samples[:, inferred_index[name]]
+        elif name in condition_values:
+            reported[:, column] = condition_values[name]
+        else:
+            reported[:, column] = fixed_values[name]
+    return reported, reported_names, tuple(fixed_values), marginalized_names
 
 
 def _train_maf(training_set: SBITrainingSet, method: MAF, *, seed: int | None) -> TrainedMAFSBI:

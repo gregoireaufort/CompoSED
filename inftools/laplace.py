@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 from typing import Optional, Sequence
+import warnings
+
 import numpy as np
 from scipy.optimize import minimize
 
 from .core import Posterior, SamplingResult, Array
+
+
+class ExperimentalLaplaceWarning(UserWarning):
+    """Warning emitted by the experimental finite-difference Laplace runner."""
 
 
 def finite_difference_hessian(
@@ -73,6 +79,14 @@ def run_laplace(
       - logp: log posterior at MAP
       - cov: Gaussian covariance (H^{-1})
     """
+
+    warnings.warn(
+        "inftools.run_laplace is experimental in CompoSED 0.1.1. Its "
+        "finite-difference Hessian is not hardened at prior boundaries; inspect "
+        "the optimizer result and covariance before scientific use.",
+        ExperimentalLaplaceWarning,
+        stacklevel=2,
+    )
 
     def neg_logp(theta: Array) -> float:
         val = posterior.log_prob_fn(theta)

@@ -127,6 +127,17 @@ class Problem:
 
         return self.parameters
 
+    @property
+    def evaluation_backend(self):
+        """Backend used by the likelihood, including ``parameter_transform``.
+
+        Posterior prediction must use this object rather than ``backend``
+        directly so that plotted models follow the same parameter mapping as
+        the fitted likelihood.
+        """
+
+        return self._evaluation_backend
+
     def log_prior(self, theta: Sequence[float]) -> float:
         return self.parameters.log_prior(np.asarray(theta, dtype=float))
 
@@ -213,13 +224,21 @@ class Problem:
 
 @dataclass(frozen=True)
 class SamplerCapabilities:
-    """Parameter types accepted by one sampler implementation."""
+    """Parameter types and release status of one sampler implementation."""
 
     continuous: bool
     discrete: bool
     fixed: bool
     gradients: bool = False
     simulation: bool = False
+    stability: str = "stable"
+    limitations: str | None = None
+
+    @property
+    def experimental(self) -> bool:
+        """Whether this sampler is outside the stable CompoSED 0.1 API."""
+
+        return self.stability == "experimental"
 
 
 _SAMPLER_CAPABILITIES = {
@@ -229,8 +248,20 @@ _SAMPLER_CAPABILITIES = {
     "grid": SamplerCapabilities(False, True, True),
     "mixed_gibbs": SamplerCapabilities(True, True, True),
     "mixed_tamis": SamplerCapabilities(True, True, True),
-    "laplace": SamplerCapabilities(True, False, False),
-    "tamis": SamplerCapabilities(True, False, False),
+    "laplace": SamplerCapabilities(
+        True,
+        False,
+        False,
+        stability="experimental",
+        limitations="Finite-difference Hessian approximation; not hardened at prior boundaries.",
+    ),
+    "tamis": SamplerCapabilities(
+        True,
+        False,
+        False,
+        stability="experimental",
+        limitations="Adapter for a separately installed external TAMIS package.",
+    ),
     "pocomc": SamplerCapabilities(True, False, False),
 }
 
@@ -409,11 +440,18 @@ def fit(
             meta={**tamis.meta, "weights_norm": tamis.weights},
         )
     elif sampler_config.name == "pocomc":
+        _reject_noncontinuous_for_sampler(inference_space, "PocoMC")
+        replaced_prior = sorted({"prior", "bounds"} & set(options))
+        if replaced_prior:
+            raise ValueError(
+                "Problem-driven PocoMC derives its prior from Problem.parameters; "
+                f"sampler option(s) {', '.join(replaced_prior)} would replace that prior "
+                "while leaving the saved Problem provenance unchanged. Use the low-level "
+                "inftools.run_pocomc adapter only for deliberately standalone workflows."
+            )
         from inftools.pocomc_adapter import pocomc_prior_from_parameter_space, run_pocomc
 
-        _reject_noncontinuous_for_sampler(inference_space, "PocoMC")
-        if "prior" not in options and "bounds" not in options:
-            options["prior"] = pocomc_prior_from_parameter_space(inference_space)
+        options["prior"] = pocomc_prior_from_parameter_space(inference_space)
         options.setdefault("random_state", seed)
         raw = run_pocomc(posterior, **options)
     else:

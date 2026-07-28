@@ -10,6 +10,7 @@ from composed import (
     Gaussian,
     Emcee,
     Grid,
+    Laplace,
     MixedTAMIS,
     PocoMC,
     Problem,
@@ -18,6 +19,7 @@ from composed import (
     SpectroPhotometricDataset,
     SpectrumDataset,
     fit,
+    TAMIS,
 )
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.parameters import ParameterSpace
@@ -188,6 +190,13 @@ def test_fit_rejects_sampler_without_discrete_capability_before_running():
     assert Emcee().capabilities.discrete is False
 
 
+def test_experimental_sampler_status_is_exposed_without_ambiguity():
+    assert Laplace().capabilities.experimental is True
+    assert TAMIS().capabilities.experimental is True
+    assert MixedTAMIS().capabilities.experimental is False
+    assert "external TAMIS" in TAMIS().capabilities.limitations
+
+
 def test_fit_conditions_reduce_pocomc_space_and_restore_full_result(monkeypatch):
     from inftools.core import SamplingResult
     from inftools import pocomc_adapter
@@ -248,6 +257,19 @@ def test_fit_conditions_reduce_pocomc_space_and_restore_full_result(monkeypatch)
     assert np.all(result.chain[..., 0] == 0.5)
     assert result.metadata["conditioned_parameter_names"] == ("redshift",)
     assert result.metadata["free_parameter_names"] == ("amplitude",)
+
+
+@pytest.mark.parametrize("replacement", [{"prior": object()}, {"bounds": [(1.0, 3.0)]}])
+def test_problem_driven_pocomc_rejects_sampler_specific_prior_replacement(replacement):
+    problem = Problem(
+        ParameterBackend(),
+        ParameterSpace(("amplitude",), {"amplitude": UniformPrior(1.0, 3.0)}),
+        SEDDataset(("g",), np.asarray([2.0]), np.asarray([0.1])),
+        Gaussian(),
+    )
+
+    with pytest.raises(ValueError, match="derives its prior from Problem.parameters"):
+        fit(problem, PocoMC(**replacement), seed=4)
 
 
 def test_fit_conditions_run_through_real_pocomc_when_available():

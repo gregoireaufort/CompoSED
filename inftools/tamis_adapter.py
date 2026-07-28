@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 from typing import Optional, Dict, Any
+import warnings
+
 import numpy as np
 from dataclasses import dataclass
 from scipy.stats import qmc
@@ -16,6 +18,10 @@ except ImportError as exc:  # safety if you don't have TAMIS installed in a give
     TAMIS = None
     _HAS_TAMIS = False
     _TAMIS_IMPORT_ERROR = exc
+
+
+class ExperimentalExternalTAMISWarning(UserWarning):
+    """Warning emitted by the separately packaged historical TAMIS adapter."""
 
 
 def qmc_sobol_means(n, d, seed=0, eps=1e-6):
@@ -181,6 +187,14 @@ def run_tamis(
             "for the self-contained implementation, or install the external TAMIS package "
             "explicitly before using composed.TAMIS."
         ) from _TAMIS_IMPORT_ERROR
+
+    warnings.warn(
+        "The external TAMIS adapter is experimental in CompoSED 0.1.1 and "
+        "depends on a separately installed `TAMIS` package. Prefer "
+        "composed.MixedTAMIS for the self-contained supported implementation.",
+        ExperimentalExternalTAMISWarning,
+        stacklevel=2,
+    )
 
     rng = np.random.default_rng(seed)
     dim = int(posterior.dim)

@@ -4,9 +4,11 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from composed.data import SEDDataset, SpectrumDataset
+from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
 from composed.likelihood import _backend_params_and_mass_scale
-from composed.results import InferenceResult
+from composed.problem import Problem
+from composed.results import InferenceResult, require_result_matches_problem
+from composed.units import convert_photometric_flux
 
 
 def plot_corner_hexbin(
@@ -182,18 +184,22 @@ def plot_posterior_predictive_sed(
     n_draw: int = 200,
     seed: int | None = 0,
 ):
-    """Plot posterior predictive spectra and/or photometry.
+    """Low-level posterior-predictive plot from explicitly supplied pieces.
 
     Spectra and photometry are shown in separate panels because their native
     units are usually different. Photometric model points are the posterior
-    predictive fluxes in the same units as the photometric likelihood.
+    predictive fluxes in the same units as the photometric likelihood. Prefer
+    :func:`plot_posterior_predictive` for fitted results because that public
+    path validates and reuses the complete ``Problem``.
     """
 
     if photometry is None and spectrum is None and wavelengths is None:
         raise ValueError("Provide photometry, spectrum, or explicit wavelengths.")
+    if int(n_draw) <= 0:
+        raise ValueError("n_draw must be positive.")
     plt = _require_matplotlib()
     rng = np.random.default_rng(seed)
-    draw = _resample_indices(result.weights, min(int(n_draw), result.samples.shape[0]), rng=rng)
+    draw = _resample_indices(result.weights, int(n_draw), rng=rng)
     theta_draws = result.samples[draw]
 
     want_spectrum = spectrum is not None or wavelengths is not None
@@ -254,7 +260,8 @@ def plot_posterior_predictive_sed(
             if np.any(~active):
                 ax.plot(x[~active], photometry.flux[~active], "x", color="0.6", label="masked")
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("flux [photometry units]")
+        flux_unit = photometry.flux_unit if photometry is not None else "backend units"
+        ax.set_ylabel(f"flux [{flux_unit}]")
         if xlabel == "band":
             ax.set_xticks(x)
             ax.set_xticklabels(band_names, rotation=35, ha="right")
@@ -262,6 +269,63 @@ def plot_posterior_predictive_sed(
 
     fig.tight_layout()
     return fig, axes
+
+
+def plot_posterior_predictive(
+    result: InferenceResult,
+    problem: Problem,
+    *,
+    wavelengths: Sequence[float] | None = None,
+    photometry_wavelengths: Sequence[float] | None = None,
+    n_draw: int = 200,
+    seed: int | None = 0,
+):
+    """Plot posterior predictions from the exact fitted :class:`Problem`.
+
+    The result fingerprint is checked before any backend call. Data, filters,
+    parameter order, parameter transforms, mass normalization, and
+    photometric units therefore come from the same scientific specification
+    that produced the posterior.
+    """
+
+    if not isinstance(problem, Problem):
+        raise TypeError("problem must be a composed.Problem.")
+    require_result_matches_problem(result, problem)
+    if tuple(result.parameter_names) != tuple(problem.parameters.names):
+        missing = [
+            name for name in problem.parameters.names if name not in result.parameter_names
+        ]
+        raise ValueError(
+            "Posterior-predictive SEDs require samples for every Problem parameter. "
+            "This result marginalizes or omits: "
+            + ", ".join(missing)
+        )
+
+    if isinstance(problem.data, SpectroPhotometricDataset):
+        photometry = problem.data.photometry
+        spectrum = problem.data.spectrum
+    elif isinstance(problem.data, SEDDataset):
+        photometry, spectrum = problem.data, None
+    elif isinstance(problem.data, SpectrumDataset):
+        photometry, spectrum = None, problem.data
+    else:  # pragma: no cover - guarded by Problem construction
+        raise TypeError("Unsupported Problem data type.")
+
+    filters = problem.filters
+    if filters is None and photometry is not None:
+        filters = photometry.metadata.get("filters")
+    return plot_posterior_predictive_sed(
+        result,
+        problem.evaluation_backend,
+        problem.parameters,
+        photometry=photometry,
+        filters=filters,
+        spectrum=spectrum,
+        wavelengths=wavelengths,
+        photometry_wavelengths=photometry_wavelengths,
+        n_draw=n_draw,
+        seed=seed,
+    )
 
 
 def _posterior_predictive_photometry(backend, parameter_space, theta_draws, filters, photometry):
@@ -277,6 +341,11 @@ def _posterior_predictive_photometry(backend, parameter_space, theta_draws, filt
         flux = np.asarray(model.flux, dtype=float)
         if band_names is not None:
             flux = _align_model_flux(model, band_names)
+            flux = convert_photometric_flux(
+                flux,
+                getattr(model, "flux_unit", "maggies"),
+                photometry.flux_unit,
+            )
         flux = mass_scale * flux
         if np.all(np.isfinite(flux)):
             rows.append(flux)
@@ -416,13 +485,17 @@ def _resample_indices(weights, n, seed=None, rng=None):
     if rng is None:
         rng = np.random.default_rng(seed)
     weights = np.asarray(weights, dtype=float)
+    if weights.ndim != 1 or weights.size == 0:
+        raise ValueError("weights must be a non-empty one-dimensional array.")
+    if not np.all(np.isfinite(weights)) or np.any(weights < 0.0) or np.sum(weights) <= 0.0:
+        raise ValueError("weights must be finite, non-negative, and have positive total mass.")
+    if int(n) <= 0:
+        raise ValueError("n must be positive.")
     weights = weights / np.sum(weights)
-    # Importance samplers can return many exact-zero weights. NumPy cannot
-    # sample more distinct indices than the positive-probability support, even
-    # when n <= len(weights), so switch to posterior resampling with replacement.
-    positive_support = int(np.count_nonzero(weights > 0.0))
-    replace = int(n) > positive_support
-    return rng.choice(np.arange(weights.size), size=int(n), replace=replace, p=weights)
+    # These are independent draws from the weighted empirical posterior.
+    # Sampling without replacement would flatten unequal weights whenever all
+    # support points fit in the requested plotting sample.
+    return rng.choice(np.arange(weights.size), size=int(n), replace=True, p=weights)
 
 
 def _photometry_x(filters, band_names, photometry_wavelengths):

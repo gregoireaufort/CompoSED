@@ -71,6 +71,12 @@ class CIGALEBackend(SEDBackend):
     _warehouse: Any = field(default=None, init=False, repr=False)
     _entries: tuple["_ParameterEntry", ...] = field(default=(), init=False, repr=False)
 
+    @property
+    def supports_fast_catalog_restframe(self) -> bool:
+        """Whether this configuration has a redshift-independent rest SED."""
+
+        return self.sfh is None or not self.sfh.requires_redshift
+
     def __post_init__(self) -> None:
         modules = tuple(str(module) for module in self.modules)
         if not modules:

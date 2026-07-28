@@ -228,10 +228,13 @@ def test_problem_fit_sbi_uses_conditions_as_training_context(monkeypatch):
     training = seen["training_set"]
     assert training.condition_names == ("z",)
     assert seen["inference_conditions"] == {"z": 0.35}
-    assert result.samples.shape == (5, 1)
-    assert result.parameter_names == ("log10_mass",)
+    assert result.samples.shape == (5, 2)
+    assert result.parameter_names == ("z", "log10_mass")
+    assert np.all(result.samples[:, 0] == 0.35)
+    assert np.allclose(result.samples[:, 1], np.linspace(9.8, 10.2, 5))
     assert result.metadata["conditions"] == {"z": 0.35}
     assert result.metadata["conditioned_parameter_names"] == ("z",)
+    assert result.metadata["marginalized_parameter_names"] == ("dust",)
 
 
 def test_problem_fit_sbi_rejects_target_condition_overlap():
@@ -280,7 +283,9 @@ def test_problem_fit_maf_conditions_survive_checkpoint_roundtrip(tmp_path):
         seed=22,
     )
 
-    assert result.samples.shape == (4, 1)
+    assert result.samples.shape == (4, 2)
+    assert result.parameter_names == ("z", "log10_mass")
+    assert np.all(result.samples[:, 0] == 0.35)
     assert result.inference_state.condition_names == ("z",)
     checkpoint = result.inference_state.save(tmp_path / "conditioned_maf")
     loaded = TrainedMAFSBI.load(checkpoint, device="cpu")

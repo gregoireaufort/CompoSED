@@ -121,7 +121,10 @@ Backend-specific parameter aliases such as `z`, `zred`, or `redshift` must be ha
 
 The compatibility method `log_prob` means `log_posterior`. Sampler adapters
 that own a prior, such as PocoMC, must consume `log_likelihood` and apply their
-prior exactly once.
+prior exactly once. In `fit(problem, PocoMC(...))`, that sampler prior is
+always translated from `Problem.parameters`. A sampler-local replacement
+`prior` or `bounds` is rejected because it would disagree with saved Problem
+provenance.
 
 ## Public Problem Contract
 
@@ -173,6 +176,13 @@ same context encoder. Already encoded generic arrays use
 Problem. Sample-only methods may return ``InferenceResult.logp=None``; no MAP is
 invented in that case.
 
+Values supplied through ``fit(..., conditions={...})`` are restored as
+deterministic columns in a Problem-driven SBI ``InferenceResult``. Parameters
+deliberately omitted from ``Simulate.infer`` remain marginalized and are named
+in result metadata; CompoSED does not fabricate values for them. A
+posterior-predictive SED therefore requires posterior columns for every
+Problem parameter.
+
 Trained MAF checkpoints contain tensor weights, standardization arrays, ordered
 parameter/band/context schema, prior transforms, package versions, and training
 history. They deliberately do not duplicate the simulation table. Loading a
@@ -188,6 +198,20 @@ are rejected explicitly. Experimental conditional diffusion remains under
 namespace.
 
 ## Fast Catalog Projection
+
+Fast rest-frame catalog projection is experimental in CompoSED 0.1.1. It is
+not a generic replacement for normal backend evaluation. A backend must
+explicitly declare that its rest spectrum can be tabulated independently of
+redshift. CIGALE configurations with redshift-independent SFHs can do so;
+current FSPS and redshift-aware CIGALE SFHs cannot because their SFH evaluation
+requires the requested redshift. The projector also requires full rest-grid
+coverage for every requested filter and raises when a band is unavailable.
+
+When a cached per-mass model grid is marginalized over ``log10_mass``, the
+mass grid is a quadrature grid rather than a prior. A continuous ``Prior`` is
+required, prior density is multiplied by midpoint-cell width, and unbounded
+priors require an explicit finite integration domain. Irregular numerical
+spacing therefore cannot silently change the declared mass prior.
 
 Raw dimensionless filter curves use the photon-counting AB definition. CIGALE
 database filters are a separate input convention because their stored `tr`
