@@ -1,0 +1,93 @@
+name: CompoSED checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install core development dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run core tests
+        run: python -m pytest -q -m "not fsps and not cigale and not sbi and not diffusion"
+      - name: Check notebook outputs and whitespace
+        run: |
+          python scripts/sanitize_notebook_outputs.py --check
+          git diff --check
+
+  samplers:
+    name: Stable sampler adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install sampler stack
+        run: python -m pip install -e ".[dev,samplers]"
+      - name: Run sampler tests
+        run: >-
+          python -m pytest -q
+          tests/test_mcmc.py
+          tests/test_grid_sampling.py
+          tests/test_mixed_tamis.py
+          tests/test_pocomc_adapter.py
+          tests/test_problem.py
+
+  sbi:
+    name: Stable MAF and MDN SBI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install neural SBI stack
+        run: python -m pip install -e ".[dev,sbi]"
+      - name: Run SBI and device-contract tests
+        run: >-
+          python -m pytest -q
+          tests/test_sbi.py
+          tests/test_sbi_pipeline.py
+          tests/test_sbi_diagnostics.py
+          tests/test_experimental_diffusion.py
+
+  package:
+    name: Build and isolated wheel import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Build distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Install wheel outside the source tree
+        run: |
+          python -m venv /tmp/composed-wheel
+          /tmp/composed-wheel/bin/python -m pip install dist/*.whl
+          cd /tmp
+          /tmp/composed-wheel/bin/python -c "import composed, inftools; print(composed.__version__)"
+          /tmp/composed-wheel/bin/python -m pip check
