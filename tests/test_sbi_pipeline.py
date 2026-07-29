@@ -431,6 +431,79 @@ def test_default_problem_sbi_context_retains_exact_sigma_and_accepts_negative_fl
     }
 
 
+def test_sbi_context_keeps_catalog_sigma_separate_from_model_discrepancy():
+    base = toy_problem(mask=[True, False, True])
+    problem = Problem(
+        backend=base.backend,
+        parameters=base.parameters,
+        data=base.data,
+        likelihood=Gaussian(photometric_model_discrepancy=0.4),
+        filters=base.filters,
+    )
+
+    def catalog_noise(model_flux):
+        return np.full_like(model_flux, 0.03)
+
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(
+            n=64,
+            noise_model=catalog_noise,
+            infer=["z", "log10_mass"],
+        ),
+        rng=129,
+    )
+
+    assert np.allclose(training.sigma_native, 0.03)
+    assert np.allclose(
+        training.x[:, 2:],
+        np.log10(0.03),
+    )
+    assert training.metadata["problem"]["likelihood"][
+        "photometric_model_discrepancy"
+    ] == pytest.approx(0.4)
+    assert training.metadata["noise_model"] == "catalog_noise"
+
+
+def test_observed_sbi_context_uses_raw_catalog_sigma_with_model_discrepancy():
+    base = toy_problem(mask=[True, False, True])
+    problem = Problem(
+        backend=base.backend,
+        parameters=base.parameters,
+        data=base.data,
+        likelihood=Gaussian(photometric_model_discrepancy=0.4),
+        filters=base.filters,
+    )
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(
+            n=16,
+            noise_model=lambda model_flux: np.full_like(model_flux, 0.03),
+            infer=["z", "log10_mass"],
+        ),
+        rng=130,
+    )
+
+    class RecordingEstimator:
+        theta_dim = 2
+        x_dim = training.x.shape[1]
+
+        def __init__(self):
+            self.context = None
+
+        def sample(self, context, num_samples):
+            self.context = np.asarray(context)
+            return np.zeros((int(num_samples), self.theta_dim))
+
+    estimator = RecordingEstimator()
+    posterior = TrainedMAFSBI(estimator, training, history={})
+    posterior.sample(problem.data, num_samples=2)
+
+    flux, sigma_catalog, _, _ = problem.data.active_arrays()
+    expected = training.context.encode(flux[None, :], sigma_catalog[None, :])
+    assert np.array_equal(estimator.context, expected)
+
+
 def test_preexisting_photometry_constructor_uses_same_context_contract():
     parameter_space = ParameterSpace(["z"], {"z": UniformPrior(0.0, 2.0)})
     training = SBITrainingSet.from_photometry(

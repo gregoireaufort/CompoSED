@@ -88,6 +88,13 @@ def resolve_torch_device(
 
 @dataclass
 class Standardizer:
+    """Column-wise affine standardization fitted from a NumPy training table.
+
+    Constant columns use unit scale. ``log_abs_det_inverse`` is the Jacobian
+    term required when a density evaluated in standardized coordinates is
+    reported in the original coordinates.
+    """
+
     mean: np.ndarray
     std: np.ndarray
 
@@ -850,8 +857,10 @@ def simulate_training_set(
 
     The returned ``x`` rows are the same active-band or active-pixel vectors
     consumed by the likelihood. When ``return_sigma=True``, the simulator must
-    expose ``simulate_with_uncertainty`` and the exact Gaussian sigma used for
-    every realization is returned alongside ``x``. For expensive backends such as FSPS, set
+    expose ``simulate_with_uncertainty`` and return the raw catalog
+    uncertainty supplied to the neural context alongside ``x``. A simulator
+    may add a separately declared model-discrepancy term to the Gaussian draw
+    without adding it to this returned context. For expensive backends such as FSPS, set
     ``n_workers > 1`` and a modest ``batch_size`` so each worker keeps its own
     backend instance alive across many forward-model calls. By default, the
     first failed prior draw raises: silently replacing failed rows would train
@@ -1157,6 +1166,24 @@ def train_maf_posterior_from_dataset(
 
 
 def train_maf_posterior(theta_train: np.ndarray, x_train: np.ndarray, **kwargs) -> MAFPosteriorEstimator:
+    """Construct and fit a conditional MAF from paired NumPy arrays.
+
+    Parameters
+    ----------
+    theta_train
+        Physical parameter table with shape ``(n_train, n_theta)``.
+    x_train
+        Conditioning table with shape ``(n_train, n_context)``. Row ``i`` must
+        correspond to row ``i`` of ``theta_train``.
+    **kwargs
+        Estimator-construction and :meth:`MAFPosteriorEstimator.fit` options.
+
+    Returns
+    -------
+    MAFPosteriorEstimator
+        Fitted NumPy-facing estimator.
+    """
+
     theta_train = np.asarray(theta_train, dtype=float)
     x_train = np.asarray(x_train, dtype=float)
     estimator_kwargs = {
@@ -1257,6 +1284,8 @@ def sample_posterior(
     x_obs: np.ndarray,
     num_samples: int = 10000,
 ) -> np.ndarray:
+    """Draw posterior samples for one or more conditioning rows."""
+
     return estimator.sample(x_obs, num_samples=num_samples)
 
 

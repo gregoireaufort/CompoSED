@@ -12,12 +12,13 @@ from composed.units import MassNormalization, MassReference
 
 def test_empirical_noise_preserves_rows_and_is_pickleable():
     sigma_rows = np.asarray([[0.1, 0.2], [0.3, 0.4]])
-    noise = EmpiricalPhotometricNoise(
-        sigma_rows,
-        fractional_error=0.1,
-        band_names=["g", "r"],
-        flux_unit="maggies",
-    )
+    with pytest.warns(DeprecationWarning, match="ConditionalCatalogNoise"):
+        noise = EmpiricalPhotometricNoise(
+            sigma_rows,
+            fractional_error=0.1,
+            band_names=["g", "r"],
+            flux_unit="maggies",
+        )
     restored = pickle.loads(pickle.dumps(noise))
     sigma = restored(np.asarray([1.0, 2.0]), rng=np.random.default_rng(2))
 
@@ -27,9 +28,10 @@ def test_empirical_noise_preserves_rows_and_is_pickleable():
 
 
 def test_empirical_noise_validates_shape_and_uncertainties():
-    with pytest.raises(ValueError, match="strictly positive"):
+    with pytest.warns(DeprecationWarning), pytest.raises(ValueError, match="strictly positive"):
         EmpiricalPhotometricNoise([[0.1, 0.0]])
-    noise = EmpiricalPhotometricNoise([[0.1, 0.2]])
+    with pytest.warns(DeprecationWarning):
+        noise = EmpiricalPhotometricNoise([[0.1, 0.2]])
     with pytest.raises(ValueError, match="expected flux shape"):
         noise([1.0])
 

@@ -6,7 +6,16 @@ from typing import Sequence
 
 @dataclass(frozen=True)
 class FilterSet:
-    """Thin wrapper for backend filter objects, usually sedpy filters."""
+    """Ordered collection of backend filter objects and unique band names.
+
+    Parameters
+    ----------
+    filters
+        Backend-native filter objects or names.
+    names
+        Optional explicit band names. When omitted, names are read from each
+        object's ``name`` attribute where available.
+    """
 
     filters: Sequence[object]
     names: Sequence[str] | None = None

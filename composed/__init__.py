@@ -20,7 +20,7 @@ from composed.catalog_fast import (
 from composed.likelihood import GaussianPhotometricLikelihood, GaussianSpectralLikelihood
 from composed.filters import FilterSet, load_filter_set
 from composed.parameters import ParameterSpace
-from composed.noise import EmpiricalPhotometricNoise
+from composed.noise import ConditionalCatalogNoise, EmpiricalPhotometricNoise
 from composed.priors import (
     ChoicePrior,
     DeltaPrior,
@@ -159,6 +159,7 @@ __all__ = [
     "TrainedMAFSBI",
     "TrainedMDNSBI",
     "Emcee",
+    "ConditionalCatalogNoise",
     "EmpiricalPhotometricNoise",
     "UniformPrior",
     "build_redshift_filter_operator",

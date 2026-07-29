@@ -241,6 +241,42 @@ def test_photometric_grid_catalog_handles_mixed_detection_and_upper_limit_like_s
     assert np.all(np.isfinite(catalog.logp[0]))
 
 
+def test_catalog_grid_model_discrepancy_matches_scalar_with_detection_and_upper_limit():
+    backend = TwoBandBackend(flux=(1.4, 1.2))
+    space = ParameterSpace(
+        names=("template",),
+        priors={"template": ChoicePrior([0.0, 1.0])},
+    )
+    dataset = SEDDataset(
+        band_names=("g", "fuv"),
+        flux=np.asarray([1.8, np.nan]),
+        sigma=np.asarray([0.2, 0.3]),
+        upper_limit=np.asarray([np.nan, 1.0]),
+        upper_limit_mask=np.asarray([False, True]),
+    )
+    eta = 0.25
+
+    catalog = run_photometric_grid_catalog(
+        backend,
+        [dataset],
+        space,
+        filters=("g", "fuv"),
+        model_discrepancy=eta,
+    )
+    scalar = GaussianPhotometricLikelihood(
+        backend,
+        dataset,
+        space,
+        filters=("g", "fuv"),
+        model_discrepancy=eta,
+    )
+    expected = np.asarray(
+        [scalar.log_posterior(theta) for theta in catalog.samples],
+        dtype=float,
+    )
+    assert np.allclose(catalog.logp[0], expected)
+
+
 def test_catalog_model_finiteness_is_checked_only_in_each_objects_active_bands():
     backend = PartiallyInvalidBackend()
     space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0, 1.0])})
@@ -644,3 +680,60 @@ def test_mass_grid_requires_a_prior_object_instead_of_implicit_or_array_weights(
             log10_mass_grid=mass_grid,
             log10_mass_prior=np.ones(3),
         )
+
+
+def test_cached_mass_profile_with_model_discrepancy_requires_explicit_mass_grid():
+    backend = PerMassBackend()
+    model_space = ParameterSpace(
+        names=("template",),
+        priors={"template": ChoicePrior([0.0])},
+    )
+    grid = build_photometric_model_grid(
+        backend,
+        model_space,
+        filters=("u", "g"),
+        band_names=("u", "g"),
+        excluded_parameters=(),
+    )
+    dataset = SEDDataset(
+        ("u", "g"),
+        flux=np.asarray([10.0, 20.0]),
+        sigma=np.asarray([1.0, 1.0]),
+    )
+
+    with pytest.raises(ValueError, match="model_discrepancy.*log10_mass_grid"):
+        evaluate_catalog_model_grid_likelihood(
+            grid,
+            [dataset],
+            model_discrepancy=0.1,
+        )
+
+    mass_grid = np.linspace(0.0, 1.2, 121)
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        model_discrepancy=0.1,
+        log10_mass_grid=mass_grid,
+        log10_mass_prior=UniformPrior(0.0, 1.2),
+    )
+    full_space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={
+            "log10_mass": UniformPrior(0.0, 1.2),
+            "template": ChoicePrior([0.0]),
+        },
+    )
+    scalar = GaussianPhotometricLikelihood(
+        backend,
+        dataset,
+        full_space,
+        filters=("u", "g"),
+        model_discrepancy=0.1,
+    )
+    scalar_log_like = np.asarray(
+        [scalar.log_likelihood([mass, 0.0]) for mass in mass_grid],
+        dtype=float,
+    )
+    best = int(np.argmax(scalar_log_like))
+    assert result.log10_mass_profile[0, 0] == pytest.approx(mass_grid[best])
+    assert result.profile_logp[0, 0] == pytest.approx(scalar_log_like[best])

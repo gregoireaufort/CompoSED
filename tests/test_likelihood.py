@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 
@@ -267,12 +269,127 @@ def test_sigma_floor_is_added_in_quadrature():
     assert np.isclose(logp, expected)
 
 
+def test_zero_model_discrepancy_exactly_recovers_raw_catalog_sigma():
+    data = SEDDataset(["g"], flux=np.array([2.3]), sigma=np.array([0.4]))
+    backend = MockBackend([1.7], band_names=["g"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+
+    logp = GaussianPhotometricLikelihood(
+        backend,
+        data,
+        ps,
+        model_discrepancy=0.0,
+    ).log_likelihood([0.0])
+    expected = -0.5 * (
+        ((2.3 - 1.7) / 0.4) ** 2
+        + np.log(2.0 * np.pi * 0.4**2)
+    )
+    assert logp == pytest.approx(expected)
+
+
+def test_model_discrepancy_matches_manual_gaussian_including_logdet():
+    data = SEDDataset(["g", "r"], flux=np.array([2.3, 1.2]), sigma=np.array([0.4, 0.2]))
+    model_flux = np.array([1.7, 1.5])
+    backend = MockBackend(model_flux, band_names=["g", "r"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+    eta = 0.15
+
+    logp = GaussianPhotometricLikelihood(
+        backend,
+        data,
+        ps,
+        model_discrepancy=eta,
+    ).log_likelihood([0.0])
+    sigma_eff = np.sqrt(data.sigma**2 + (eta * model_flux) ** 2)
+    expected = -0.5 * np.sum(
+        ((data.flux - model_flux) / sigma_eff) ** 2
+        + np.log(2.0 * np.pi * sigma_eff**2)
+    )
+    assert logp == pytest.approx(expected)
+
+
+def test_upper_limit_uses_model_dependent_effective_sigma():
+    data = SEDDataset(
+        ["fuv"],
+        flux=np.array([np.nan]),
+        sigma=np.array([0.2]),
+        upper_limit=np.array([1.0]),
+        upper_limit_mask=np.array([True]),
+    )
+    backend = MockBackend([1.4], band_names=["fuv"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+    eta = 0.5
+
+    logp = GaussianPhotometricLikelihood(
+        backend,
+        data,
+        ps,
+        model_discrepancy=eta,
+    ).log_likelihood([0.0])
+    sigma_eff = np.sqrt(0.2**2 + (eta * 1.4) ** 2)
+    z = (1.0 - 1.4) / sigma_eff
+    expected = np.log(0.5 * math.erfc(-z / np.sqrt(2.0)))
+    assert logp == pytest.approx(expected)
+
+
+def test_simulation_variance_includes_catalog_sigma_and_model_discrepancy():
+    data = SEDDataset(["g"], flux=np.array([1.0]), sigma=np.array([0.1]))
+    backend = MockBackend([2.0], band_names=["g"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+    eta = 0.2
+    likelihood = GaussianPhotometricLikelihood(
+        backend,
+        data,
+        ps,
+        model_discrepancy=eta,
+    )
+    theta = np.zeros((12_000, 1), dtype=float)
+    draws, sigma_catalog = likelihood.simulate_with_uncertainty(
+        theta,
+        noise_fn=lambda flux: np.full_like(flux, 0.3),
+        rng=np.random.default_rng(91),
+    )
+
+    expected_variance = 0.3**2 + (eta * 2.0) ** 2
+    assert np.allclose(sigma_catalog, 0.3)
+    assert np.var(draws[:, 0] - 2.0, ddof=1) == pytest.approx(
+        expected_variance,
+        rel=0.04,
+    )
+
+
+def test_effective_sigma_quadrature_does_not_overflow_for_large_finite_sigma():
+    from composed.likelihood import effective_photometric_sigma
+
+    sigma_eff = effective_photometric_sigma(
+        np.asarray([1.0e200]),
+        np.asarray([2.0]),
+        model_discrepancy=0.1,
+    )
+    assert np.isfinite(sigma_eff[0])
+    assert sigma_eff[0] == pytest.approx(1.0e200)
+
+
 def test_negative_sigma_floor_raises_clear_error():
     data = SEDDataset(["g"], flux=np.array([2.0]), sigma=np.array([1.0]))
     backend = MockBackend([0.0], band_names=["g"])
     ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
     with pytest.raises(ValueError, match="sigma_floor"):
         GaussianPhotometricLikelihood(backend, data, ps, sigma_floor=-1.0).log_prob([0.0])
+
+
+@pytest.mark.parametrize("bad_eta", [-0.1, np.nan, np.inf])
+def test_invalid_model_discrepancy_raises_clear_error(bad_eta):
+    data = SEDDataset(["g"], flux=np.array([2.0]), sigma=np.array([1.0]))
+    backend = MockBackend([2.0], band_names=["g"])
+    ps = ParameterSpace(["z"], {"z": DeltaPrior(0.0)})
+    with pytest.raises(ValueError, match="model_discrepancy"):
+        GaussianPhotometricLikelihood(
+            backend,
+            data,
+            ps,
+            model_discrepancy=bad_eta,
+        )
 
 
 def test_backend_numerical_error_returns_minus_inf():

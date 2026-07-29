@@ -201,6 +201,7 @@ def evaluate_catalog_model_grid_likelihood(
     datasets: Sequence[SEDDataset],
     *,
     sigma_floor: float | None = None,
+    model_discrepancy: float = 0.0,
     log10_mass_grid: Sequence[float] | None = None,
     log10_mass_bounds: tuple[float, float] | None = None,
     log10_mass_prior: Prior | None = None,
@@ -212,6 +213,11 @@ def evaluate_catalog_model_grid_likelihood(
     """Evaluate a cached mass-normalized model grid against a catalog.
 
     The model grid is computed once; this function does only likelihood work.
+    ``model_discrepancy`` is the same dimensionless ``eta`` used by
+    :class:`GaussianPhotometricLikelihood`; it is combined with the raw
+    catalog sigma from each dataset after mass scaling. Non-zero eta requires
+    an explicit mass grid because the usual analytic amplitude is then
+    invalid.
     For detections, the profile mass scale is the usual weighted least-squares
     normalization
 
@@ -235,6 +241,7 @@ def evaluate_catalog_model_grid_likelihood(
         raise ValueError("chunk sizes must be positive.")
     if sigma_floor is not None and float(sigma_floor) < 0.0:
         raise ValueError("sigma_floor must be non-negative.")
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
 
     datasets = tuple(datasets)
     band_names, data_flux, data_sigma, active_mask, upper_limit, upper_limit_mask = _stack_catalog_arrays(
@@ -266,6 +273,7 @@ def evaluate_catalog_model_grid_likelihood(
         log10_mass_grid=log10_mass_grid_arr,
         mass_chunk_size=int(mass_chunk_size),
         require_finite=log10_mass_grid_arr is None,
+        model_discrepancy=model_discrepancy,
     )
 
     marginal_logp = None
@@ -290,6 +298,7 @@ def evaluate_catalog_model_grid_likelihood(
             object_chunk_size=int(object_chunk_size),
             mass_chunk_size=int(mass_chunk_size),
             store_mass_posterior=store_mass_posterior,
+            model_discrepancy=model_discrepancy,
         )
         marginal_logp = marginal["marginal_logp"]
         marginal_weights = _normalize_logp_rows(marginal_logp)
@@ -328,6 +337,7 @@ def evaluate_catalog_model_grid_likelihood(
             "upper_limit": upper_limit,
             "upper_limit_mask": upper_limit_mask,
             "sigma_floor": sigma_floor,
+            "model_discrepancy": model_discrepancy,
             "log10_mass_bounds": mass_bounds,
             "mass_prior": mass_prior_meta,
             "mass_reference": model_grid.mass_reference.value,
@@ -421,6 +431,7 @@ def run_photometric_grid_catalog(
     filters=None,
     *,
     sigma_floor: float | None = None,
+    model_discrepancy: float = 0.0,
     model_chunk_size: int = 2048,
     object_chunk_size: int = 512,
     max_grid_size: int | None = 1_000_000,
@@ -436,7 +447,9 @@ def run_photometric_grid_catalog(
 
     All datasets must use the same band order. Individual objects may still
     have different masks; masked bands contribute neither residual nor log
-    determinant.
+    determinant. ``model_discrepancy`` applies the same
+    ``(eta * f_model)**2`` variance term as the scalar likelihood, including
+    its theta-dependent log determinant and censored upper-limit terms.
     """
 
     datasets = tuple(datasets)
@@ -448,6 +461,7 @@ def run_photometric_grid_catalog(
         raise ValueError("object_chunk_size must be positive.")
     if sigma_floor is not None and float(sigma_floor) < 0.0:
         raise ValueError("sigma_floor must be non-negative.")
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
 
     band_names, data_flux, data_sigma, active_mask, upper_limit, upper_limit_mask = _stack_catalog_arrays(
         datasets, sigma_floor=sigma_floor, target_flux_unit="maggies"
@@ -476,6 +490,7 @@ def run_photometric_grid_catalog(
         valid_grid=valid_grid,
         model_chunk_size=int(model_chunk_size),
         object_chunk_size=int(object_chunk_size),
+        model_discrepancy=model_discrepancy,
     )
     weights = _normalize_logp_rows(logp)
     map_indices = np.asarray([int(np.nanargmax(row)) for row in logp], dtype=int)
@@ -487,6 +502,7 @@ def run_photometric_grid_catalog(
         "upper_limit_mask": upper_limit_mask,
         "valid_grid": valid_grid,
         "sigma_floor": sigma_floor,
+        "model_discrepancy": model_discrepancy,
         "model_chunk_size": int(model_chunk_size),
         "object_chunk_size": int(object_chunk_size),
     }
@@ -710,13 +726,13 @@ def _catalog_gaussian_logp(
     valid_grid,
     model_chunk_size,
     object_chunk_size,
+    model_discrepancy=0.0,
 ) -> np.ndarray:
     n_objects = data_flux.shape[0]
     n_grid = model_flux.shape[0]
     logp = np.full((n_objects, n_grid), -np.inf, dtype=float)
     detection_mask = active_mask & ~upper_limit_mask
-    inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
-    logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
 
     for g0 in range(0, n_grid, model_chunk_size):
         g1 = min(g0 + model_chunk_size, n_grid)
@@ -729,20 +745,36 @@ def _catalog_gaussian_logp(
             o1 = min(o0 + object_chunk_size, n_objects)
             local_active = active_mask[o0:o1]
             object_model_valid = _object_model_finite(local_active, model)
+            model_for_sigma = np.where(
+                local_active[:, None, :],
+                model[None, :, :],
+                0.0,
+            )
+            sigma_eff = np.sqrt(
+                data_sigma[o0:o1, None, :] ** 2
+                + (model_discrepancy * model_for_sigma) ** 2
+            )
             local_detection = detection_mask[o0:o1, None, :]
             diff = np.where(
                 local_detection,
                 data_flux[o0:o1, None, :] - model[None, :, :],
                 0.0,
             )
-            chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, :], axis=2)
-            log_like = -0.5 * (chi2 + logdet[o0:o1, None])
+            chi2 = np.sum(
+                np.where(local_detection, diff**2 / sigma_eff**2, 0.0),
+                axis=2,
+            )
+            logdet = np.sum(
+                np.where(local_detection, np.log(2.0 * np.pi * sigma_eff**2), 0.0),
+                axis=2,
+            )
+            log_like = -0.5 * (chi2 + logdet)
             local_upper_mask = upper_limit_mask[o0:o1]
             if np.any(local_upper_mask):
                 z = np.where(
                     local_upper_mask[:, None, :],
                     (upper_limit[o0:o1, None, :] - model[None, :, :])
-                    / data_sigma[o0:o1, None, :],
+                    / sigma_eff,
                     0.0,
                 )
                 log_like += np.sum(np.where(local_upper_mask[:, None, :], _normal_logcdf(z), 0.0), axis=2)
@@ -769,6 +801,15 @@ def _object_model_finite(active_mask: np.ndarray, model_flux: np.ndarray) -> np.
         (~active_mask[:, None, :]) | np.isfinite(model_flux)[None, :, :],
         axis=2,
     )
+
+
+def _validate_model_discrepancy(value: float) -> float:
+    """Validate the dimensionless catalog likelihood discrepancy ``eta``."""
+
+    value = float(value)
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError("model_discrepancy must be finite and non-negative.")
+    return value
 
 
 def _prepare_mass_grid_and_prior(*, log10_mass_grid, log10_mass_bounds, log10_mass_prior):
@@ -893,12 +934,15 @@ def _catalog_profile_mass_logp(
     log10_mass_grid=None,
     mass_chunk_size=128,
     require_finite=True,
+    model_discrepancy=0.0,
 ):
-    if np.any(upper_limit_mask):
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
+    if np.any(upper_limit_mask) or model_discrepancy > 0.0:
         if log10_mass_grid is None:
             raise ValueError(
-                "Mass profiling with upper limits requires an explicit log10_mass_grid because the "
-                "detection-only analytic normalization is not the censored-likelihood optimum."
+                "Mass profiling with upper limits or non-zero model_discrepancy requires an explicit "
+                "log10_mass_grid because the detection-only analytic normalization is no longer the "
+                "likelihood optimum."
             )
         return _catalog_grid_profile_mass_logp(
             data_flux=data_flux,
@@ -913,6 +957,7 @@ def _catalog_profile_mass_logp(
             object_chunk_size=object_chunk_size,
             log10_mass_grid=np.asarray(log10_mass_grid, dtype=float),
             mass_chunk_size=int(mass_chunk_size),
+            model_discrepancy=model_discrepancy,
         )
 
     n_objects = data_flux.shape[0]
@@ -1002,6 +1047,7 @@ def _catalog_grid_profile_mass_logp(
     object_chunk_size,
     log10_mass_grid,
     mass_chunk_size,
+    model_discrepancy=0.0,
 ):
     """Maximize the complete detection+censoring likelihood over mass."""
 
@@ -1012,8 +1058,7 @@ def _catalog_grid_profile_mass_logp(
     log10_mass = np.full((n_objects, n_grid), np.nan, dtype=float)
     mass_at_boundary = np.zeros((n_objects, n_grid), dtype=bool)
     detection_mask = active_mask & ~upper_limit_mask
-    inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
-    logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
     scales = 10.0 ** np.asarray(log10_mass_grid, dtype=float)
 
     for g0 in range(0, n_grid, model_chunk_size):
@@ -1031,20 +1076,36 @@ def _catalog_grid_profile_mass_logp(
             for m0 in range(0, scales.size, mass_chunk_size):
                 m1 = min(m0 + mass_chunk_size, scales.size)
                 scaled = model[:, None, :] * scales[None, m0:m1, None]
+                scaled_for_sigma = np.where(
+                    active_mask[o0:o1, None, None, :],
+                    scaled[None, :, :, :],
+                    0.0,
+                )
+                sigma_eff = np.sqrt(
+                    data_sigma[o0:o1, None, None, :] ** 2
+                    + (model_discrepancy * scaled_for_sigma) ** 2
+                )
                 local_detection = detection_mask[o0:o1, None, None, :]
                 diff = np.where(
                     local_detection,
                     data_flux[o0:o1, None, None, :] - scaled[None, :, :, :],
                     0.0,
                 )
-                chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, None, :], axis=3)
-                values = -0.5 * (chi2 + logdet[o0:o1, None, None])
+                chi2 = np.sum(
+                    np.where(local_detection, diff**2 / sigma_eff**2, 0.0),
+                    axis=3,
+                )
+                logdet = np.sum(
+                    np.where(local_detection, np.log(2.0 * np.pi * sigma_eff**2), 0.0),
+                    axis=3,
+                )
+                values = -0.5 * (chi2 + logdet)
                 local_upper_mask = upper_limit_mask[o0:o1]
                 if np.any(local_upper_mask):
                     z = np.where(
                         local_upper_mask[:, None, None, :],
                         (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :])
-                        / data_sigma[o0:o1, None, None, :],
+                        / sigma_eff,
                         0.0,
                     )
                     values += np.sum(
@@ -1123,6 +1184,7 @@ def _catalog_marginal_mass_logp(
     object_chunk_size,
     mass_chunk_size,
     store_mass_posterior,
+    model_discrepancy=0.0,
 ):
     n_objects = data_flux.shape[0]
     n_grid = model_flux.shape[0]
@@ -1133,8 +1195,7 @@ def _catalog_marginal_mass_logp(
     )
     mass_marginal_logp = np.full((n_objects, n_mass), -np.inf, dtype=float)
     detection_mask = active_mask & ~upper_limit_mask
-    inv_sigma2 = np.where(detection_mask, 1.0 / data_sigma**2, 0.0)
-    logdet = np.sum(np.where(detection_mask, np.log(2.0 * np.pi * data_sigma**2), 0.0), axis=1)
+    model_discrepancy = _validate_model_discrepancy(model_discrepancy)
     mass_scales = 10.0**log10_mass_grid
 
     for g0 in range(0, n_grid, model_chunk_size):
@@ -1151,20 +1212,36 @@ def _catalog_marginal_mass_logp(
             for m0 in range(0, n_mass, mass_chunk_size):
                 m1 = min(m0 + mass_chunk_size, n_mass)
                 scaled = mass_scales[m0:m1][None, :, None] * model[:, None, :]
+                scaled_for_sigma = np.where(
+                    active_mask[o0:o1, None, None, :],
+                    scaled[None, :, :, :],
+                    0.0,
+                )
+                sigma_eff = np.sqrt(
+                    data_sigma[o0:o1, None, None, :] ** 2
+                    + (model_discrepancy * scaled_for_sigma) ** 2
+                )
                 local_detection = detection_mask[o0:o1, None, None, :]
                 diff = np.where(
                     local_detection,
                     data_flux[o0:o1, None, None, :] - scaled[None, :, :, :],
                     0.0,
                 )
-                chi2 = np.sum(diff**2 * inv_sigma2[o0:o1, None, None, :], axis=3)
-                log_like = -0.5 * (chi2 + logdet[o0:o1, None, None])
+                chi2 = np.sum(
+                    np.where(local_detection, diff**2 / sigma_eff**2, 0.0),
+                    axis=3,
+                )
+                logdet = np.sum(
+                    np.where(local_detection, np.log(2.0 * np.pi * sigma_eff**2), 0.0),
+                    axis=3,
+                )
+                log_like = -0.5 * (chi2 + logdet)
                 local_upper_mask = upper_limit_mask[o0:o1]
                 if np.any(local_upper_mask):
                     z = np.where(
                         local_upper_mask[:, None, None, :],
                         (upper_limit[o0:o1, None, None, :] - scaled[None, :, :, :])
-                        / data_sigma[o0:o1, None, None, :],
+                        / sigma_eff,
                         0.0,
                     )
                     log_like += np.sum(

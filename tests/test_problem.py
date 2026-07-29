@@ -84,6 +84,23 @@ def test_problem_exposes_prior_likelihood_posterior_and_transform():
     assert problem.specification()["mass_convention"] == "composed.mass.surviving_stellar.v1"
 
 
+def test_problem_specification_records_photometric_model_discrepancy():
+    problem = Problem(
+        backend=ParameterBackend(),
+        parameters=ParameterSpace(("amplitude",), {"amplitude": UniformPrior(1.0, 3.0)}),
+        data=SEDDataset(("g",), np.asarray([2.0]), np.asarray([0.1])),
+        likelihood=Gaussian(
+            photometric_sigma_floor=0.01,
+            photometric_model_discrepancy=0.07,
+        ),
+    )
+
+    likelihood_spec = problem.specification()["likelihood"]
+    assert likelihood_spec["photometric_sigma_floor"] == pytest.approx(0.01)
+    assert likelihood_spec["photometric_model_discrepancy"] == pytest.approx(0.07)
+    assert "f_model" in likelihood_spec["photometric_sigma_equation"]
+
+
 def test_joint_problem_adds_two_data_terms_but_prior_once():
     space = ParameterSpace(("x",), {"x": UniformPrior(1.0, 3.0)})
     photometry = SEDDataset(("g",), np.asarray([2.0]), np.asarray([0.1]))

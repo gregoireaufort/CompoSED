@@ -1134,7 +1134,8 @@ class Simulate:
     """Training simulations drawn from the declared Problem prior and simulator."""
 
     n: int
-    noise_fn: Callable[[np.ndarray], np.ndarray]
+    noise_fn: Callable[[np.ndarray], np.ndarray] | None = None
+    noise_model: Callable[[np.ndarray], np.ndarray] | None = None
     infer: Sequence[str] | None = None
     condition_on: Sequence[str] | None = None
     context: PhotometricContext | str = "snr_logsigma"
@@ -1149,8 +1150,14 @@ class Simulate:
     def __post_init__(self) -> None:
         if int(self.n) <= 0:
             raise ValueError("Simulate.n must be positive.")
-        if not callable(self.noise_fn):
-            raise TypeError("Simulate.noise_fn must be callable.")
+        if self.noise_fn is not None and self.noise_model is not None:
+            if self.noise_fn is not self.noise_model:
+                raise TypeError("Pass either Simulate.noise_model= or the compatibility noise_fn= alias, not both.")
+        resolved_noise = self.noise_model if self.noise_model is not None else self.noise_fn
+        if not callable(resolved_noise):
+            raise TypeError("Simulate requires a callable noise_model (noise_fn is a compatibility alias).")
+        object.__setattr__(self, "noise_model", resolved_noise)
+        object.__setattr__(self, "noise_fn", resolved_noise)
         if int(self.max_retries) < 0:
             raise ValueError("Simulate.max_retries must be non-negative.")
         failure_policy = str(self.failure_policy).lower()
@@ -2249,7 +2256,8 @@ def simulate_sbi_training_set(
         metadata={
             "problem": problem.specification(),
             "simulator": "Problem.simulate",
-            "noise_model": _transform_name(simulation.noise_fn),
+            "noise_model": _transform_name(simulation.noise_model),
+            "noise_model_specification": _noise_model_specification(simulation.noise_model),
             "requested_training_rows": int(simulation.n),
             "active_band_names": band_names,
             "flux_unit": problem.data.flux_unit,
@@ -3147,8 +3155,23 @@ def _coerce_filter_set(filters: FilterSet | Sequence[object]) -> FilterSet:
 
 def _transform_name(transform: PhotometryTransform) -> str:
     if callable(transform):
-        return getattr(transform, "__name__", "callable")
+        return getattr(transform, "__name__", type(transform).__name__)
     return str(transform)
+
+
+def _noise_model_specification(noise_model) -> dict[str, object]:
+    """Record a structured noise model without hiding it behind a function name."""
+
+    specification = getattr(noise_model, "specification", None)
+    if callable(specification):
+        value = specification()
+        if not isinstance(value, Mapping):
+            raise TypeError("noise_model.specification() must return a mapping.")
+        return _json_safe(value)
+    return {
+        "name": _transform_name(noise_model),
+        "type": f"{type(noise_model).__module__}.{type(noise_model).__name__}",
+    }
 
 
 def _ordered_parameter_subset(

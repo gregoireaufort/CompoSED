@@ -45,6 +45,15 @@ class CIGALEBackend(SEDBackend):
       density in mJy after the CIGALE ``redshifting`` module has supplied the
       luminosity distance.
     - Native CIGALE filter photometry is converted from mJy to maggies.
+    - CIGALE v2022.0's native ``redshifting`` module uses the WMAP7
+      cosmology. The default named-SFH age conversion here therefore also uses
+      Astropy ``WMAP7``. A custom cosmology affects CompoSED's named-SFH age
+      conversion only; it cannot change upstream CIGALE redshifting.
+    - ``MJY_PER_MAGGIE = 3.631e6`` follows the exact AB zero point
+      ``3631 Jy``. ``C_A_PER_S = 2.99792458e18`` is the exact speed of light
+      in Angstrom/s used for the mJy-to-``f_lambda`` conversion. No solar
+      luminosity conversion is introduced in this backend because native
+      CIGALE already supplies W/nm or observed mJy.
 
     This backend deliberately supports only
     ``MassNormalization.PER_SOLAR_MASS``. For SFH modules, ``normalise=True`` is
@@ -174,6 +183,8 @@ class CIGALEBackend(SEDBackend):
                 "mass_normalization": self.mass_normalization.value,
                 "mass_convention": MASS_CONVENTION_SCHEMA,
                 "mass_reference": self.mass_reference.value,
+                "native_redshifting_cosmology": "WMAP7",
+                "photometric_zero_point_mjy_per_maggie": MJY_PER_MAGGIE,
                 **mass_metadata,
             },
         )
@@ -221,6 +232,8 @@ class CIGALEBackend(SEDBackend):
                 "mass_normalization": self.mass_normalization.value,
                 "mass_convention": MASS_CONVENTION_SCHEMA,
                 "mass_reference": self.mass_reference.value,
+                "native_redshifting_cosmology": "WMAP7",
+                "speed_of_light_angstrom_per_s": C_A_PER_S,
                 **mass_metadata,
             },
         )
@@ -426,9 +439,32 @@ class CIGALEBackend(SEDBackend):
     def _cosmology(self):
         if self.cosmology is not None:
             return self.cosmology
-        from astropy.cosmology import Planck18
+        from astropy.cosmology import WMAP7
 
-        return Planck18
+        return WMAP7
+
+    def scientific_specification(self) -> dict[str, object]:
+        """Scientific engine conventions included in Problem provenance."""
+
+        custom = self.cosmology
+        custom_name = None if custom is None else getattr(custom, "name", type(custom).__name__)
+        return {
+            "native_cigale_version_target": "v2022.0",
+            "native_redshifting_cosmology": "WMAP7",
+            "named_sfh_age_cosmology": "WMAP7" if custom is None else str(custom_name),
+            "custom_cosmology_scope": (
+                "none"
+                if custom is None
+                else "CompoSED named-SFH age conversion only; upstream CIGALE redshifting remains WMAP7"
+            ),
+            "native_rest_wavelength_unit": "nm",
+            "native_rest_luminosity_density_unit": "W/nm",
+            "native_observed_flux_density_unit": "mJy",
+            "returned_photometry_unit": "maggies",
+            "mjy_per_maggie": MJY_PER_MAGGIE,
+            "speed_of_light_angstrom_per_s": C_A_PER_S,
+            "solar_luminosity_conversion": "none; native CIGALE W/nm and mJy are preserved",
+        }
 
     def _validate_per_solar_mass_sed(self, sed) -> dict[str, float]:
         info = getattr(sed, "info", {})

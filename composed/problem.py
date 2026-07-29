@@ -24,10 +24,35 @@ from composed.units import MASS_CONVENTION_SCHEMA, backend_mass_reference
 
 @dataclass(frozen=True)
 class Gaussian:
-    """Diagonal Gaussian likelihood configuration for a :class:`Problem`."""
+    """Diagonal Gaussian likelihood configuration for a :class:`Problem`.
+
+    ``photometric_model_discrepancy`` is the dimensionless ``eta`` in
+
+    ``sigma_eff**2 = sigma_catalog**2 + sigma_floor**2 + (eta * f_model)**2``.
+
+    It defaults to exactly zero. The catalog uncertainty stored in
+    :class:`~composed.data.SEDDataset` is never modified in place.
+    """
 
     photometric_sigma_floor: float | None = None
     spectral_sigma_floor: float | None = None
+    photometric_model_discrepancy: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("photometric_sigma_floor", "spectral_sigma_floor"):
+            value = getattr(self, name)
+            if value is not None and (not np.isfinite(float(value)) or float(value) < 0.0):
+                raise ValueError(f"{name} must be finite and non-negative.")
+        eta = float(self.photometric_model_discrepancy)
+        if not np.isfinite(eta) or eta < 0.0:
+            raise ValueError("photometric_model_discrepancy must be finite and non-negative.")
+        object.__setattr__(self, "photometric_model_discrepancy", eta)
+
+    @property
+    def eta(self) -> float:
+        """Fractional photometric model-discrepancy amplitude."""
+
+        return self.photometric_model_discrepancy
 
 
 class _TransformedBackend:
@@ -115,6 +140,7 @@ class Problem:
                     self.parameters,
                     filters=self.filters,
                     sigma_floor=self.likelihood.photometric_sigma_floor,
+                    model_discrepancy=self.likelihood.photometric_model_discrepancy,
                 )
             )
         if spectrum is not None:
@@ -178,10 +204,11 @@ class Problem:
     def simulate_with_uncertainty(self, theta, noise_fn, rng: np.random.Generator | None = None):
         """Simulate photometry and return ``(active_flux, active_sigma)``.
 
-        The uncertainty is the exact value returned by ``noise_fn`` for the
-        same noiseless model and random realization. This first stable SBI
-        contract is photometry-only; joint spectrophotometric SBI requires a
-        separate explicit context schema.
+        The returned uncertainty is the raw ``sigma_catalog`` from
+        ``noise_fn``. The flux draw additionally includes the Problem's
+        photometric absolute floor and fractional model discrepancy. This
+        first stable SBI contract is photometry-only; joint
+        spectrophotometric SBI requires a separate explicit context schema.
         """
 
         if len(self._components) != 1 or not isinstance(self.data, SEDDataset):
@@ -212,7 +239,7 @@ class Problem:
         mass_normalization = getattr(self.backend, "mass_normalization", None)
         mass_reference = backend_mass_reference(self.backend)
         return {
-            "schema": "composed.problem.v2",
+            "schema": "composed.problem.v3",
             "backend": f"{type(self.backend).__module__}.{type(self.backend).__name__}",
             "backend_configuration": _backend_configuration(self.backend),
             "mass_normalization": getattr(mass_normalization, "value", mass_normalization),
@@ -226,7 +253,18 @@ class Problem:
             "data": type(self.data).__name__,
             "data_configuration": _dataset_specification(self.data),
             "filters": _filter_specification(self.filters),
-            "likelihood": repr(self.likelihood),
+            "likelihood": {
+                "name": type(self.likelihood).__name__,
+                "photometric_sigma_floor": self.likelihood.photometric_sigma_floor,
+                "spectral_sigma_floor": self.likelihood.spectral_sigma_floor,
+                "photometric_model_discrepancy": (
+                    self.likelihood.photometric_model_discrepancy
+                ),
+                "photometric_sigma_equation": (
+                    "sigma_eff^2 = sigma_catalog^2 + sigma_floor^2 "
+                    "+ (photometric_model_discrepancy * f_model)^2"
+                ),
+            },
             "parameter_transform": transform_name,
             "parameter_transform_configuration": transform_specification,
             "metadata": _stable_value(self.metadata),
@@ -297,34 +335,59 @@ class Sampler:
 
 
 def Emcee(**options) -> Sampler:
+    """Configure the stable affine-invariant ensemble sampler.
+
+    ``options`` are forwarded to :func:`inftools.mcmc.run_emcee`. The sampled
+    parameter space must contain only continuous free axes; object-specific
+    fixed values should be supplied through ``fit(..., conditions=...)``.
+    """
+
     return Sampler("emcee", options)
 
 
 def RandomWalk(**options) -> Sampler:
+    """Configure the NumPy random-walk Metropolis sampler."""
+
     return Sampler("random_walk", options)
 
 
 def Grid(**options) -> Sampler:
+    """Configure exact enumeration of a finite Cartesian prior support.
+
+    Every free parameter must use a finite prior such as ``ChoicePrior`` or
+    ``IntegerUniformPrior``. Continuous priors are not discretized implicitly.
+    """
+
     return Sampler("grid", options)
 
 
 def MixedGibbs(**options) -> Sampler:
+    """Configure two-block inference for mixed continuous/discrete priors."""
+
     return Sampler("mixed_gibbs", options)
 
 
 def MixedTAMIS(**options) -> Sampler:
+    """Configure CompoSED's self-contained mixed-proposal TAMIS sampler."""
+
     return Sampler("mixed_tamis", options)
 
 
 def Laplace(**options) -> Sampler:
+    """Configure the experimental finite-difference Laplace approximation."""
+
     return Sampler("laplace", options)
 
 
 def TAMIS(**options) -> Sampler:
+    """Configure the experimental adapter to a separately installed TAMIS package."""
+
     return Sampler("tamis", options)
 
 
 def PocoMC(**options) -> Sampler:
+    """Configure the stable PocoMC sampler for continuous free parameters."""
+
     return Sampler("pocomc", options)
 
 
@@ -874,9 +937,16 @@ def _backend_configuration(backend: object) -> dict[str, object]:
     elif module_name.endswith(".cigale"):
         package_names += ("pcigale", "cigale", "sedpy", "astropy")
 
+    scientific_specification = getattr(backend, "scientific_specification", None)
+    scientific_conventions = (
+        _stable_value(scientific_specification())
+        if callable(scientific_specification)
+        else None
+    )
     return {
         "type": type_name,
         "configuration": configuration,
+        "scientific_conventions": scientific_conventions,
         "package_versions": {
             name: _distribution_version(name)
             for name in package_names

@@ -40,6 +40,9 @@ class FSPSBackend(SEDBackend):
     - It converts rest luminosity density to observed ``f_lambda`` in
       ``erg / s / cm^2 / Angstrom`` using
       ``L_lambda * Lsun_cgs / (4*pi*d_L^2*(1+z))``.
+      CompoSED uses ``Lsun_cgs = 3.828e33 erg/s`` and
+      ``parsec_cm = 3.085677581491367e18 cm``; these constants are preserved
+      in model and Problem provenance.
     - ``sedpy.observate.getSED`` integrates that observed spectrum through the
       supplied filters and returns AB magnitudes, which are converted to maggies.
 
@@ -105,6 +108,26 @@ class FSPSBackend(SEDBackend):
         if not np.all(np.isfinite(flux_maggies)):
             raise FloatingPointError("FSPS photometry contains non-finite values.")
         return ModelPhotometry(band_names=filter_set.names, flux=flux_maggies, metadata=metadata)
+
+    def scientific_specification(self) -> dict[str, object]:
+        """Scientific units and constants included in Problem provenance."""
+
+        cosmology = self.cosmology
+        cosmology_name = "Planck18" if cosmology is None else getattr(
+            cosmology,
+            "name",
+            type(cosmology).__name__,
+        )
+        return {
+            "rest_wavelength_unit": "angstrom",
+            "native_rest_luminosity_density_unit": "Lsun/angstrom",
+            "observed_spectral_flux_unit": "erg/s/cm^2/angstrom",
+            "returned_photometry_unit": "maggies",
+            "luminosity_distance_cosmology": str(cosmology_name),
+            "solar_luminosity_erg_per_s": LSUN_CGS,
+            "parsec_cm": PARSEC_CM,
+            "ab_zero_point_jy_per_maggie": 3631.0,
+        }
 
     def predict_spectrum(
         self,
@@ -215,6 +238,8 @@ class FSPSBackend(SEDBackend):
                 else None
             ),
             "sfh_model": sfh_metadata,
+            "solar_luminosity_erg_per_s": LSUN_CGS,
+            "parsec_cm": PARSEC_CM,
             **mass_metadata,
         }
         return np.asarray(wave_rest_a, dtype=float), llam_lsun_per_a, metadata

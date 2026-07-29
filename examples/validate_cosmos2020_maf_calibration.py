@@ -9,7 +9,8 @@ The calculation is:
 
 1. sample physical parameters from the tutorial prior;
 2. forward model ugrizYJH fluxes with FSPS or CIGALE;
-3. draw catalog-like Gaussian measurement noise;
+3. draw raw survey uncertainties from the saved conditional catalog-noise
+   model and Gaussian fluxes using the Problem's model discrepancy;
 4. sample q(theta | measured flux, sigma) from the saved MAF;
 5. calculate marginal ranks, coverage, and posterior-median residuals.
 
@@ -27,9 +28,9 @@ import time
 import numpy as np
 
 from composed import (
+    ConditionalCatalogNoise,
     ContinuitySFH,
     DelayedTauSFH,
-    EmpiricalPhotometricNoise,
     Gaussian,
     ParameterSpace,
     PhotometricContext,
@@ -55,12 +56,15 @@ from inftools.diagnostics import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG = REPO_ROOT / "notebooks/tutorials/data/cosmos2020_ugrizYJH_100k.npz"
+DEFAULT_NOISE_CHECKPOINT = REPO_ROOT / "outputs/tutorial_cosmos2020_survey_noise"
+MODEL_DISCREPANCY = 0.05
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("backend", choices=("fsps", "cigale"))
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--noise-checkpoint", type=Path, default=DEFAULT_NOISE_CHECKPOINT)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--n-test", type=int, default=512)
@@ -72,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_catalog_noise(catalog_path: Path):
+def load_catalog_noise(catalog_path: Path, noise_checkpoint: Path):
     if not catalog_path.exists():
         raise FileNotFoundError(
             f"Missing prepared tutorial catalog {catalog_path}. "
@@ -87,14 +91,15 @@ def load_catalog_noise(catalog_path: Path):
     from sedpy.observate import load_filters
 
     filters = FilterSet(load_filters(list(filter_names)), names=band_names)
-    noise_model = EmpiricalPhotometricNoise(
-        sigma,
-        fractional_error=0.05,
-        band_names=band_names,
-        flux_unit="maggies",
-    )
-    placeholder_sigma = np.sqrt(sigma[0] ** 2 + (0.05 * np.abs(flux[0])) ** 2)
-    data = SEDDataset(band_names, flux[0], placeholder_sigma, flux_unit="maggies")
+    if not (noise_checkpoint / "manifest.json").exists():
+        raise FileNotFoundError(
+            f"Missing survey-noise checkpoint {noise_checkpoint}. "
+            "Run either COSMOS2020 MAF tutorial first."
+        )
+    noise_model = ConditionalCatalogNoise.load(noise_checkpoint, device="cpu")
+    noise_model.validate_for(band_names=band_names, flux_unit="maggies")
+    noise_model.support_policy = "raise"
+    data = SEDDataset(band_names, flux[0], sigma[0], flux_unit="maggies")
     return filters, noise_model, data
 
 
@@ -134,7 +139,13 @@ def build_fsps_problem(filters, data):
         },
         default_z_key="zred",
     )
-    return Problem(backend, parameters, data, Gaussian(), filters=filters)
+    return Problem(
+        backend,
+        parameters,
+        data,
+        Gaussian(photometric_model_discrepancy=MODEL_DISCREPANCY),
+        filters=filters,
+    )
 
 
 def build_cigale_problem(filters, data):
@@ -178,7 +189,13 @@ def build_cigale_problem(filters, data):
         photometry_mode="sedpy",
         default_z_key="redshift",
     )
-    return Problem(backend, parameters, data, Gaussian(), filters=filters)
+    return Problem(
+        backend,
+        parameters,
+        data,
+        Gaussian(photometric_model_discrepancy=MODEL_DISCREPANCY),
+        filters=filters,
+    )
 
 
 def calibration_metrics(diagnostics, theta_names):
@@ -241,7 +258,7 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    filters, noise_model, data = load_catalog_noise(args.catalog)
+    filters, noise_model, data = load_catalog_noise(args.catalog, args.noise_checkpoint)
     problem = (
         build_fsps_problem(filters, data)
         if args.backend == "fsps"
@@ -256,9 +273,11 @@ def main() -> None:
 
     simulation = Simulate(
         n=args.n_test,
-        noise_fn=noise_model,
+        noise_model=noise_model,
         infer=problem.parameters.names,
         context=PhotometricContext("snr_logsigma", flux_unit="maggies"),
+        failure_policy="resample",
+        max_retries=max(1000, args.n_test),
         n_workers=args.n_workers,
         batch_size=128,
         executor="process" if args.n_workers > 1 else "serial",
@@ -307,6 +326,7 @@ def main() -> None:
     provenance = collect_run_provenance(
         paths={
             "prepared_cosmos2020_catalog": args.catalog,
+            "conditional_catalog_noise": args.noise_checkpoint,
             "maf_checkpoint": checkpoint,
         },
         seed=args.seed,

@@ -19,6 +19,37 @@ def test_fsps_backend_module_imports_without_fsps_installed():
     assert hasattr(fsps_backend, "FSPSBackend")
 
 
+def test_fsps_scientific_conversion_constants_are_explicit_and_unchanged(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(cosmology=FakeCosmology(age_gyr=10.0))
+    conventions = backend.scientific_specification()
+
+    assert fsps_backend.LSUN_CGS == 3.828e33
+    assert fsps_backend.PARSEC_CM == 3.085677581491367e18
+    assert conventions["solar_luminosity_erg_per_s"] == 3.828e33
+    assert conventions["parsec_cm"] == 3.085677581491367e18
+    assert conventions["ab_zero_point_jy_per_maggie"] == 3631.0
+
+
+def test_fsps_luminosity_to_observed_flux_conversion_regression(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(cosmology=FakeCosmology(age_gyr=10.0))
+    wavelength, flux = backend._rest_spectrum_to_observed_flux(
+        np.asarray([1000.0, 2000.0]),
+        np.asarray([1.0, 2.0]),
+        z=1.0,
+    )
+    expected = np.asarray([1.0, 2.0]) * 3.828e33 / (
+        4.0 * np.pi * (1.0e27) ** 2 * 2.0
+    )
+    assert np.allclose(wavelength, [2000.0, 4000.0])
+    assert np.allclose(flux, expected, rtol=1e-14, atol=0.0)
+
+
 def test_constructing_fsps_backend_raises_helpful_error_if_fsps_missing(monkeypatch):
     import composed.backends.fsps as fsps_backend
 

@@ -472,6 +472,7 @@ def fit_catalog_with_restframe_grid(
     igm_model: str | Callable[[np.ndarray, float], np.ndarray] | None = "cigale",
     cosmology=None,
     sigma_floor: float | None = None,
+    model_discrepancy: float = 0.0,
     log10_mass_grid: Sequence[float] | None = None,
     log10_mass_bounds: tuple[float, float] | None = None,
     log10_mass_prior: Prior | None = None,
@@ -541,6 +542,7 @@ def fit_catalog_with_restframe_grid(
             phot_grid,
             [datasets[i] for i in rows],
             sigma_floor=sigma_floor,
+            model_discrepancy=model_discrepancy,
             log10_mass_grid=log10_mass_grid,
             log10_mass_bounds=log10_mass_bounds,
             log10_mass_prior=log10_mass_prior,
@@ -610,6 +612,7 @@ def fit_catalog_with_restframe_grid(
             "cosmology": _cosmology_label(cosmology),
             "operators_by_redshift": operators,
             "sigma_floor": sigma_floor,
+            "model_discrepancy": float(model_discrepancy),
             "mass_prior": mass_prior_meta,
         },
     )

@@ -28,10 +28,13 @@ class GaussianPhotometricLikelihood:
     ``log_likelihood`` contains only the data term. ``log_prior`` delegates to
     the parameter space, and ``log_posterior`` adds the two exactly once.
     ``log_prob`` remains a compatibility alias for ``log_posterior``.
-    The likelihood aligns model and observed photometry by band name, applies an
-    optional uncertainty floor in quadrature, and applies ``10**log10_mass`` only
-    when the backend explicitly declares ``MassNormalization.PER_SOLAR_MASS``
-    with a surviving-stellar-mass reference. Thus ``log10_mass`` always denotes
+    The likelihood aligns model and observed photometry by band name and uses
+    ``sigma_eff**2 = sigma_catalog**2 + sigma_floor**2
+    + (model_discrepancy * f_model)**2``. Because the last term depends on the
+    current model, both residual and Gaussian normalization are recomputed for
+    every parameter vector. It applies ``10**log10_mass`` only when the backend
+    explicitly declares ``MassNormalization.PER_SOLAR_MASS`` with a
+    surviving-stellar-mass reference. Thus ``log10_mass`` always denotes
     present-day surviving stellar mass.
     Backend numerical failures and non-finite model fluxes return ``-inf``;
     configuration errors such as missing mass parameters or shape mismatches
@@ -43,6 +46,24 @@ class GaussianPhotometricLikelihood:
     parameter_space: ParameterSpace
     filters: object | None = None
     sigma_floor: float | None = None
+    model_discrepancy: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.sigma_floor is not None:
+            floor = float(self.sigma_floor)
+            if not np.isfinite(floor) or floor < 0.0:
+                raise ValueError("sigma_floor must be finite and non-negative.")
+            self.sigma_floor = floor
+        discrepancy = float(self.model_discrepancy)
+        if not np.isfinite(discrepancy) or discrepancy < 0.0:
+            raise ValueError("model_discrepancy must be finite and non-negative.")
+        self.model_discrepancy = discrepancy
+
+    @property
+    def eta(self) -> float:
+        """Fractional model-discrepancy amplitude used in ``sigma_eff``."""
+
+        return self.model_discrepancy
 
     def log_prob(self, theta: Sequence[float]) -> float:
         """Compatibility alias for :meth:`log_posterior`."""
@@ -71,14 +92,9 @@ class GaussianPhotometricLikelihood:
         if theta.shape != (self.parameter_space.ndim,):
             raise ValueError(f"Expected theta shape {(self.parameter_space.ndim,)}, got {theta.shape}.")
 
-        f_obs, sigma, idx, active_bands = self.dataset.active_arrays()
+        f_obs, sigma_catalog, idx, active_bands = self.dataset.active_arrays()
         if f_obs.size == 0:
             raise ValueError("SEDDataset has no active photometric bands.")
-        if self.sigma_floor is not None:
-            floor = float(self.sigma_floor)
-            if floor < 0.0:
-                raise ValueError("sigma_floor must be non-negative.")
-            sigma = np.sqrt(sigma**2 + floor**2)
 
         try:
             model_flux = self._predict_active_model_flux(theta, idx=idx, active_bands=active_bands)
@@ -89,18 +105,24 @@ class GaussianPhotometricLikelihood:
             raise ValueError(f"Model flux shape {model_flux.shape} does not match data shape {f_obs.shape}.")
         if not np.all(np.isfinite(model_flux)):
             return -np.inf
+        sigma_eff = effective_photometric_sigma(
+            sigma_catalog,
+            model_flux,
+            sigma_floor=self.sigma_floor,
+            model_discrepancy=self.model_discrepancy,
+        )
 
         upper_mask = self.dataset.active_upper_limit_mask
         detection_mask = ~upper_mask
 
         log_like = 0.0
         if np.any(detection_mask):
-            residual = (f_obs[detection_mask] - model_flux[detection_mask]) / sigma[detection_mask]
-            logdet = np.sum(np.log(2.0 * np.pi * sigma[detection_mask] ** 2))
+            residual = (f_obs[detection_mask] - model_flux[detection_mask]) / sigma_eff[detection_mask]
+            logdet = np.sum(np.log(2.0 * np.pi * sigma_eff[detection_mask] ** 2))
             log_like += -0.5 * (np.sum(residual**2) + logdet)
         if np.any(upper_mask):
             upper_limit = self.dataset.active_upper_limit
-            z = (upper_limit[upper_mask] - model_flux[upper_mask]) / sigma[upper_mask]
+            z = (upper_limit[upper_mask] - model_flux[upper_mask]) / sigma_eff[upper_mask]
             log_like += np.sum(_normal_logcdf(z))
 
         return float(log_like)
@@ -125,12 +147,15 @@ class GaussianPhotometricLikelihood:
         noise_fn,
         rng: np.random.Generator | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Simulate active-band flux and return the exact Gaussian sigma used.
+        """Simulate active-band flux and return the catalog uncertainty.
 
         This method follows the same model-flux, masking, unit-conversion, and
-        mass-normalization path as :meth:`simulate`.  It exists so an SBI model
-        can condition on heteroscedastic measurement uncertainty rather than
-        silently marginalizing over the training noise distribution.
+        mass-normalization path as :meth:`simulate`. The returned uncertainty
+        is ``sigma_catalog`` from ``noise_fn``. The random draw itself uses
+        ``sigma_draw**2 = sigma_catalog**2 + sigma_floor**2
+        + (model_discrepancy * model_flux)**2``. SBI therefore conditions on
+        the same raw catalog uncertainty supplied at observed-data inference,
+        while the likelihood still accounts for model discrepancy.
         """
 
         return self._simulate_flux_and_sigma(theta, noise_fn=noise_fn, rng=rng)
@@ -156,8 +181,13 @@ class GaussianPhotometricLikelihood:
         _, _, idx, active_bands = self.dataset.active_arrays()
         if idx.size == 0:
             raise ValueError("SEDDataset has no active photometric bands.")
+        _validate_noise_model(
+            noise_fn,
+            band_names=active_bands,
+            flux_unit=self.dataset.flux_unit,
+        )
         draws = []
-        sigma_rows = []
+        sigma_catalog_rows = []
         for row in theta_batch:
             try:
                 flux = self._predict_active_model_flux(row, idx=idx, active_bands=active_bands)
@@ -165,16 +195,25 @@ class GaussianPhotometricLikelihood:
                 raise PhotometricSimulationError(f"Backend numerical failure during simulation: {exc}") from exc
             if not np.all(np.isfinite(flux)):
                 raise PhotometricSimulationError("Backend produced non-finite noiseless flux.")
-            sigma = np.asarray(_call_noise_fn(noise_fn, flux, theta=row, rng=rng), dtype=float)
-            if sigma.shape != flux.shape:
-                raise ValueError(f"noise_fn returned sigma shape {sigma.shape}; expected {flux.shape}.")
-            if not np.all(np.isfinite(sigma)) or np.any(sigma < 0.0):
-                raise ValueError("noise_fn must return finite non-negative sigma values.")
-            draws.append(flux + rng.normal(loc=0.0, scale=sigma, size=flux.shape))
-            sigma_rows.append(sigma)
+            sigma_catalog = np.asarray(_call_noise_fn(noise_fn, flux, theta=row, rng=rng), dtype=float)
+            if sigma_catalog.shape != flux.shape:
+                raise ValueError(
+                    f"noise_fn returned sigma shape {sigma_catalog.shape}; expected {flux.shape}."
+                )
+            if not np.all(np.isfinite(sigma_catalog)) or np.any(sigma_catalog < 0.0):
+                raise ValueError("noise_fn must return finite non-negative catalog sigma values.")
+            sigma_draw = effective_photometric_sigma(
+                sigma_catalog,
+                flux,
+                sigma_floor=self.sigma_floor,
+                model_discrepancy=self.model_discrepancy,
+                allow_zero=True,
+            )
+            draws.append(flux + rng.normal(loc=0.0, scale=sigma_draw, size=flux.shape))
+            sigma_catalog_rows.append(sigma_catalog)
 
         out = np.stack(draws, axis=0)
-        sigma_out = np.stack(sigma_rows, axis=0)
+        sigma_out = np.stack(sigma_catalog_rows, axis=0)
         if single:
             return out[0], sigma_out[0]
         return out, sigma_out
@@ -389,6 +428,64 @@ def _call_noise_fn(noise_fn, flux: np.ndarray, *, theta: np.ndarray, rng: np.ran
     if "rng" in params:
         kwargs["rng"] = rng
     return noise_fn(flux, **kwargs)
+
+
+def _validate_noise_model(noise_fn, *, band_names: Sequence[str], flux_unit: str) -> None:
+    """Let structured noise models verify band order and units before sampling."""
+
+    validator = getattr(noise_fn, "validate_for", None)
+    if validator is not None:
+        validator(band_names=tuple(band_names), flux_unit=str(flux_unit))
+
+
+def effective_photometric_sigma(
+    sigma_catalog: np.ndarray,
+    model_flux: np.ndarray,
+    *,
+    sigma_floor: float | None = None,
+    model_discrepancy: float = 0.0,
+    allow_zero: bool = False,
+) -> np.ndarray:
+    """Return the Gaussian width used to score or simulate photometry.
+
+    Parameters are in one common flux unit. ``sigma_catalog`` remains the raw
+    survey uncertainty. ``sigma_floor`` is an optional absolute flux floor,
+    while ``model_discrepancy`` is the dimensionless fractional term
+
+    ``sigma_eff**2 = sigma_catalog**2 + sigma_floor**2
+                    + (model_discrepancy * model_flux)**2``.
+
+    The model-dependent term is deliberately evaluated after the forward
+    model, so its normalization contribution remains in the likelihood.
+    """
+
+    sigma_catalog = np.asarray(sigma_catalog, dtype=float)
+    model_flux = np.asarray(model_flux, dtype=float)
+    if sigma_catalog.shape != model_flux.shape:
+        raise ValueError(
+            f"sigma_catalog shape {sigma_catalog.shape} does not match model_flux shape {model_flux.shape}."
+        )
+    if not np.all(np.isfinite(sigma_catalog)) or np.any(sigma_catalog < 0.0):
+        raise ValueError("sigma_catalog must contain finite non-negative values.")
+    if not np.all(np.isfinite(model_flux)):
+        raise ValueError("model_flux must contain finite values.")
+    floor = 0.0 if sigma_floor is None else float(sigma_floor)
+    discrepancy = float(model_discrepancy)
+    if not np.isfinite(floor) or floor < 0.0:
+        raise ValueError("sigma_floor must be finite and non-negative.")
+    if not np.isfinite(discrepancy) or discrepancy < 0.0:
+        raise ValueError("model_discrepancy must be finite and non-negative.")
+    # Chained hypot evaluates the same quadrature without overflowing when a
+    # survey-noise extrapolation returns a very large but still finite sigma.
+    sigma_eff = np.hypot(
+        np.hypot(sigma_catalog, floor),
+        discrepancy * model_flux,
+    )
+    if not np.all(np.isfinite(sigma_eff)):
+        raise ValueError("Effective photometric sigma is non-finite.")
+    if not allow_zero and np.any(sigma_eff <= 0.0):
+        raise ValueError("Effective photometric sigma must be strictly positive.")
+    return sigma_eff
 
 
 def _normal_logcdf(z: np.ndarray) -> np.ndarray:

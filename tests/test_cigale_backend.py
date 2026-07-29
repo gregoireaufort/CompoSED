@@ -9,6 +9,7 @@ from composed.backends.cigale import (
     C_A_PER_S,
     CIGALEBackend,
     MJY_PER_MAGGIE,
+    _fnu_mjy_to_flambda_cgs_per_a,
     build_cigale_backend_and_parameter_space,
     build_cigale_parameter_space,
 )
@@ -51,6 +52,30 @@ def test_cigale_backend_rejects_absolute_mass_normalization(monkeypatch):
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     with pytest.raises(ValueError, match="PER_SOLAR_MASS"):
         CIGALEBackend(modules=["sfhdelayed", "redshifting"], mass_normalization=MassNormalization.ABSOLUTE)
+
+
+def test_cigale_scientific_conventions_record_wmap7_and_exact_flux_constants(monkeypatch):
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
+    conventions = backend.scientific_specification()
+
+    assert backend._cosmology().name == "WMAP7"
+    assert conventions["native_redshifting_cosmology"] == "WMAP7"
+    assert conventions["mjy_per_maggie"] == 3_631_000.0
+    assert conventions["speed_of_light_angstrom_per_s"] == 2.99792458e18
+    assert conventions["solar_luminosity_conversion"].startswith("none")
+
+
+def test_cigale_ab_zero_point_spectral_conversion_regression():
+    # One maggie is 3631 Jy. At 5500 Angstrom its f_lambda is fixed by the
+    # exact speed of light, independently of any CIGALE model.
+    converted = _fnu_mjy_to_flambda_cgs_per_a(
+        np.asarray([5500.0, 5501.0]),
+        np.asarray([3.631e6, 3.631e6]),
+    )
+    assert converted[0] == pytest.approx(3.5985005454479338e-9, rel=1e-14)
 
 
 def test_cigale_backend_pickling_discards_live_warehouse(monkeypatch):
@@ -261,6 +286,24 @@ def test_cigale_unknown_parameter_raises_clear_error(monkeypatch):
     backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
     with pytest.raises(KeyError, match="Unexpected parameter"):
         backend.predict_photometry({"redshift": 0.1, "dust2": 0.3}, FilterSet(["g"]))
+
+
+def test_cigale_warehouse_configuration_error_is_not_swallowed(monkeypatch):
+    install_fake_pcigale(monkeypatch)
+
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(modules=["sfhdelayed", "redshifting"])
+
+    class RejectingWarehouse:
+        def get_sed(self, module_list, parameter_list):
+            del module_list, parameter_list
+            raise ValueError("unsupported upstream CIGALE parameter value")
+
+    backend._warehouse = RejectingWarehouse()
+    with pytest.raises(ValueError, match="unsupported upstream CIGALE parameter value"):
+        backend.predict_photometry({"redshift": 0.1}, FilterSet(["g"]))
 
 
 def test_cigale_sfh_normalise_false_raises_clear_error(monkeypatch):
