@@ -2,6 +2,15 @@
 
 Composable Bayesian SED fitting and photo-z inference.
 
+The documentation source starts at [`docs/index.md`](docs/index.md). It contains
+the workflow-oriented user guide, scientific conventions, capability matrix,
+and generated API reference. A local HTML build is:
+
+```bash
+python -m pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
 ## Installation
 
 The core CompoSED package is lightweight, but the FSPS and CIGALE scientific
@@ -246,6 +255,11 @@ shape, finite positive maggies, relative flux agreement, and AB magnitude
 agreement. CI or lightweight development environments may skip these tests when
 FSPS, sedpy, or `SPS_HOME` are unavailable.
 
+FSPS spectra are converted with the fixed constants
+`L_sun = 3.828e33 erg/s`, `1 pc = 3.085677581491367e18 cm`, and the AB
+zero point `3631 Jy`. CompoSED does not adjust these constants to match another
+backend; they are recorded in FSPS model and Problem provenance.
+
 ## Simulation-Based Inference / Neural Posterior Estimators
 
 The stable `0.1` SBI methods are a conditional Masked Autoregressive Flow
@@ -256,17 +270,25 @@ are valid and heteroscedastic catalog depths are conditioned on explicitly.
 
 ```python
 from composed import (
-    Gaussian, MAF, PhotometricContext, Problem, SEDDataset, Simulate, fit,
+    ConditionalCatalogNoise, Gaussian, MAF, PhotometricContext,
+    Problem, SEDDataset, Simulate, fit,
 )
 
-def noise_fn(flux):
-    return 1.0e-12 + 0.08 * abs(flux)
+# Fit this once from complete rows in the survey catalog. Magnitudes are AB;
+# catalog_sigma contains the raw catalog uncertainty in maggies.
+survey_noise = ConditionalCatalogNoise.fit(
+    catalog_magnitudes,
+    catalog_sigma,
+    band_names=filters.names,
+    flux_unit="maggies",
+    seed=6,
+)
 
 problem = Problem(
     backend=backend,
     parameters=parameter_space,
     data=data,
-    likelihood=Gaussian(),
+    likelihood=Gaussian(photometric_model_discrepancy=0.05),
     filters=filters,
 )
 
@@ -283,7 +305,7 @@ result = fit(
     ),
     training=Simulate(
         n=100_000,
-        noise_fn=noise_fn,
+        noise_model=survey_noise,
         infer=["zred", "log10_mass"],
         context=PhotometricContext("snr_logsigma"),
     ),
@@ -295,6 +317,24 @@ posterior = result.inference_state
 posterior.save("runs/photoz_maf")
 ```
 
+The three uncertainties in this workflow are deliberately separate:
+
+- `sigma_catalog` is the raw survey uncertainty. It is stored in
+  `SEDDataset.sigma`, sampled by `ConditionalCatalogNoise`, and supplied to the
+  neural context.
+- `eta=photometric_model_discrepancy` is a dimensionless model-error
+  amplitude. It is part of the likelihood, not part of the catalog.
+- `sigma_draw**2 = sigma_catalog**2 + sigma_floor**2
+  + (eta * f_model)**2` is used to draw and score flux.
+
+The model term is evaluated from each proposed `f_model`, so its
+theta-dependent Gaussian normalization is retained. Observed inference always
+uses the catalog's raw sigma; CompoSED never substitutes `eta * f_obs`.
+`ConditionalCatalogNoise` models the joint multiband distribution
+`q(log10 sigma_catalog | noiseless AB magnitudes)`, records its exact band
+order and training support, and warns or fails on extrapolation without
+clamping.
+
 Simulation fails on the first invalid prior draw by default. This prevents a
 backend failure from silently changing the training distribution. If replacing
 failed simulations is scientifically intended, request it explicitly:
@@ -302,7 +342,7 @@ failed simulations is scientifically intended, request it explicitly:
 ```python
 training = Simulate(
     n=100_000,
-    noise_fn=noise_fn,
+    noise_model=survey_noise,
     infer=["zred", "log10_mass"],
     failure_policy="resample",
     max_retries=100,
@@ -332,7 +372,7 @@ result = fit(
     ),
     training=Simulate(
         n=100_000,
-        noise_fn=noise_fn,
+        noise_model=survey_noise,
         infer=["zred", "log10_mass"],
         context=PhotometricContext("snr_logsigma"),
     ),

@@ -15,6 +15,14 @@ class ParameterSpace:
     ``names`` is the canonical parameter order used for theta vectors. The
     mapping in ``priors`` is keyed by those names. The class is intentionally
     deterministic: ``to_dict`` and ``from_dict`` always follow ``names``.
+
+    Parameters
+    ----------
+    names
+        Unique parameter names in the exact numerical vector order.
+    priors
+        One scalar :class:`~composed.priors.Prior` per name. Missing and extra
+        keys are rejected.
     """
 
     names: Sequence[str]

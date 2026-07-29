@@ -10,6 +10,8 @@ checks. Passing unit tests does not establish posterior calibration.
 - [ ] Stable MAF and sampler adapter jobs pass in CI.
 - [x] GitHub Actions defines core, sampler, SBI, notebook-hygiene, and isolated
   wheel-install release gates.
+- [x] The core-only Sphinx user guide and API reference build with
+  `-W --keep-going` and have a dedicated GitHub Actions job.
 - [x] Wheel and source distributions pass `twine check`.
 - [x] Wheel and source distributions installed in clean environments pass
   `pip check` and import `composed` and `inftools` outside the source tree.

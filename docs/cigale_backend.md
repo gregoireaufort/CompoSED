@@ -19,10 +19,20 @@ CIGALE `SED` objects use:
 - `SED.fnu` and `SED.compute_fnu(filter_name)` in mJy.
 
 `CIGALEBackend` returns maggies, matching the rest of `composed`.
+The conversion uses the AB definition `1 maggie = 3631 Jy = 3.631e6 mJy`.
+The spectral mJy-to-`f_lambda` conversion uses
+`c = 2.99792458e18 Angstrom/s`. These exact values are recorded in backend
+metadata and regression-tested. No solar-luminosity constant is introduced:
+native CIGALE W/nm and mJy are preserved through these conversions.
 
 Observed-frame photometry should include CIGALE's `redshifting` module. CIGALE's
 current `redshifting` module also applies its built-in IGM attenuation while
-redshifting the spectrum.
+redshifting the spectrum. In the pinned CIGALE v2022.0 engine this module uses
+the WMAP7 cosmology. CompoSED therefore defaults its named-SFH age conversion
+to Astropy `WMAP7`, and the native WMAP7 convention is written into Problem
+and model provenance. Passing a custom `cosmology=` can alter CompoSED's
+named-SFH age conversion, but it cannot alter the upstream CIGALE
+`redshifting` cosmology; that restricted scope is also recorded.
 
 Two photometry modes are supported:
 
@@ -119,6 +129,14 @@ Supported variable specs:
 
 Fixed scalars are passed directly to CIGALE and are not part of the theta
 vector.
+
+Unsupported module parameters, missing required values, and upstream CIGALE
+configuration errors are intentionally not translated into generic numerical
+failures. They retain the original actionable exception and stop simulation.
+Likewise, `Simulate.failure_policy="raise"` is the default: CompoSED does not
+silently resample an invalid CIGALE prior draw. A user may explicitly request
+`failure_policy="resample"`, in which case the simulator-success conditioning
+and rejected draws are recorded in training metadata.
 
 Use:
 

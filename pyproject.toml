@@ -78,6 +78,12 @@ diagnostics-extra = [
   "matplotlib",
   "tarp",
 ]
+docs = [
+  "sphinx>=7",
+  "myst-parser>=2",
+  "furo>=2024.8.6",
+  "sphinx-copybutton>=0.5",
+]
 all = [
   "fsps==0.4.7",
   "astro-sedpy==0.4.1",
@@ -92,6 +98,10 @@ all = [
   "tqdm",
   "matplotlib",
   "pytest",
+  "sphinx>=7",
+  "myst-parser>=2",
+  "furo>=2024.8.6",
+  "sphinx-copybutton>=0.5",
 ]
 
 [tool.setuptools.packages.find]

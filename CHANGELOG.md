@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Added a Sphinx/MyST/Furo documentation site with a workflow-oriented user
+  guide, scientific-convention sheet, capability matrix, curated API
+  reference, offline strict build, Read the Docs configuration, and
+  documentation CI.
+- The CIGALE tutorials now expose finite BC03 metallicity choices explicitly:
+  MixedTAMIS samples the categorical block, while the MAF simulation
+  marginalizes it when metallicity is not a neural target.
+- Stable inference tutorials retain their latest executed plots for readable
+  GitHub examples; users must still re-execute them with local provenance
+  before interpreting numerical results.
+- Photometric model discrepancy is now an explicit likelihood parameter:
+  `sigma_eff^2 = sigma_catalog^2 + sigma_floor^2 + (eta * f_model)^2`.
+  Detections, censored upper limits, catalog grids, and SBI simulations use the
+  same theta-dependent variance and normalization.
+- SBI contexts retain raw catalog uncertainty rather than a discrepancy term
+  estimated from observed flux.
+- Added `ConditionalCatalogNoise`, a serializable joint conditional MAF for
+  `q(log10 sigma_catalog | noiseless AB magnitudes)` with fixed band order,
+  support checks, and training provenance.
+- `EmpiricalPhotometricNoise` is deprecated; release tutorials now share the
+  learned COSMOS survey-noise model and explicit likelihood discrepancy.
+- CIGALE v2022.0 provenance now records its native WMAP7 redshifting
+  cosmology and exact mJy/maggie and spectral conversion constants.
+
 ## 0.1.1
 
 Scientific-safety patch release.

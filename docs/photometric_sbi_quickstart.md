@@ -15,6 +15,7 @@ mask, flux units, mass normalization, and context encoding.
 
 ```python
 from composed import (
+    ConditionalCatalogNoise,
     Gaussian,
     MAF,
     ParameterSpace,
@@ -47,14 +48,19 @@ problem = Problem(
     backend=backend,
     parameters=parameters,
     data=data,
-    likelihood=Gaussian(),
+    likelihood=Gaussian(photometric_model_discrepancy=0.05),
     filters=filters,
 )
 
-def noise_fn(noiseless_flux):
-    sigma_floor = 1.0e-12
-    fractional_error = 0.08
-    return sigma_floor + fractional_error * abs(noiseless_flux)
+survey_noise = ConditionalCatalogNoise.fit(
+    catalog_ab_magnitudes,
+    catalog_sigma_maggies,
+    band_names=filters.names,
+    flux_unit="maggies",
+    seed=6,
+    catalog_source="survey catalog used for this analysis",
+    row_selection="complete rows in the selected bands",
+)
 
 result = fit(
     problem,
@@ -71,7 +77,7 @@ result = fit(
     ),
     training=Simulate(
         n=100_000,
-        noise_fn=noise_fn,
+        noise_model=survey_noise,
         infer=["zred", "log10_mass"],
         context=PhotometricContext("snr_logsigma"),
         n_workers=8,
@@ -115,7 +121,7 @@ result = fit(
     ),
     training=Simulate(
         n=100_000,
-        noise_fn=noise_fn,
+        noise_model=survey_noise,
         infer=["zred", "log10_mass"],
         context=PhotometricContext("snr_logsigma"),
     ),
@@ -146,10 +152,35 @@ also accepts negative noisy fluxes, unlike AB magnitudes or logarithmic flux.
 The default `reference_flux=1` is expressed in the declared dataset flux unit
 and is recorded in the checkpoint schema.
 
-The simulator stores the exact sigma returned by `noise_fn` for every training
-realization. At inference, passing an `SEDDataset` makes the trained posterior
-use `data.active_flux`, `data.active_sigma`, `data.active_band_names`, and
-`data.flux_unit` after checking them against the training schema.
+`ConditionalCatalogNoise` fits the genuinely joint conditional distribution
+
+```text
+q(log10 sigma_catalog[g, r, ...] | AB magnitude[g, r, ...])
+```
+
+using complete multiband rows in one fixed band order. Non-finite magnitudes
+and non-positive uncertainties are either rejected or filtered as complete
+rows, with the rejected count stored in provenance. The checkpoint also stores
+the input-array hash, units, magnitude convention, standardization, random
+seed, architecture, package versions, row selection, and training magnitude
+support. Magnitudes outside that support are warned about or rejected; they
+are never clamped.
+
+The simulator stores raw `sigma_catalog` for every training realization. It
+draws flux using
+
+```text
+sigma_draw^2 = sigma_catalog^2 + sigma_floor^2
+               + (photometric_model_discrepancy * f_model)^2
+```
+
+The optional absolute `photometric_sigma_floor` and fractional model
+discrepancy are declared on `Gaussian`; neither is added to the neural sigma
+context. At observed inference, passing an `SEDDataset` makes the trained
+posterior use `data.active_flux`, raw `data.active_sigma`,
+`data.active_band_names`, and `data.flux_unit` after checking them against the
+training schema. In particular, CompoSED does not estimate model discrepancy
+from the observed flux.
 
 ## Reuse On A Catalog
 
