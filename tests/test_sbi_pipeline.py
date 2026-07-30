@@ -9,9 +9,10 @@ from composed.backends.base import ModelPhotometry
 from composed.data import SEDDataset, SpectrumDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
-from composed.priors import UniformPrior
+from composed.priors import ChoicePrior, UniformPrior
 from composed.problem import Gaussian, Problem, fit
 from composed.sbi import (
+    DiscreteTargetSpecification,
     Diffusion,
     MAF,
     MDN,
@@ -30,6 +31,7 @@ from composed.sbi import (
     transform_photometry,
 )
 from composed.units import MassNormalization
+from inftools.sbi import HybridMAFPosteriorEstimator
 
 
 class LinearColorBackend:
@@ -548,6 +550,127 @@ def test_prior_support_transform_roundtrip_support_and_jacobian():
     assert extreme[0, 3] == -3.0
 
 
+def test_prior_support_transform_encodes_and_decodes_choice_prior_atoms():
+    space = ParameterSpace(
+        ["metallicity"],
+        {"metallicity": ChoicePrior([0.008, 0.02])},
+    )
+    transform = PriorSupportTransform.from_parameter_space(space, space.names)
+    theta = np.asarray([[0.008], [0.02]])
+
+    encoded = transform.transform(theta)
+    assert np.array_equal(encoded[:, 0], [0.0, 1.0])
+    assert np.array_equal(transform.inverse(encoded), theta)
+    assert np.array_equal(
+        transform.inverse(np.asarray([[-0.3], [0.25], [0.75], [1.4]]))[:, 0],
+        [0.008, 0.008, 0.02, 0.02],
+    )
+
+    restored = PriorSupportTransform.from_specification(transform.specification())
+    assert restored.specification() == transform.specification()
+    with pytest.raises(ValueError, match="outside its ChoicePrior support"):
+        transform.transform(np.asarray([[0.015]]))
+
+
+def test_joint_discrete_state_order_and_roundtrip_are_deterministic():
+    transform = PriorSupportTransform(
+        names=("z", "metallicity", "library"),
+        kinds=("uniform", "choice", "choice"),
+        lower=(0.0, np.nan, np.nan),
+        upper=(2.0, np.nan, np.nan),
+        choices=(None, (0.008, 0.02), (10.0, 20.0, 30.0)),
+    )
+    specification = DiscreteTargetSpecification.from_transform(transform)
+
+    assert specification.target_indices == (1, 2)
+    assert np.array_equal(
+        specification.state_values,
+        [
+            [0.008, 10.0],
+            [0.008, 20.0],
+            [0.008, 30.0],
+            [0.02, 10.0],
+            [0.02, 20.0],
+            [0.02, 30.0],
+        ],
+    )
+    theta = np.asarray(
+        [
+            [0.5, 0.008, 30.0],
+            [1.5, 0.02, 10.0],
+            [1.0, 0.02, 30.0],
+        ]
+    )
+    categories = specification.encode(theta)
+    assert np.array_equal(categories, [2, 3, 5])
+    assert np.array_equal(specification.decode(categories), theta[:, 1:])
+
+
+def test_trained_hybrid_maf_preserves_exact_choice_support_and_probability_mass():
+    class FakeHybridEstimator(HybridMAFPosteriorEstimator):
+        theta_dim = 0
+        x_dim = 1
+        n_categories = 2
+
+        def __init__(self):
+            pass
+
+        def sample(self, context, num_samples):
+            n_object = np.asarray(context).reshape(-1, 1).shape[0]
+            categories = np.resize(
+                np.asarray([0, 0, 1, 1], dtype=np.int64),
+                (n_object, int(num_samples)),
+            )
+            return np.empty((n_object, int(num_samples), 0)), categories
+
+        def category_probabilities(self, context):
+            n_object = np.asarray(context).reshape(-1, 1).shape[0]
+            return np.repeat([[0.75, 0.25]], n_object, axis=0)
+
+        def log_prob(self, theta_continuous, category, context):
+            del theta_continuous, context
+            probabilities = np.asarray([0.75, 0.25])
+            return np.log(probabilities[np.asarray(category, dtype=int)])
+
+    space = ParameterSpace(
+        ["metallicity"],
+        {"metallicity": ChoicePrior([0.008, 0.02])},
+    )
+    training = SBITrainingSet.from_arrays(
+        theta=np.asarray([[0.008], [0.02]]),
+        x=np.asarray([[0.0], [1.0]]),
+        theta_names=["metallicity"],
+        x_names=["flux"],
+        source="choice_target_test",
+        parameter_space=space,
+    )
+    trained = TrainedMAFSBI(
+        FakeHybridEstimator(),
+        training,
+        history={"train_loss": [0.0]},
+    )
+
+    samples = trained.sample(np.asarray([[0.5]]), num_samples=4)
+    assert np.array_equal(samples[0, :, 0], [0.008, 0.008, 0.02, 0.02])
+    probabilities = trained.discrete_probabilities(np.asarray([[0.5]]))
+    assert np.array_equal(probabilities["joint_state_values"][:, 0], [0.008, 0.02])
+    assert np.allclose(probabilities["joint_probability"], [[0.75, 0.25]])
+    assert np.allclose(
+        trained.log_prob(
+            np.asarray([[0.008], [0.02]]),
+            np.asarray([[0.5]]),
+        ),
+        np.log([0.75, 0.25]),
+    )
+    summary = trained.summarize_catalog(
+        np.asarray([[0.5]]),
+        num_samples=4,
+        batch_size=1,
+    )
+    assert summary.median.dtype == np.float64
+    assert summary.median[0, 0] in {0.008, 0.02}
+
+
 def test_maf_catalog_sampling_chunks_context_rows_without_object_loops():
     class FakeEstimator:
         theta_dim = 1
@@ -1015,6 +1138,84 @@ def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
     assert result.inference_state.training_set.context.mode == "snr_logsigma"
     assert np.all((result.samples[:, 0] >= 0.0) & (result.samples[:, 0] <= 1.0))
     assert np.all((result.samples[:, 1] >= 9.0) & (result.samples[:, 1] <= 11.0))
+
+
+@pytest.mark.sbi
+def test_problem_fit_maf_uses_exact_choice_posterior_and_roundtrips_checkpoint(tmp_path):
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch/nflows are not installed.")
+
+    parameters = ParameterSpace(
+        names=("z", "log10_mass", "metallicity"),
+        priors={
+            "z": UniformPrior(0.0, 1.0),
+            "log10_mass": UniformPrior(9.0, 11.0),
+            "metallicity": ChoicePrior([0.008, 0.02]),
+        },
+    )
+    data = SEDDataset(
+        toy_filters().names,
+        [1.1, 0.85, 0.62],
+        [0.05, 0.05, 0.05],
+    )
+    problem = Problem(
+        LinearColorBackend(),
+        parameters,
+        data,
+        Gaussian(),
+        filters=toy_filters(),
+    )
+    result = fit(
+        problem,
+        method=MAF(
+            hidden_features=16,
+            num_transforms=2,
+            num_blocks=1,
+            epochs=2,
+            batch_size=32,
+            num_samples=12,
+            device="cpu",
+        ),
+        training=Simulate(
+            n=96,
+            noise_fn=small_noise,
+            infer=parameters.names,
+        ),
+        seed=36,
+    )
+
+    assert result.parameter_names == parameters.names
+    assert result.samples.shape == (12, 3)
+    assert set(np.unique(result.samples[:, 2])).issubset({0.008, 0.02})
+    posterior = result.inference_state
+    assert isinstance(posterior.estimator, HybridMAFPosteriorEstimator)
+    probabilities = posterior.discrete_probabilities(data)
+    assert probabilities["names"] == ("metallicity",)
+    assert np.array_equal(
+        probabilities["joint_state_values"][:, 0],
+        [0.008, 0.02],
+    )
+    assert np.allclose(np.sum(probabilities["joint_probability"], axis=1), 1.0)
+    assert np.all(
+        np.isfinite(
+            posterior.log_prob(
+                result.samples,
+                data,
+            )
+        )
+    )
+
+    checkpoint = tmp_path / "hybrid_maf"
+    posterior.save(checkpoint)
+    restored = TrainedMAFSBI.load(checkpoint, device="cpu")
+    restored_probabilities = restored.discrete_probabilities(data)
+    assert np.allclose(
+        restored_probabilities["joint_probability"],
+        probabilities["joint_probability"],
+    )
+    restored_samples = restored.sample(data, num_samples=12, seed=37)
+    assert restored_samples.shape == (1, 12, 3)
+    assert set(np.unique(restored_samples[:, :, 2])).issubset({0.008, 0.02})
 
 
 @pytest.mark.sbi

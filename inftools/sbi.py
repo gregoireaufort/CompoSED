@@ -413,6 +413,600 @@ class MAFPosteriorEstimator:
             raise RuntimeError("Estimator must be fit before calling sample or log_prob.")
 
 
+def build_categorical_classifier(
+    x_dim: int,
+    n_categories: int,
+    hidden_features: int = 128,
+    num_blocks: int = 2,
+):
+    """Build logits for the joint discrete state ``q(c | x)``."""
+
+    torch = _require_torch_dependency()
+    x_dim = int(x_dim)
+    n_categories = int(n_categories)
+    hidden_features = int(hidden_features)
+    num_blocks = int(num_blocks)
+    if x_dim <= 0 or n_categories < 2:
+        raise ValueError("Categorical SBI requires x_dim > 0 and at least two categories.")
+    if hidden_features <= 0 or num_blocks < 0:
+        raise ValueError("hidden_features must be positive and num_blocks non-negative.")
+
+    layers = []
+    n_input = x_dim
+    for _ in range(num_blocks):
+        layers.extend(
+            [
+                torch.nn.Linear(n_input, hidden_features),
+                torch.nn.ReLU(),
+            ]
+        )
+        n_input = hidden_features
+    layers.append(torch.nn.Linear(n_input, n_categories))
+    return torch.nn.Sequential(*layers)
+
+
+class HybridMAFPosteriorEstimator:
+    """Categorical posterior mass plus a conditional MAF for continuous axes.
+
+    The estimator represents
+
+    ``q(category, theta_continuous | x)
+      = q(category | x) q(theta_continuous | x, category)``.
+
+    Category labels are integer indices with no numerical geometry. The
+    continuous MAF receives a one-hot category appended to the standardized
+    observation context.
+    """
+
+    def __init__(
+        self,
+        continuous_dim: int,
+        x_dim: int,
+        n_categories: int,
+        hidden_features: int = 128,
+        num_transforms: int = 5,
+        num_blocks: int = 2,
+        classifier_hidden_features: int | None = None,
+        classifier_num_blocks: int = 2,
+        learning_rate: float = 1e-3,
+        device: str | None = "auto",
+        validate_device: bool = True,
+        allow_device_fallback: bool = True,
+        standardize: bool = True,
+        max_grad_norm: float | None = None,
+        restore_best: bool = True,
+        initialization_seed: int | None = None,
+    ) -> None:
+        torch, _ = _require_sbi_dependencies()
+        self.torch = torch
+        self.continuous_dim = int(continuous_dim)
+        self.theta_dim = self.continuous_dim
+        self.x_dim = int(x_dim)
+        self.n_categories = int(n_categories)
+        self.hidden_features = int(hidden_features)
+        self.num_transforms = int(num_transforms)
+        self.num_blocks = int(num_blocks)
+        self.classifier_hidden_features = int(
+            self.hidden_features
+            if classifier_hidden_features is None
+            else classifier_hidden_features
+        )
+        self.classifier_num_blocks = int(classifier_num_blocks)
+        self.learning_rate = float(learning_rate)
+        self.standardize = bool(standardize)
+        self.max_grad_norm = None if max_grad_norm is None else float(max_grad_norm)
+        self.restore_best = bool(restore_best)
+        self.initialization_seed = None if initialization_seed is None else int(initialization_seed)
+        if self.continuous_dim < 0:
+            raise ValueError("continuous_dim must be non-negative.")
+        if self.n_categories < 2:
+            raise ValueError("Hybrid MAF requires at least two categorical states.")
+        self.device = resolve_torch_device(
+            torch,
+            device=device,
+            validate=bool(validate_device),
+            allow_fallback=bool(allow_device_fallback),
+        )
+
+        _seed_torch(torch, self.initialization_seed)
+        classifier = build_categorical_classifier(
+            self.x_dim,
+            self.n_categories,
+            hidden_features=self.classifier_hidden_features,
+            num_blocks=self.classifier_num_blocks,
+        )
+        self.classifier = classifier.to(dtype=torch.float32).to(device=self.device)
+        if self.continuous_dim:
+            flow = build_maf(
+                theta_dim=self.continuous_dim,
+                x_dim=self.x_dim + self.n_categories,
+                hidden_features=self.hidden_features,
+                num_transforms=self.num_transforms,
+                num_blocks=self.num_blocks,
+            )
+            self.flow = _prepare_flow_for_device(flow, torch, self.device)
+        else:
+            self.flow = None
+        self.theta_standardizer: Standardizer | None = None
+        self.x_standardizer: Standardizer | None = None
+        self.history: dict[str, list[float]] = {"train_loss": []}
+
+    def fit(
+        self,
+        theta_continuous: np.ndarray,
+        category: np.ndarray,
+        x_train: np.ndarray,
+        epochs: int = 100,
+        batch_size: int = 256,
+        validation_split: float = 0.0,
+        patience: int | None = None,
+        min_delta: float = 0.0,
+        seed: int | None = None,
+        verbose: bool = False,
+    ) -> dict[str, list[float]]:
+        """Fit categorical probabilities and the category-conditioned flow."""
+
+        torch = self.torch
+        theta = np.asarray(theta_continuous, dtype=float)
+        if self.continuous_dim == 0:
+            if theta.ndim != 2 or theta.shape[1] != 0:
+                raise ValueError("theta_continuous must have shape (n, 0).")
+        else:
+            theta = _as_2d(theta, self.continuous_dim, "theta_continuous")
+        x = _as_2d(x_train, self.x_dim, "x_train")
+        labels = np.asarray(category)
+        if labels.ndim != 1 or labels.shape[0] != x.shape[0] or theta.shape[0] != x.shape[0]:
+            raise ValueError("theta_continuous, category, and x_train must contain the same rows.")
+        if not np.all(np.isfinite(labels)) or not np.all(labels == np.rint(labels)):
+            raise ValueError("category must contain finite integer indices.")
+        labels = labels.astype(np.int64)
+        if np.any((labels < 0) | (labels >= self.n_categories)):
+            raise ValueError("category contains an index outside the declared support.")
+        observed_categories = np.unique(labels)
+        if observed_categories.size != self.n_categories:
+            missing = sorted(set(range(self.n_categories)) - set(observed_categories.tolist()))
+            raise ValueError(
+                "Every declared categorical state needs training rows; missing state indices "
+                f"{missing}."
+            )
+
+        epochs = int(epochs)
+        batch_size = int(batch_size)
+        validation_split = float(validation_split)
+        patience = None if patience is None else int(patience)
+        min_delta = float(min_delta)
+        if epochs <= 0 or batch_size <= 0:
+            raise ValueError("epochs and batch_size must be positive.")
+        if not 0.0 <= validation_split < 1.0:
+            raise ValueError("validation_split must lie in [0, 1).")
+        if patience is not None and patience <= 0:
+            raise ValueError("patience must be positive or None.")
+        if not np.isfinite(min_delta) or min_delta < 0.0:
+            raise ValueError("min_delta must be finite and non-negative.")
+
+        rng = np.random.default_rng(seed)
+        training_parts = []
+        validation_parts = []
+        for state in range(self.n_categories):
+            state_indices = np.flatnonzero(labels == state)
+            state_indices = state_indices[rng.permutation(state_indices.size)]
+            n_validation = int(round(validation_split * state_indices.size))
+            if validation_split > 0.0 and state_indices.size > 1:
+                n_validation = min(max(n_validation, 1), state_indices.size - 1)
+            else:
+                n_validation = 0
+            validation_parts.append(state_indices[:n_validation])
+            training_parts.append(state_indices[n_validation:])
+        training_indices = np.concatenate(training_parts)
+        validation_indices = np.concatenate(validation_parts)
+        training_indices = training_indices[rng.permutation(training_indices.size)]
+        if validation_indices.size:
+            validation_indices = validation_indices[rng.permutation(validation_indices.size)]
+
+        if self.standardize:
+            self.x_standardizer = Standardizer.fit(x[training_indices])
+            self.theta_standardizer = (
+                Standardizer.fit(theta[training_indices])
+                if self.continuous_dim
+                else Standardizer(np.empty(0), np.empty(0))
+            )
+            x_fit = self.x_standardizer.transform(x)
+            theta_fit = (
+                self.theta_standardizer.transform(theta)
+                if self.continuous_dim
+                else theta
+            )
+        else:
+            self.x_standardizer = Standardizer(np.zeros(self.x_dim), np.ones(self.x_dim))
+            self.theta_standardizer = Standardizer(
+                np.zeros(self.continuous_dim),
+                np.ones(self.continuous_dim),
+            )
+            x_fit = x
+            theta_fit = theta
+
+        _seed_torch(torch, seed)
+        x_t = torch.as_tensor(x_fit, dtype=torch.float32, device=self.device)
+        theta_t = torch.as_tensor(theta_fit, dtype=torch.float32, device=self.device)
+        category_t = torch.as_tensor(labels, dtype=torch.long, device=self.device)
+        training_index_t = torch.as_tensor(training_indices, dtype=torch.long, device=self.device)
+        dataset = torch.utils.data.TensorDataset(
+            theta_t.index_select(0, training_index_t),
+            category_t.index_select(0, training_index_t),
+            x_t.index_select(0, training_index_t),
+        )
+        loader_generator = torch.Generator()
+        if seed is not None:
+            loader_generator.manual_seed(int(seed))
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            generator=loader_generator,
+        )
+        if validation_indices.size:
+            validation_index_t = torch.as_tensor(
+                validation_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            theta_validation = theta_t.index_select(0, validation_index_t)
+            category_validation = category_t.index_select(0, validation_index_t)
+            x_validation = x_t.index_select(0, validation_index_t)
+        else:
+            theta_validation = None
+            category_validation = None
+            x_validation = None
+
+        parameters = list(self.classifier.parameters())
+        if self.flow is not None:
+            parameters.extend(self.flow.parameters())
+        optimizer = torch.optim.Adam(parameters, lr=self.learning_rate)
+        self.history = {
+            "train_loss": [],
+            "train_categorical_loss": [],
+            "train_flow_loss": [],
+        }
+        if validation_indices.size:
+            self.history.update(
+                {
+                    "val_loss": [],
+                    "val_categorical_loss": [],
+                    "val_flow_loss": [],
+                }
+            )
+        best_loss = float("inf")
+        best_classifier_state = None
+        best_flow_state = None
+        best_epoch = None
+        epochs_without_improvement = 0
+        self.classifier.train()
+        if self.flow is not None:
+            self.flow.train()
+
+        for epoch in range(epochs):
+            total_losses = []
+            categorical_losses = []
+            flow_losses = []
+            saw_nonfinite_loss = False
+            for theta_batch, category_batch, x_batch in loader:
+                with _temporary_default_dtype(torch, torch.float32):
+                    logits = self.classifier(x_batch)
+                    categorical_loss = torch.nn.functional.cross_entropy(
+                        logits,
+                        category_batch,
+                    )
+                    if self.flow is None:
+                        flow_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+                    else:
+                        category_one_hot = torch.nn.functional.one_hot(
+                            category_batch,
+                            num_classes=self.n_categories,
+                        ).to(dtype=torch.float32)
+                        flow_context = torch.cat([x_batch, category_one_hot], dim=1)
+                        flow_loss = -self.flow.log_prob(
+                            inputs=theta_batch,
+                            context=flow_context,
+                        ).mean()
+                    loss = categorical_loss + flow_loss
+                if not bool(torch.isfinite(loss).detach().cpu().item()):
+                    saw_nonfinite_loss = True
+                    break
+                optimizer.zero_grad()
+                loss.backward()
+                gradients_are_finite = all(
+                    parameter.grad is None
+                    or bool(torch.all(torch.isfinite(parameter.grad)).detach().cpu().item())
+                    for parameter in parameters
+                )
+                if not gradients_are_finite:
+                    saw_nonfinite_loss = True
+                    break
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm)
+                optimizer.step()
+                total_losses.append(float(loss.detach().cpu().item()))
+                categorical_losses.append(float(categorical_loss.detach().cpu().item()))
+                flow_losses.append(float(flow_loss.detach().cpu().item()))
+
+            train_total = float(np.mean(total_losses)) if total_losses else np.nan
+            train_categorical = (
+                float(np.mean(categorical_losses)) if categorical_losses else np.nan
+            )
+            train_flow = float(np.mean(flow_losses)) if flow_losses else np.nan
+            self.history["train_loss"].append(train_total)
+            self.history["train_categorical_loss"].append(train_categorical)
+            self.history["train_flow_loss"].append(train_flow)
+
+            if validation_indices.size:
+                self.classifier.eval()
+                if self.flow is not None:
+                    self.flow.eval()
+                with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
+                    validation_logits = self.classifier(x_validation)
+                    validation_categorical_loss = torch.nn.functional.cross_entropy(
+                        validation_logits,
+                        category_validation,
+                    )
+                    if self.flow is None:
+                        validation_flow_loss = torch.zeros(
+                            (),
+                            dtype=torch.float32,
+                            device=self.device,
+                        )
+                    else:
+                        validation_one_hot = torch.nn.functional.one_hot(
+                            category_validation,
+                            num_classes=self.n_categories,
+                        ).to(dtype=torch.float32)
+                        validation_context = torch.cat(
+                            [x_validation, validation_one_hot],
+                            dim=1,
+                        )
+                        validation_flow_loss = -self.flow.log_prob(
+                            inputs=theta_validation,
+                            context=validation_context,
+                        ).mean()
+                    validation_loss = (
+                        validation_categorical_loss + validation_flow_loss
+                    )
+                validation_total = float(validation_loss.detach().cpu().item())
+                self.history["val_loss"].append(validation_total)
+                self.history["val_categorical_loss"].append(
+                    float(validation_categorical_loss.detach().cpu().item())
+                )
+                self.history["val_flow_loss"].append(
+                    float(validation_flow_loss.detach().cpu().item())
+                )
+                selection_loss = validation_total
+                self.classifier.train()
+                if self.flow is not None:
+                    self.flow.train()
+            else:
+                selection_loss = train_total
+
+            if np.isfinite(selection_loss) and selection_loss < best_loss - min_delta:
+                best_loss = selection_loss
+                best_classifier_state = {
+                    key: value.detach().clone()
+                    for key, value in self.classifier.state_dict().items()
+                }
+                best_flow_state = (
+                    None
+                    if self.flow is None
+                    else {
+                        key: value.detach().clone()
+                        for key, value in self.flow.state_dict().items()
+                    }
+                )
+                best_epoch = epoch + 1
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            if verbose:
+                message = (
+                    f"epoch {epoch + 1}/{epochs}: train_loss={train_total:.6g}, "
+                    f"categorical={train_categorical:.6g}, flow={train_flow:.6g}"
+                )
+                if validation_indices.size:
+                    message += f", val_loss={selection_loss:.6g}"
+                print(message)
+            if saw_nonfinite_loss:
+                self.history["stopped_early_nonfinite_loss"] = [float(epoch + 1)]
+                break
+            if patience is not None and epochs_without_improvement >= patience:
+                self.history["stopped_early_patience"] = [float(epoch + 1)]
+                break
+
+        if best_classifier_state is None:
+            raise FloatingPointError("Hybrid MAF training produced no finite epoch loss.")
+        if self.restore_best:
+            self.classifier.load_state_dict(best_classifier_state)
+            if self.flow is not None:
+                self.flow.load_state_dict(best_flow_state)
+            self.history["best_selection_loss"] = [best_loss]
+        self.history["best_epoch"] = [float(best_epoch)]
+        self.history["epochs_ran"] = [float(len(self.history["train_loss"]))]
+        self.classifier.eval()
+        if self.flow is not None:
+            self.flow.eval()
+        return self.history
+
+    def configuration(self) -> dict[str, Any]:
+        """JSON-friendly architecture and training-state configuration."""
+
+        return {
+            "continuous_dim": self.continuous_dim,
+            "x_dim": self.x_dim,
+            "n_categories": self.n_categories,
+            "hidden_features": self.hidden_features,
+            "num_transforms": self.num_transforms,
+            "num_blocks": self.num_blocks,
+            "classifier_hidden_features": self.classifier_hidden_features,
+            "classifier_num_blocks": self.classifier_num_blocks,
+            "learning_rate": self.learning_rate,
+            "standardize": self.standardize,
+            "max_grad_norm": self.max_grad_norm,
+            "restore_best": self.restore_best,
+            "initialization_seed": self.initialization_seed,
+        }
+
+    def category_probabilities(self, x_obs: np.ndarray) -> np.ndarray:
+        """Return normalized ``q(category | x)`` probabilities."""
+
+        self._check_fitted()
+        x = _as_context_batch(x_obs, self.x_dim)
+        x_std = self.x_standardizer.transform(x)
+        self.classifier.eval()
+        with self.torch.no_grad(), _temporary_default_dtype(
+            self.torch,
+            self.torch.float32,
+        ):
+            logits = self.classifier(
+                self.torch.as_tensor(
+                    x_std,
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+            )
+            probabilities = self.torch.softmax(logits, dim=1)
+        return probabilities.detach().cpu().numpy()
+
+    def sample(
+        self,
+        x_obs: np.ndarray,
+        num_samples: int = 10000,
+        *,
+        seed: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Draw continuous coordinates and exact categorical state indices."""
+
+        self._check_fitted()
+        num_samples = int(num_samples)
+        if num_samples <= 0:
+            raise ValueError("num_samples must be positive.")
+        torch = self.torch
+        _seed_torch(torch, seed)
+        x = _as_context_batch(x_obs, self.x_dim)
+        x_std = self.x_standardizer.transform(x)
+        x_t = torch.as_tensor(x_std, dtype=torch.float32, device=self.device)
+        self.classifier.eval()
+        if self.flow is not None:
+            self.flow.eval()
+        with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
+            probabilities = torch.softmax(self.classifier(x_t), dim=1)
+            categories = torch.multinomial(
+                probabilities,
+                num_samples=num_samples,
+                replacement=True,
+            )
+            if self.flow is None:
+                continuous = torch.empty(
+                    (x.shape[0], num_samples, 0),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            else:
+                flat_x = x_t.repeat_interleave(num_samples, dim=0)
+                flat_categories = categories.reshape(-1)
+                one_hot = torch.nn.functional.one_hot(
+                    flat_categories,
+                    num_classes=self.n_categories,
+                ).to(dtype=torch.float32)
+                flow_context = torch.cat([flat_x, one_hot], dim=1)
+                continuous = self.flow.sample(1, context=flow_context)
+                continuous = continuous.reshape(
+                    x.shape[0],
+                    num_samples,
+                    self.continuous_dim,
+                )
+        continuous_np = self.theta_standardizer.inverse_transform(
+            continuous.detach().cpu().numpy()
+        )
+        return continuous_np, categories.detach().cpu().numpy()
+
+    def log_prob(
+        self,
+        theta_continuous: np.ndarray,
+        category: np.ndarray | int,
+        x_obs: np.ndarray,
+    ) -> np.ndarray:
+        """Evaluate log categorical mass plus conditional continuous density."""
+
+        self._check_fitted()
+        theta = np.asarray(theta_continuous, dtype=float)
+        single = theta.ndim == 1
+        if self.continuous_dim == 0:
+            if theta.ndim == 1 and theta.size == 0:
+                theta = theta.reshape(1, 0)
+            if theta.ndim != 2 or theta.shape[1] != 0:
+                raise ValueError("theta_continuous must have shape (n, 0).")
+        else:
+            theta = _as_2d(theta, self.continuous_dim, "theta_continuous")
+        labels = np.asarray(category)
+        if labels.ndim == 0:
+            labels = labels.reshape(1)
+        if labels.ndim != 1 or labels.size not in {1, theta.shape[0]}:
+            raise ValueError("category must be scalar or have one entry per theta row.")
+        if labels.size == 1 and theta.shape[0] > 1:
+            labels = np.repeat(labels, theta.shape[0])
+        if not np.all(np.isfinite(labels)) or not np.all(labels == np.rint(labels)):
+            raise ValueError("category must contain finite integer indices.")
+        labels = labels.astype(np.int64)
+        if np.any((labels < 0) | (labels >= self.n_categories)):
+            raise ValueError("category contains an index outside the declared support.")
+
+        x = _as_context_batch(x_obs, self.x_dim)
+        if x.shape[0] == 1 and theta.shape[0] > 1:
+            x = np.repeat(x, theta.shape[0], axis=0)
+        if x.shape[0] != theta.shape[0]:
+            raise ValueError("x_obs must have one row or the same number of rows as theta.")
+        x_std = self.x_standardizer.transform(x)
+        theta_std = (
+            self.theta_standardizer.transform(theta)
+            if self.continuous_dim
+            else theta
+        )
+        torch = self.torch
+        x_t = torch.as_tensor(x_std, dtype=torch.float32, device=self.device)
+        category_t = torch.as_tensor(labels, dtype=torch.long, device=self.device)
+        self.classifier.eval()
+        if self.flow is not None:
+            self.flow.eval()
+        with torch.no_grad(), _temporary_default_dtype(torch, torch.float32):
+            log_category = torch.log_softmax(self.classifier(x_t), dim=1).gather(
+                1,
+                category_t[:, None],
+            )[:, 0]
+            if self.flow is None:
+                log_continuous = torch.zeros_like(log_category)
+            else:
+                one_hot = torch.nn.functional.one_hot(
+                    category_t,
+                    num_classes=self.n_categories,
+                ).to(dtype=torch.float32)
+                flow_context = torch.cat([x_t, one_hot], dim=1)
+                log_continuous = self.flow.log_prob(
+                    inputs=torch.as_tensor(
+                        theta_std,
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
+                    context=flow_context,
+                )
+        result = (
+            log_category.detach().cpu().numpy()
+            + log_continuous.detach().cpu().numpy()
+            - self.theta_standardizer.log_abs_det_inverse
+        )
+        return result[0] if single else result
+
+    def _check_fitted(self) -> None:
+        if self.theta_standardizer is None or self.x_standardizer is None:
+            raise RuntimeError("Estimator must be fit before calling sample or log_prob.")
+
+
 def build_mdn(
     theta_dim: int,
     x_dim: int,

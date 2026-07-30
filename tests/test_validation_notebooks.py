@@ -39,31 +39,66 @@ def test_stable_notebooks_have_unique_cell_ids_and_no_saved_errors():
         assert not errors, f"{path.name} contains a saved execution error"
 
 
-def test_tutorial_notebooks_ship_without_machine_specific_saved_outputs():
-    for path in sorted((ROOT / "notebooks" / "tutorials").glob("*.ipynb")):
-        payload = notebook_payload(path)
-        for cell in payload["cells"]:
-            assert not cell.get("outputs", []), f"{path.name} contains stale saved output"
-            if cell.get("cell_type") == "code":
-                assert cell.get("execution_count") is None
+def test_release_cigale_tutorials_ship_with_executed_results():
+    for name in (
+        "02_cigale_maf_cosmos2020_catalog.ipynb",
+        "03_cigale_tamis_single_galaxy.ipynb",
+    ):
+        payload = notebook_payload(ROOT / "notebooks" / "tutorials" / name)
+        code_cells = [
+            cell for cell in payload["cells"] if cell.get("cell_type") == "code"
+        ]
+        assert all(cell.get("execution_count") is not None for cell in code_cells)
+        outputs = [
+            output
+            for cell in code_cells
+            for output in cell.get("outputs", [])
+        ]
+        assert any(output.get("output_type") == "stream" for output in outputs)
+        assert any(
+            "image/png" in output.get("data", {})
+            for output in outputs
+            if output.get("output_type") in {"display_data", "execute_result"}
+        )
 
 
-def test_cigale_maf_and_tamis_tutorials_share_noise_and_problem_provenance():
-    maf_path = ROOT / "notebooks" / "tutorials" / "02_cigale_maf_cosmos2020_catalog.ipynb"
-    tamis_path = ROOT / "notebooks" / "tutorials" / "03_cigale_tamis_single_galaxy.ipynb"
-    maf_source = "\n".join(
-        "".join(cell.get("source", [])) for cell in notebook_payload(maf_path)["cells"]
-    )
-    tamis_source = "\n".join(
-        "".join(cell.get("source", [])) for cell in notebook_payload(tamis_path)["cells"]
-    )
+def test_fsps_and_cigale_tutorials_share_raw_sigma_and_model_discrepancy_convention():
+    paths = [
+        ROOT / "notebooks" / "tutorials" / name
+        for name in (
+            "01_fsps_maf_cosmos2020_catalog.ipynb",
+            "02_cigale_maf_cosmos2020_catalog.ipynb",
+            "03_cigale_tamis_single_galaxy.ipynb",
+            "04_fsps_pocomc_single_galaxy.ipynb",
+        )
+    ]
+    sources = [
+        "\n".join("".join(cell.get("source", [])) for cell in notebook_payload(path)["cells"])
+        for path in paths
+    ]
 
-    for source in (maf_source, tamis_source):
-        assert "FRACTIONAL_MODEL_ERROR = 0.05" in source
-        assert "sigma_effective" in source
-    assert "fractional_error=0.0" not in maf_source
-    assert "require_result_matches_problem" in maf_source
-    assert 'result_label=f"MAF ({N_TRAIN:,} simulations, 256 x 3)"' in maf_source
+    for source in sources:
+        assert "MODEL_DISCREPANCY = 0.05" in source
+        assert "Gaussian(photometric_model_discrepancy=MODEL_DISCREPANCY)" in source
+        assert "sigma_effective" not in source
+        assert "EmpiricalPhotometricNoise" not in source
+    for source in sources[:2]:
+        assert "ConditionalCatalogNoise" in source
+        assert "noise_model=survey_noise" in source
+        assert 'survey_noise.support_policy = "raise"' in source
+        assert 'failure_policy="resample"' in source
+        assert "sigma=sigma[TARGET_INDICES]" in source
+    assert "require_result_matches_problem" in sources[1]
+    assert 'result_label=f"MAF ({N_TRAIN:,} simulations, 256 x 3)"' in sources[1]
+    assert '"metallicity": {"values": [0.008, 0.02]}' in sources[1]
+    assert '"imf": {"values": [1], "dtype": "int"}' in sources[1]
+    assert 'infer=parameters.names' in sources[1]
+    assert '"redshift", "log10_mass", "metallicity"' in sources[1]
+    assert "posterior.discrete_probabilities(data)" in sources[1]
+    assert '"MAF exact P(BC03 metallicity | photometry):"' in sources[1]
+    assert '"metallicity": {"values": [0.008, 0.02]}' in sources[2]
+    assert '"imf": {"values": [1], "dtype": "int"}' in sources[2]
+    assert 'result.parameter_names.index("metallicity")' in sources[2]
 
 
 def test_validation_notebook_npz_outputs_use_provenance_helper():

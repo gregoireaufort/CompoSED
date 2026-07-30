@@ -97,6 +97,15 @@ The fitted `UniformPrior` and `LogUniformPrior` bounds are encoded through
 invertible transforms, so the MAF produces physical samples inside prior
 support rather than relying on post-hoc rejection.
 
+`ChoicePrior` may also be included in `Simulate.infer`. CompoSED enumerates the
+Cartesian product of the declared choice axes and trains
+`q(discrete_state | photometry)` alongside
+`q(continuous_parameters | photometry, discrete_state)`. Returned discrete
+values therefore lie exactly on the declared support, with no ordinal
+interpolation. Use `posterior.discrete_probabilities(...)` for exact joint and
+marginal category probabilities. For a mixed target, `posterior.log_prob(...)`
+returns categorical log mass plus continuous log density in physical units.
+
 ## Use The Simpler MDN Alternative
 
 The simulation, noise model, observation context, prior transforms, catalog

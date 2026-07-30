@@ -5,6 +5,7 @@ import pytest
 
 from composed._numerics import trapezoid
 from inftools.sbi import (
+    HybridMAFPosteriorEstimator,
     MAFPosteriorEstimator,
     MDNPosteriorEstimator,
     simulate_training_set,
@@ -44,6 +45,7 @@ def test_importing_inftools_works_without_constructing_sbi_estimator():
 
     assert hasattr(inftools, "Posterior")
     assert hasattr(inftools, "MAFPosteriorEstimator")
+    assert hasattr(inftools, "HybridMAFPosteriorEstimator")
     assert hasattr(inftools, "MDNPosteriorEstimator")
 
 
@@ -562,6 +564,63 @@ def test_tiny_maf_training_if_dependencies_available():
     assert np.all(np.isfinite(logp))
     assert len(history["val_loss"]) == 2
     assert np.all(np.isfinite(history["val_loss"]))
+
+
+@pytest.mark.sbi
+def test_hybrid_maf_learns_categories_and_category_conditioned_continuous_draws():
+    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
+        pytest.skip("torch/nflows are not installed.")
+
+    rng = np.random.default_rng(105)
+    category = rng.integers(0, 2, size=512)
+    x = (4.0 * category - 2.0 + 0.25 * rng.normal(size=category.size))[:, None]
+    theta = (
+        0.4 * x[:, 0]
+        + 0.8 * category
+        + 0.15 * rng.normal(size=category.size)
+    )[:, None]
+    estimator = HybridMAFPosteriorEstimator(
+        continuous_dim=1,
+        x_dim=1,
+        n_categories=2,
+        hidden_features=16,
+        num_transforms=1,
+        num_blocks=1,
+        classifier_hidden_features=16,
+        classifier_num_blocks=1,
+        learning_rate=5.0e-3,
+        device="cpu",
+        initialization_seed=106,
+    )
+    history = estimator.fit(
+        theta,
+        category,
+        x,
+        epochs=20,
+        batch_size=64,
+        validation_split=0.2,
+        seed=107,
+    )
+
+    assert np.all(np.isfinite(history["train_loss"]))
+    probabilities = estimator.category_probabilities([[-2.0], [2.0]])
+    assert probabilities[0, 0] > 0.9
+    assert probabilities[1, 1] > 0.9
+    continuous, categories = estimator.sample(
+        np.asarray([[-2.0], [2.0]]),
+        num_samples=32,
+        seed=108,
+    )
+    assert continuous.shape == (2, 32, 1)
+    assert categories.shape == (2, 32)
+    assert np.all(np.isfinite(continuous))
+    logp = estimator.log_prob(
+        np.asarray([[-0.8], [1.6]]),
+        np.asarray([0, 1]),
+        np.asarray([[-2.0], [2.0]]),
+    )
+    assert logp.shape == (2,)
+    assert np.all(np.isfinite(logp))
 
 
 @pytest.mark.sbi

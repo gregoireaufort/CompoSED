@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import importlib.metadata
+from itertools import product
 import json
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -35,11 +36,19 @@ import numpy as np
 from composed.data import SEDDataset
 from composed.filters import FilterSet
 from composed.parameters import ParameterSpace
-from composed.priors import DeltaPrior, LogUniformPrior, NormalPrior, StudentTPrior, UniformPrior
+from composed.priors import (
+    ChoicePrior,
+    DeltaPrior,
+    LogUniformPrior,
+    NormalPrior,
+    StudentTPrior,
+    UniformPrior,
+)
 from composed.provenance import save_npz_with_provenance
 from inftools.diagnostics import run_sbi_diagnostics
 from inftools.experimental.diffusion import ConditionalDiffusionEstimator, FeatureMetadata
 from inftools.sbi import (
+    HybridMAFPosteriorEstimator,
     MAFPosteriorEstimator,
     MDNPosteriorEstimator,
     Standardizer,
@@ -154,12 +163,19 @@ class PhotometricContext:
 
 @dataclass(frozen=True)
 class PriorSupportTransform:
-    """Map continuous parameters to an unconstrained neural target space."""
+    """Map physical parameters to the numerical targets learned by neural SBI.
+
+    Continuous bounded priors are mapped to an unconstrained logit coordinate.
+    A :class:`ChoicePrior` can be encoded by its zero-based support index for
+    bookkeeping, but production MAF training removes those columns from the
+    continuous flow and learns their exact joint categorical distribution.
+    """
 
     names: Sequence[str]
     kinds: Sequence[str]
     lower: Sequence[float]
     upper: Sequence[float]
+    choices: Sequence[Sequence[float] | None] | None = None
     epsilon: float = 1.0e-6
 
     def __post_init__(self) -> None:
@@ -171,13 +187,42 @@ class PriorSupportTransform:
             raise ValueError("PriorSupportTransform fields must have equal lengths.")
         if len(set(names)) != len(names):
             raise ValueError("PriorSupportTransform names must be unique.")
-        if any(kind not in {"identity", "uniform", "log_uniform"} for kind in kinds):
+        if any(kind not in {"identity", "uniform", "log_uniform", "choice"} for kind in kinds):
             raise ValueError("Unknown prior-support transform kind.")
         for kind, low, high in zip(kinds, lower, upper):
-            if kind != "identity" and (not np.isfinite(low) or not np.isfinite(high) or high <= low):
+            if kind in {"uniform", "log_uniform"} and (
+                not np.isfinite(low) or not np.isfinite(high) or high <= low
+            ):
                 raise ValueError("Bounded prior transforms require finite high > low.")
             if kind == "log_uniform" and low <= 0.0:
                 raise ValueError("Log-uniform prior transforms require a positive lower bound.")
+        raw_choices = (
+            (None,) * len(names)
+            if self.choices is None
+            else tuple(self.choices)
+        )
+        if len(raw_choices) != len(names):
+            raise ValueError("PriorSupportTransform choices must match the parameter count.")
+        normalized_choices = []
+        for name, kind, support in zip(names, kinds, raw_choices):
+            if kind != "choice":
+                if support is not None:
+                    raise ValueError(
+                        f"Only choice transforms may declare support values; got values for {name!r}."
+                    )
+                normalized_choices.append(None)
+                continue
+            values = np.asarray(support, dtype=float)
+            if (
+                values.ndim != 1
+                or values.size < 2
+                or not np.all(np.isfinite(values))
+                or np.unique(values).size != values.size
+            ):
+                raise ValueError(
+                    f"Choice transform for {name!r} requires at least two unique finite values."
+                )
+            normalized_choices.append(tuple(float(value) for value in values))
         epsilon = float(self.epsilon)
         if not 0.0 < epsilon < 0.5:
             raise ValueError("PriorSupportTransform.epsilon must lie in (0, 0.5).")
@@ -185,6 +230,7 @@ class PriorSupportTransform:
         object.__setattr__(self, "kinds", kinds)
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "choices", tuple(normalized_choices))
         object.__setattr__(self, "epsilon", epsilon)
 
     @classmethod
@@ -202,6 +248,7 @@ class PriorSupportTransform:
         kinds = []
         lower = []
         upper = []
+        choices = []
         for name in tuple(str(value) for value in names):
             if name not in parameter_space.priors:
                 raise KeyError(f"ParameterSpace has no prior for inferred parameter {name!r}.")
@@ -210,27 +257,55 @@ class PriorSupportTransform:
                 kinds.append("uniform")
                 lower.append(float(prior.low))
                 upper.append(float(prior.high))
+                choices.append(None)
             elif isinstance(prior, LogUniformPrior):
                 kinds.append("log_uniform")
                 lower.append(float(prior.low))
                 upper.append(float(prior.high))
+                choices.append(None)
             elif isinstance(prior, (NormalPrior, StudentTPrior)):
                 kinds.append("identity")
                 lower.append(float("nan"))
                 upper.append(float("nan"))
+                choices.append(None)
+            elif isinstance(prior, ChoicePrior):
+                kinds.append("choice")
+                lower.append(float("nan"))
+                upper.append(float("nan"))
+                choices.append(tuple(float(value) for value in prior.values))
             else:
                 raise TypeError(
                     f"Neural SBI target {name!r} uses unsupported prior {type(prior).__name__}; "
                     "MAF and diffusion support UniformPrior, LogUniformPrior, "
-                    "NormalPrior, and StudentTPrior."
+                    "NormalPrior, StudentTPrior, and ChoicePrior."
                 )
-        return cls(tuple(names), tuple(kinds), tuple(lower), tuple(upper))
+        return cls(
+            tuple(names),
+            tuple(kinds),
+            tuple(lower),
+            tuple(upper),
+            choices=tuple(choices),
+        )
 
     def transform(self, theta: np.ndarray) -> np.ndarray:
         values, leading_shape = self._coerce(theta)
         out = values.copy()
         for j, kind in enumerate(self.kinds):
             if kind == "identity":
+                continue
+            if kind == "choice":
+                support = np.asarray(self.choices[j], dtype=float)
+                matches = np.isclose(
+                    values[:, j, None],
+                    support[None, :],
+                    rtol=1.0e-12,
+                    atol=1.0e-12,
+                )
+                if not np.all(np.any(matches, axis=1)):
+                    raise ValueError(
+                        f"Parameter {self.names[j]!r} contains a value outside its ChoicePrior support."
+                    )
+                out[:, j] = np.argmax(matches, axis=1)
                 continue
             if kind == "log_uniform":
                 if np.any(values[:, j] <= 0.0):
@@ -252,6 +327,15 @@ class PriorSupportTransform:
         for j, kind in enumerate(self.kinds):
             if kind == "identity":
                 continue
+            if kind == "choice":
+                support = np.asarray(self.choices[j], dtype=float)
+                choice_index = np.clip(
+                    np.rint(values[:, j]).astype(int),
+                    0,
+                    support.size - 1,
+                )
+                out[:, j] = support[choice_index]
+                continue
             coordinate = _stable_sigmoid(values[:, j])
             if kind == "log_uniform":
                 log_value = np.log(self.lower[j]) + coordinate * (
@@ -270,7 +354,7 @@ class PriorSupportTransform:
         values, leading_shape = self._coerce(theta)
         total = np.zeros(values.shape[0], dtype=float)
         for j, kind in enumerate(self.kinds):
-            if kind == "identity":
+            if kind in {"identity", "choice"}:
                 continue
             if kind == "log_uniform":
                 coordinate = (np.log(values[:, j]) - np.log(self.lower[j])) / (
@@ -300,6 +384,10 @@ class PriorSupportTransform:
             "kinds": list(self.kinds),
             "lower": [value if np.isfinite(value) else None for value in self.lower],
             "upper": [value if np.isfinite(value) else None for value in self.upper],
+            "choices": [
+                None if values is None else list(values)
+                for values in self.choices
+            ],
             "epsilon": self.epsilon,
         }
 
@@ -310,6 +398,7 @@ class PriorSupportTransform:
             kinds=specification["kinds"],
             lower=[float("nan") if value is None else value for value in specification["lower"]],
             upper=[float("nan") if value is None else value for value in specification["upper"]],
+            choices=specification.get("choices"),
             epsilon=float(specification.get("epsilon", 1.0e-6)),
         )
 
@@ -320,7 +409,172 @@ class PriorSupportTransform:
         if not np.all(np.isfinite(array)):
             raise ValueError("Parameter transform received NaN or inf values.")
         leading_shape = array.shape[:-1]
-        return array.reshape((-1, len(self.names))), leading_shape
+        n_row = int(np.prod(leading_shape, dtype=np.int64)) if leading_shape else 1
+        return array.reshape((n_row, len(self.names))), leading_shape
+
+
+@dataclass(frozen=True)
+class DiscreteTargetSpecification:
+    """Exact joint support for inferred ``ChoicePrior`` parameters."""
+
+    names: Sequence[str]
+    target_indices: Sequence[int]
+    supports: Sequence[Sequence[float]]
+    max_joint_states: int = 128
+
+    def __post_init__(self) -> None:
+        names = tuple(str(name) for name in self.names)
+        indices = tuple(int(index) for index in self.target_indices)
+        supports = tuple(
+            tuple(float(value) for value in support)
+            for support in self.supports
+        )
+        if not names or len(names) != len(indices) or len(names) != len(supports):
+            raise ValueError("Discrete target names, indices, and supports must be non-empty and aligned.")
+        if len(set(names)) != len(names) or len(set(indices)) != len(indices):
+            raise ValueError("Discrete target names and indices must be unique.")
+        if any(index < 0 for index in indices):
+            raise ValueError("Discrete target indices must be non-negative.")
+        for name, support in zip(names, supports):
+            values = np.asarray(support, dtype=float)
+            if (
+                values.ndim != 1
+                or values.size < 2
+                or not np.all(np.isfinite(values))
+                or np.unique(values).size != values.size
+            ):
+                raise ValueError(
+                    f"Discrete target {name!r} requires at least two unique finite support values."
+                )
+        n_states = int(np.prod([len(support) for support in supports], dtype=np.int64))
+        max_states = int(self.max_joint_states)
+        if max_states <= 0:
+            raise ValueError("max_joint_states must be positive.")
+        if n_states > max_states:
+            raise ValueError(
+                f"Joint discrete support has {n_states} states, above the current "
+                f"hybrid-MAF limit of {max_states}."
+            )
+        object.__setattr__(self, "names", names)
+        object.__setattr__(self, "target_indices", indices)
+        object.__setattr__(self, "supports", supports)
+        object.__setattr__(self, "max_joint_states", max_states)
+
+    @classmethod
+    def from_transform(
+        cls,
+        transform: PriorSupportTransform,
+        *,
+        max_joint_states: int = 128,
+    ) -> "DiscreteTargetSpecification | None":
+        indices = tuple(
+            index
+            for index, kind in enumerate(transform.kinds)
+            if kind == "choice"
+        )
+        if not indices:
+            return None
+        return cls(
+            names=tuple(transform.names[index] for index in indices),
+            target_indices=indices,
+            supports=tuple(transform.choices[index] for index in indices),
+            max_joint_states=max_joint_states,
+        )
+
+    @property
+    def cardinalities(self) -> tuple[int, ...]:
+        return tuple(len(support) for support in self.supports)
+
+    @property
+    def n_states(self) -> int:
+        return int(np.prod(self.cardinalities, dtype=np.int64))
+
+    @property
+    def state_values(self) -> np.ndarray:
+        return np.asarray(tuple(product(*self.supports)), dtype=float)
+
+    def continuous_indices(self, n_target: int) -> tuple[int, ...]:
+        discrete = set(self.target_indices)
+        return tuple(index for index in range(int(n_target)) if index not in discrete)
+
+    def encode(self, theta: np.ndarray) -> np.ndarray:
+        """Map exact physical support values to one joint state index per row."""
+
+        theta = np.asarray(theta, dtype=float)
+        if theta.ndim == 1:
+            theta = theta[None, :]
+        if theta.ndim != 2 or theta.shape[1] <= max(self.target_indices):
+            raise ValueError("theta does not contain every declared discrete target column.")
+        coordinates = []
+        for name, column, support in zip(self.names, self.target_indices, self.supports):
+            values = theta[:, column]
+            support_array = np.asarray(support, dtype=float)
+            matches = np.isclose(
+                values[:, None],
+                support_array[None, :],
+                rtol=1.0e-12,
+                atol=1.0e-12,
+            )
+            if not np.all(np.sum(matches, axis=1) == 1):
+                raise ValueError(
+                    f"Training values for {name!r} do not lie uniquely on its ChoicePrior support."
+                )
+            coordinates.append(np.argmax(matches, axis=1))
+        return np.ravel_multi_index(tuple(coordinates), self.cardinalities).astype(np.int64)
+
+    def decode(self, category: np.ndarray) -> np.ndarray:
+        """Return exact physical discrete values for joint category indices."""
+
+        category = np.asarray(category)
+        if not np.all(np.isfinite(category)) or not np.all(category == np.rint(category)):
+            raise ValueError("category must contain finite integer state indices.")
+        category = category.astype(np.int64)
+        if np.any((category < 0) | (category >= self.n_states)):
+            raise ValueError("category contains an index outside the joint discrete support.")
+        flat = category.reshape(-1)
+        coordinates = np.unravel_index(flat, self.cardinalities)
+        values = np.column_stack(
+            [
+                np.asarray(support, dtype=float)[coordinate]
+                for support, coordinate in zip(self.supports, coordinates)
+            ]
+        )
+        return values.reshape(category.shape + (len(self.names),))
+
+    def specification(self) -> dict[str, object]:
+        return {
+            "names": list(self.names),
+            "target_indices": list(self.target_indices),
+            "supports": [list(support) for support in self.supports],
+            "max_joint_states": self.max_joint_states,
+        }
+
+    @classmethod
+    def from_specification(
+        cls,
+        specification: Mapping[str, object],
+    ) -> "DiscreteTargetSpecification":
+        return cls(
+            names=specification["names"],
+            target_indices=specification["target_indices"],
+            supports=specification["supports"],
+            max_joint_states=int(specification.get("max_joint_states", 128)),
+        )
+
+
+def _continuous_transform(
+    transform: PriorSupportTransform,
+    specification: DiscreteTargetSpecification,
+) -> PriorSupportTransform:
+    indices = specification.continuous_indices(len(transform.names))
+    return PriorSupportTransform(
+        names=tuple(transform.names[index] for index in indices),
+        kinds=tuple(transform.kinds[index] for index in indices),
+        lower=tuple(transform.lower[index] for index in indices),
+        upper=tuple(transform.upper[index] for index in indices),
+        choices=(None,) * len(indices),
+        epsilon=transform.epsilon,
+    )
 
 
 def _stable_sigmoid(values: np.ndarray) -> np.ndarray:
@@ -1179,11 +1433,19 @@ class Simulate:
 
 @dataclass(frozen=True)
 class MAF:
-    """Conditional MAF inference configuration."""
+    """Conditional MAF inference configuration.
+
+    When inferred parameters include ``ChoicePrior`` axes, CompoSED trains an
+    exact categorical posterior over their joint support and conditions the
+    continuous MAF on the sampled one-hot state.
+    """
 
     hidden_features: int = 128
     num_transforms: int = 5
     num_blocks: int = 2
+    classifier_hidden_features: int | None = None
+    classifier_num_blocks: int = 2
+    max_joint_discrete_states: int = 128
     learning_rate: float = 1e-3
     device: str | None = "auto"
     standardize: bool = True
@@ -1559,11 +1821,12 @@ class TrainedDiffusionSBI:
 class TrainedMAFSBI:
     """Trained fixed-context neural posterior for parameters given observations."""
 
-    estimator: MAFPosteriorEstimator
+    estimator: MAFPosteriorEstimator | HybridMAFPosteriorEstimator
     training_set: PhotometricTrainingSet | None
     history: dict[str, list[float]]
     metadata: dict[str, Any] = field(default_factory=dict)
     target_transform: PriorSupportTransform | None = None
+    discrete_specification: DiscreteTargetSpecification | None = None
     schema: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -1583,13 +1846,48 @@ class TrainedMAFSBI:
         else:
             self.schema = dict(self.schema)
             _validate_maf_schema(self.schema)
-        if self.estimator.theta_dim != len(self.theta_names) or self.estimator.x_dim != len(self.x_names):
-            raise ValueError(
-                "Neural posterior dimensions do not match the saved scientific schema."
-            )
         if tuple(self.target_transform.names) != self.theta_names:
             raise ValueError(
                 "Neural-posterior target-transform names do not match the saved parameter order."
+            )
+        inferred_discrete = DiscreteTargetSpecification.from_transform(
+            self.target_transform
+        )
+        if self.discrete_specification is None:
+            self.discrete_specification = inferred_discrete
+        elif inferred_discrete is None:
+            raise ValueError(
+                "A discrete target specification was supplied for an all-continuous target."
+            )
+        elif (
+            self.discrete_specification.specification()
+            != inferred_discrete.specification()
+        ):
+            raise ValueError(
+                "Discrete target specification does not match the target transform."
+            )
+        if self.discrete_specification is None:
+            if isinstance(self.estimator, HybridMAFPosteriorEstimator):
+                raise TypeError(
+                    "HybridMAFPosteriorEstimator requires at least one ChoicePrior target."
+                )
+            expected_theta_dim = len(self.theta_names)
+        else:
+            if not isinstance(self.estimator, HybridMAFPosteriorEstimator):
+                raise TypeError(
+                    "ChoicePrior targets require the categorical HybridMAFPosteriorEstimator; "
+                    "legacy relaxed continuous checkpoints must be retrained."
+                )
+            expected_theta_dim = len(
+                self.discrete_specification.continuous_indices(len(self.theta_names))
+            )
+            if self.estimator.n_categories != self.discrete_specification.n_states:
+                raise ValueError(
+                    "Hybrid estimator category count does not match the exact discrete support."
+                )
+        if self.estimator.theta_dim != expected_theta_dim or self.estimator.x_dim != len(self.x_names):
+            raise ValueError(
+                "Neural posterior dimensions do not match the saved scientific schema."
             )
         self.metadata = dict(self.metadata)
         self.history = {str(key): list(value) for key, value in self.history.items()}
@@ -1659,17 +1957,65 @@ class TrainedMAFSBI:
         cubes = []
         for start in range(0, n_object, batch_size):
             chunk = x[start : start + batch_size]
-            samples = np.asarray(self.estimator.sample(chunk, num_samples=num_samples), dtype=float)
-            if samples.ndim == 2 and chunk.shape[0] == 1:
-                samples = samples[None, :, :]
+            if self.discrete_specification is None:
+                samples = np.asarray(
+                    self.estimator.sample(
+                        chunk,
+                        num_samples=num_samples,
+                    ),
+                    dtype=float,
+                )
+                if samples.ndim == 2 and chunk.shape[0] == 1:
+                    samples = samples[None, :, :]
+                samples = self.target_transform.inverse(samples)
+            else:
+                continuous, categories = self.estimator.sample(
+                    chunk,
+                    num_samples=num_samples,
+                )
+                samples = self._assemble_hybrid_samples(
+                    continuous,
+                    categories,
+                )
             if samples.shape != (chunk.shape[0], int(num_samples), len(self.theta_names)):
                 raise ValueError(
                     "Neural posterior returned sample shape "
                     f"{samples.shape}; expected {(chunk.shape[0], int(num_samples), len(self.theta_names))}."
                 )
             cubes.append(samples)
-        unconstrained = np.concatenate(cubes, axis=0)
-        return self.target_transform.inverse(unconstrained)
+        return np.concatenate(cubes, axis=0)
+
+    def _assemble_hybrid_samples(
+        self,
+        continuous: np.ndarray,
+        categories: np.ndarray,
+    ) -> np.ndarray:
+        """Restore full physical vectors from continuous draws and state labels."""
+
+        specification = self.discrete_specification
+        continuous = np.asarray(continuous, dtype=float)
+        categories = np.asarray(categories)
+        if continuous.ndim != 3 or categories.shape != continuous.shape[:2]:
+            raise ValueError(
+                "Hybrid estimator must return continuous shape (object, sample, axis) "
+                "and matching categorical indices."
+            )
+        continuous_indices = specification.continuous_indices(len(self.theta_names))
+        if continuous.shape[2] != len(continuous_indices):
+            raise ValueError("Hybrid continuous sample dimension does not match target schema.")
+        continuous_transform = _continuous_transform(
+            self.target_transform,
+            specification,
+        )
+        continuous_physical = continuous_transform.inverse(continuous)
+        discrete_physical = specification.decode(categories)
+        samples = np.empty(
+            continuous.shape[:2] + (len(self.theta_names),),
+            dtype=float,
+        )
+        samples[:, :, continuous_indices] = continuous_physical
+        samples[:, :, specification.target_indices] = discrete_physical
+        return samples
 
     def log_prob(
         self,
@@ -1680,7 +2026,7 @@ class TrainedMAFSBI:
         conditions=None,
         input_units: str = "features",
     ) -> np.ndarray | float:
-        """Evaluate the learned posterior density in physical parameter units."""
+        """Evaluate posterior log mass plus continuous density in physical units."""
 
         x = self._context_features(
             photometry,
@@ -1688,9 +2034,98 @@ class TrainedMAFSBI:
             conditions=conditions,
             input_units=input_units,
         )
-        transformed = self.target_transform.transform(theta)
-        logp = self.estimator.log_prob(transformed, x)
-        return logp + self.target_transform.log_abs_det_forward(theta)
+        if self.discrete_specification is None:
+            transformed = self.target_transform.transform(theta)
+            logp = self.estimator.log_prob(transformed, x)
+            return logp + self.target_transform.log_abs_det_forward(theta)
+
+        theta_array = np.asarray(theta, dtype=float)
+        single = theta_array.ndim == 1
+        if single:
+            theta_array = theta_array[None, :]
+        if theta_array.ndim != 2 or theta_array.shape[1] != len(self.theta_names):
+            raise ValueError(
+                f"theta must have shape ({len(self.theta_names)},) or "
+                f"(n, {len(self.theta_names)})."
+            )
+        specification = self.discrete_specification
+        categories = specification.encode(theta_array)
+        continuous_indices = specification.continuous_indices(len(self.theta_names))
+        continuous_physical = theta_array[:, continuous_indices]
+        continuous_transform = _continuous_transform(
+            self.target_transform,
+            specification,
+        )
+        continuous_numerical = continuous_transform.transform(
+            continuous_physical
+        )
+        logp = self.estimator.log_prob(
+            continuous_numerical,
+            categories,
+            x,
+        )
+        result = logp + continuous_transform.log_abs_det_forward(
+            continuous_physical
+        )
+        if single and np.ndim(result):
+            return float(np.asarray(result).reshape(-1)[0])
+        return result
+
+    def discrete_probabilities(
+        self,
+        photometry: np.ndarray | SEDDataset,
+        *,
+        sigma: np.ndarray | None = None,
+        conditions=None,
+        input_units: str = "features",
+    ) -> dict[str, object]:
+        """Return exact joint and marginal categorical posterior probabilities."""
+
+        if self.discrete_specification is None:
+            raise ValueError("This MAF posterior has no inferred discrete parameters.")
+        x = self._context_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            input_units=input_units,
+        )
+        joint_probability = self.estimator.category_probabilities(x)
+        state_values = self.discrete_specification.state_values
+        marginals = {}
+        for column, (name, support) in enumerate(
+            zip(
+                self.discrete_specification.names,
+                self.discrete_specification.supports,
+            )
+        ):
+            support_array = np.asarray(support, dtype=float)
+            probability = np.column_stack(
+                [
+                    np.sum(
+                        joint_probability[
+                            :,
+                            np.isclose(
+                                state_values[:, column],
+                                value,
+                                rtol=1.0e-12,
+                                atol=1.0e-12,
+                            ),
+                        ],
+                        axis=1,
+                    )
+                    for value in support_array
+                ]
+            )
+            marginals[name] = {
+                "support": support_array,
+                "probability": probability,
+            }
+        return {
+            "names": self.discrete_specification.names,
+            "joint_state_values": state_values,
+            "joint_probability": joint_probability,
+            "marginals": marginals,
+        }
 
     def summarize_catalog(
         self,
@@ -1722,6 +2157,11 @@ class TrainedMAFSBI:
 
         n_object = x.shape[0]
         n_parameter = len(self.theta_names)
+        if "choice" in self.target_transform.kinds:
+            # ChoicePrior values are backend identifiers, not approximate
+            # continuous coordinates. Float32 can turn a valid CIGALE grid
+            # value such as 0.02 into an unrecognized template key.
+            dtype = np.float64
         quantile_values = np.empty((n_object, levels.size, n_parameter), dtype=dtype)
         means = np.empty((n_object, n_parameter), dtype=dtype)
         stds = np.empty((n_object, n_parameter), dtype=dtype)
@@ -1738,7 +2178,22 @@ class TrainedMAFSBI:
                 batch_size=stop - start,
                 seed=chunk_seed,
             )
-            quantile_values[start:stop] = np.transpose(np.quantile(draws, levels, axis=1), (1, 0, 2))
+            chunk_quantiles = np.transpose(
+                np.quantile(draws, levels, axis=1),
+                (1, 0, 2),
+            )
+            for parameter_index, kind in enumerate(self.target_transform.kinds):
+                if kind == "choice":
+                    chunk_quantiles[:, :, parameter_index] = np.transpose(
+                        np.quantile(
+                            draws[:, :, parameter_index],
+                            levels,
+                            axis=1,
+                            method="nearest",
+                        ),
+                        (1, 0),
+                    )
+            quantile_values[start:stop] = chunk_quantiles
             means[start:stop] = np.mean(draws, axis=1)
             stds[start:stop] = np.std(draws, axis=1)
 
@@ -1895,17 +2350,49 @@ class TrainedMAFSBI:
             x_mean=self.estimator.x_standardizer.mean,
             x_std=self.estimator.x_standardizer.std,
         )
-        weights = {name: tensor.detach().cpu() for name, tensor in self.estimator.flow.state_dict().items()}
-        self.estimator.torch.save(weights, path / "weights.pt")
+        is_hybrid = isinstance(self.estimator, HybridMAFPosteriorEstimator)
+        if is_hybrid:
+            classifier_weights = {
+                name: tensor.detach().cpu()
+                for name, tensor in self.estimator.classifier.state_dict().items()
+            }
+            self.estimator.torch.save(
+                classifier_weights,
+                path / "classifier_weights.pt",
+            )
+            if self.estimator.flow is not None:
+                flow_weights = {
+                    name: tensor.detach().cpu()
+                    for name, tensor in self.estimator.flow.state_dict().items()
+                }
+                self.estimator.torch.save(
+                    flow_weights,
+                    path / "flow_weights.pt",
+                )
+        else:
+            weights = {
+                name: tensor.detach().cpu()
+                for name, tensor in self.estimator.flow.state_dict().items()
+            }
+            self.estimator.torch.save(weights, path / "weights.pt")
 
         manifest = {
-            "format": "composed.maf.v1",
+            "format": (
+                "composed.maf.hybrid_categorical.v1"
+                if is_hybrid
+                else "composed.maf.v1"
+            ),
             "composed_version": _distribution_version("composed"),
             "torch_version": str(getattr(self.estimator.torch, "__version__", "unknown")),
             "nflows_version": _distribution_version("nflows"),
             "estimator": self.estimator.configuration(),
             "schema": dict(self.schema),
             "target_transform": self.target_transform.specification(),
+            "discrete_specification": (
+                None
+                if self.discrete_specification is None
+                else self.discrete_specification.specification()
+            ),
             "history": self.history,
             "metadata": self.metadata,
         }
@@ -1921,27 +2408,65 @@ class TrainedMAFSBI:
         path = Path(path)
         with (path / "manifest.json").open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
-        if manifest.get("format") != "composed.maf.v1":
-            raise ValueError(f"Unsupported MAF checkpoint format {manifest.get('format')!r}.")
+        checkpoint_format = manifest.get("format")
+        if checkpoint_format not in {
+            "composed.maf.v1",
+            "composed.maf.hybrid_categorical.v1",
+        }:
+            raise ValueError(f"Unsupported MAF checkpoint format {checkpoint_format!r}.")
+        target_transform = PriorSupportTransform.from_specification(
+            manifest["target_transform"]
+        )
+        has_choice_target = "choice" in target_transform.kinds
+        if checkpoint_format == "composed.maf.v1" and has_choice_target:
+            raise ValueError(
+                "This checkpoint used the obsolete relaxed continuous approximation "
+                "for ChoicePrior targets. Retrain it with the categorical hybrid MAF."
+            )
         config = dict(manifest["estimator"])
         config["device"] = device
-        estimator = MAFPosteriorEstimator(**config)
+        if checkpoint_format == "composed.maf.hybrid_categorical.v1":
+            estimator = HybridMAFPosteriorEstimator(**config)
+        else:
+            estimator = MAFPosteriorEstimator(**config)
         with np.load(path / "standardizers.npz", allow_pickle=False) as arrays:
             estimator.theta_standardizer = Standardizer(arrays["theta_mean"], arrays["theta_std"])
             estimator.x_standardizer = Standardizer(arrays["x_mean"], arrays["x_std"])
-        try:
-            state = estimator.torch.load(path / "weights.pt", map_location="cpu", weights_only=True)
-        except TypeError:  # Older supported torch releases lack weights_only.
-            state = estimator.torch.load(path / "weights.pt", map_location="cpu")
-        estimator.flow.load_state_dict(state)
-        estimator.flow.eval()
+        if checkpoint_format == "composed.maf.hybrid_categorical.v1":
+            classifier_state = _load_torch_weights(
+                estimator.torch,
+                path / "classifier_weights.pt",
+            )
+            estimator.classifier.load_state_dict(classifier_state)
+            estimator.classifier.eval()
+            if estimator.flow is not None:
+                flow_state = _load_torch_weights(
+                    estimator.torch,
+                    path / "flow_weights.pt",
+                )
+                estimator.flow.load_state_dict(flow_state)
+                estimator.flow.eval()
+        else:
+            state = _load_torch_weights(
+                estimator.torch,
+                path / "weights.pt",
+            )
+            estimator.flow.load_state_dict(state)
+            estimator.flow.eval()
         estimator.history = {str(key): list(value) for key, value in manifest.get("history", {}).items()}
         return cls(
             estimator=estimator,
             training_set=None,
             history=estimator.history,
             metadata=dict(manifest.get("metadata", {})),
-            target_transform=PriorSupportTransform.from_specification(manifest["target_transform"]),
+            target_transform=target_transform,
+            discrete_specification=(
+                None
+                if manifest.get("discrete_specification") is None
+                else DiscreteTargetSpecification.from_specification(
+                    manifest["discrete_specification"]
+                )
+            ),
             schema=dict(manifest["schema"]),
         )
 
@@ -2632,7 +3157,11 @@ def fit_sbi_problem(
         )
     if not inferred_names:
         raise ValueError("SBI requires at least one inferred parameter.")
-    _validate_continuous_sbi_targets(problem.parameters, inferred_names)
+    _validate_sbi_targets(
+        problem.parameters,
+        inferred_names,
+        allow_choice=isinstance(method, MAF),
+    )
     if isinstance(method, (MAF, MDN)) and np.any(problem.data.active_upper_limit_mask):
         raise NotImplementedError(
             "MAF does not yet encode censored upper limits, and neither does MDN. "
@@ -2769,6 +3298,81 @@ def _train_maf(training_set: SBITrainingSet, method: MAF, *, seed: int | None) -
                 "Use Diffusion for censored or row-masked photometry."
             )
     target_transform = training_set.theta_transform or PriorSupportTransform.identity(training_set.theta_names)
+    discrete_specification = DiscreteTargetSpecification.from_transform(
+        target_transform,
+        max_joint_states=method.max_joint_discrete_states,
+    )
+    if discrete_specification is not None:
+        continuous_indices = discrete_specification.continuous_indices(
+            len(training_set.theta_names)
+        )
+        continuous_transform = _continuous_transform(
+            target_transform,
+            discrete_specification,
+        )
+        continuous_physical = training_set.theta[:, continuous_indices]
+        continuous_numerical = continuous_transform.transform(
+            continuous_physical
+        )
+        categories = discrete_specification.encode(training_set.theta)
+        estimator = HybridMAFPosteriorEstimator(
+            continuous_dim=len(continuous_indices),
+            x_dim=training_set.x.shape[1],
+            n_categories=discrete_specification.n_states,
+            hidden_features=method.hidden_features,
+            num_transforms=method.num_transforms,
+            num_blocks=method.num_blocks,
+            classifier_hidden_features=method.classifier_hidden_features,
+            classifier_num_blocks=method.classifier_num_blocks,
+            learning_rate=method.learning_rate,
+            device=method.device,
+            standardize=method.standardize,
+            max_grad_norm=method.max_grad_norm,
+            restore_best=method.restore_best,
+            initialization_seed=seed,
+        )
+        history = estimator.fit(
+            continuous_numerical,
+            categories,
+            training_set.x,
+            epochs=method.epochs,
+            batch_size=method.batch_size,
+            validation_split=method.validation_split,
+            patience=method.patience,
+            min_delta=method.min_delta,
+            seed=seed,
+            verbose=method.verbose,
+        )
+        category_counts = np.bincount(
+            categories,
+            minlength=discrete_specification.n_states,
+        )
+        return TrainedMAFSBI(
+            estimator=estimator,
+            training_set=training_set,
+            history=dict(history),
+            metadata={
+                "source": training_set.source,
+                "n_train": int(training_set.theta.shape[0]),
+                "theta_names": tuple(training_set.theta_names),
+                "x_names": tuple(training_set.x_names),
+                "posterior_factorization": (
+                    "q(discrete_state | x) "
+                    "q(continuous_parameters | x, discrete_state)"
+                ),
+                "joint_discrete_state_counts": category_counts.tolist(),
+                "joint_discrete_state_values": (
+                    discrete_specification.state_values.tolist()
+                ),
+                "training_source": training_set.source,
+                "training_set_metadata": _checkpoint_training_metadata(
+                    training_set.metadata
+                ),
+            },
+            target_transform=target_transform,
+            discrete_specification=discrete_specification,
+        )
+
     unconstrained_theta = target_transform.transform(training_set.theta)
     estimator, metadata = train_maf_posterior_from_dataset(
         unconstrained_theta,
@@ -2806,6 +3410,7 @@ def _train_maf(training_set: SBITrainingSet, method: MAF, *, seed: int | None) -
             "training_set_metadata": _checkpoint_training_metadata(training_set.metadata),
         },
         target_transform=target_transform,
+        discrete_specification=None,
     )
 
 
@@ -2822,6 +3427,11 @@ def _train_mdn(training_set: SBITrainingSet, method: MDN, *, seed: int | None) -
         training_set.theta_transform
         or PriorSupportTransform.identity(training_set.theta_names)
     )
+    if "choice" in target_transform.kinds:
+        raise TypeError(
+            "MDN does not yet implement categorical ChoicePrior targets. "
+            "Use MAF for the exact categorical-plus-flow posterior."
+        )
     unconstrained_theta = target_transform.transform(training_set.theta)
     estimator, metadata = train_mdn_posterior_from_dataset(
         unconstrained_theta,
@@ -2871,6 +3481,15 @@ def _train_diffusion(
     *,
     seed: int | None,
 ) -> TrainedDiffusionSBI:
+    target_transform = (
+        training_set.theta_transform
+        or PriorSupportTransform.identity(training_set.theta_names)
+    )
+    if "choice" in target_transform.kinds:
+        raise TypeError(
+            "Diffusion does not yet implement categorical ChoicePrior targets. "
+            "Use MAF for the exact categorical-plus-flow posterior."
+        )
     feature_metadata = training_set.diffusion_feature_metadata
     joint_features = training_set.diffusion_joint_features
     estimator = ConditionalDiffusionEstimator(
@@ -2961,15 +3580,22 @@ def _sample_problem_posterior(
     return draws
 
 
-def _validate_continuous_sbi_targets(parameter_space: ParameterSpace, theta_names: Sequence[str]) -> None:
+def _validate_sbi_targets(
+    parameter_space: ParameterSpace,
+    theta_names: Sequence[str],
+    *,
+    allow_choice: bool,
+) -> None:
     unsupported = []
     for name in theta_names:
         prior_name = type(parameter_space.priors[name]).__name__
-        if prior_name in {"DeltaPrior", "ChoicePrior", "IntegerUniformPrior"}:
+        if prior_name in {"DeltaPrior", "IntegerUniformPrior"} or (
+            prior_name == "ChoicePrior" and not allow_choice
+        ):
             unsupported.append(f"{name} ({prior_name})")
     if unsupported:
         raise ValueError(
-            "MAF, MDN, and diffusion currently require continuous inferred parameters; unsupported: "
+            "The selected SBI estimator does not support these inferred prior axes: "
             + ", ".join(unsupported)
         )
 
@@ -3110,6 +3736,15 @@ def _distribution_version(name: str) -> str:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def _load_torch_weights(torch, path: Path):
+    """Load a state dictionary without permitting arbitrary pickle objects."""
+
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:  # Older supported torch releases lack weights_only.
+        return torch.load(path, map_location="cpu")
 
 
 def _checkpoint_training_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:

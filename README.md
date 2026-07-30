@@ -383,9 +383,13 @@ result = fit(
 `MDN` requires only PyTorch (`pip install -e ".[mdn]"`). Each component has a
 diagonal covariance in transformed parameter space; the mixture can represent
 multiple modes, while `MAF` remains the more expressive default for strongly
-curved high-dimensional posteriors. Both expose normalized physical-space
-`sample` and `log_prob` methods and use the same prior-support transforms. A
-complete small run is in `examples/sbi_mdn_mock_photometry_demo.py`.
+curved high-dimensional posteriors. Both expose physical-space `sample` and
+`log_prob` methods for continuous targets and use the same prior-support
+transforms. MAF additionally supports inferred `ChoicePrior` axes through an
+exact categorical posterior over their Cartesian support and a continuous flow
+conditioned on the selected category. Its `log_prob` is therefore a categorical
+log mass plus a continuous log density. MDN remains continuous-only. A complete
+small MDN run is in `examples/sbi_mdn_mock_photometry_demo.py`.
 
 Uniform and log-uniform targets use invertible bounded transforms, so physical
 samples remain inside prior support without rejection. Catalog inference is

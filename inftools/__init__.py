@@ -34,6 +34,7 @@ __all__ = [
     "box_logit_transform_from_parameter_space",
     "PosteriorSampleSet",
     "marginal_coverage",
+    "HybridMAFPosteriorEstimator",
     "MAFPosteriorEstimator",
     "MDNPosteriorEstimator",
     "prediction_summary",
@@ -144,6 +145,7 @@ def __getattr__(name):
             "run_sbi_diagnostics": run_sbi_diagnostics,
         }[name]
     if name in {
+        "HybridMAFPosteriorEstimator",
         "MAFPosteriorEstimator",
         "MDNPosteriorEstimator",
         "simulate_training_set",
@@ -153,6 +155,7 @@ def __getattr__(name):
         "train_mdn_posterior_from_dataset",
     }:
         from .sbi import (
+            HybridMAFPosteriorEstimator,
             MAFPosteriorEstimator,
             MDNPosteriorEstimator,
             simulate_training_set,
@@ -163,6 +166,7 @@ def __getattr__(name):
         )
 
         return {
+            "HybridMAFPosteriorEstimator": HybridMAFPosteriorEstimator,
             "MAFPosteriorEstimator": MAFPosteriorEstimator,
             "MDNPosteriorEstimator": MDNPosteriorEstimator,
             "simulate_training_set": simulate_training_set,
