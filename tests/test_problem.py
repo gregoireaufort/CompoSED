@@ -19,6 +19,7 @@ from composed import (
     SpectroPhotometricDataset,
     SpectrumDataset,
     fit,
+    diagnose,
     TAMIS,
 )
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
@@ -144,6 +145,11 @@ def test_fit_random_walk_returns_normalized_public_result():
     assert result.parameter_names == ("x",)
     assert np.isclose(np.sum(result.weights), 1.0)
     assert result.metadata["problem"]["backend"].endswith("ParameterBackend")
+    assert result.chain.shape == (100, 1, 1)
+    report = diagnose(result, min_ess=1.0)
+    assert report.global_metrics["accept_rate"] == pytest.approx(
+        result.metadata["sampler_meta"]["accept_rate"]
+    )
 
 
 def test_fit_mixed_tamis_forwards_parallel_evaluation_options():

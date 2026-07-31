@@ -29,6 +29,11 @@ class InferenceResult:
     MAP estimate is invented. ``inference_state`` can hold an in-memory trained
     guide or neural estimator and is intentionally not serialized by the
     generic result writer.
+
+    ``chain`` uses shape ``(n_draw, n_chain, n_parameter)`` and should contain
+    post-burn-in, thinned draws when available. ``diagnostics`` is an optional
+    persisted :class:`composed.diagnostics.DiagnosticReport` dictionary; it is
+    never inferred automatically while loading an old result.
     """
 
     samples: np.ndarray
@@ -41,6 +46,7 @@ class InferenceResult:
     chain: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     inference_state: Any | None = field(default=None, repr=False)
+    diagnostics: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         samples = np.asarray(self.samples, dtype=float)
@@ -81,6 +87,7 @@ class InferenceResult:
                 raise ValueError("posterior_median must have shape (n_parameter,).")
 
         chain = None if self.chain is None else np.asarray(self.chain, dtype=float)
+        diagnostics = None if self.diagnostics is None else dict(self.diagnostics)
 
         self.samples = samples
         self.logp = logp
@@ -90,6 +97,7 @@ class InferenceResult:
         self.map_estimate = map_estimate
         self.posterior_median = posterior_median
         self.chain = chain
+        self.diagnostics = diagnostics
         self.metadata = dict(self.metadata)
 
 
@@ -123,6 +131,10 @@ def normalize_sampling_result(
     meta = dict(metadata or {})
     if hasattr(sampling_result, "meta"):
         meta.setdefault("sampler_meta", _json_safe(sampling_result.meta))
+        meta.setdefault(
+            "sampler_diagnostics",
+            _diagnostic_sampler_meta(sampling_result.meta),
+        )
 
     return InferenceResult(
         samples=samples,
@@ -176,13 +188,21 @@ def posterior_summary(
     return summary
 
 
-def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Path, Path]:
+def save_inference_result(
+    result: InferenceResult,
+    path: str | Path,
+    *,
+    diagnostics=None,
+) -> tuple[Path, Path]:
     """Save arrays and cryptographically bind their scientific metadata.
 
     The numerical archive stores a SHA-256 digest of the canonical JSON
     metadata. The JSON sidecar stores the archive's own content hash. Together
     these checks detect modification of either the posterior arrays or the
     Problem/sampler/provenance metadata used to interpret them.
+
+    Pass ``diagnostics=diagnose(result)`` to bind the diagnostic report into
+    the same metadata digest. If omitted, ``result.diagnostics`` is preserved.
     """
 
     npz_path, json_path = _result_paths(path)
@@ -199,10 +219,20 @@ def save_inference_result(result: InferenceResult, path: str | Path) -> tuple[Pa
         )
     )
     metadata["provenance"] = provenance
+    if diagnostics is None:
+        diagnostic_payload = result.diagnostics
+    elif hasattr(diagnostics, "to_dict"):
+        diagnostic_payload = diagnostics.to_dict()
+    elif isinstance(diagnostics, Mapping):
+        diagnostic_payload = dict(diagnostics)
+    else:
+        raise TypeError("diagnostics must be a DiagnosticReport, mapping, or None.")
+
     payload = {
         "sampler_name": result.sampler_name,
         "metadata": _json_safe(metadata),
         "posterior_summary": posterior_summary(result),
+        "diagnostics": _json_safe(diagnostic_payload),
     }
     metadata_sha256 = _result_metadata_sha256(payload)
 
@@ -281,6 +311,7 @@ def load_inference_result(
         map_estimate=arrays.get("map_estimate"),
         posterior_median=arrays.get("posterior_median"),
         chain=arrays.get("chain"),
+        diagnostics=payload.get("diagnostics"),
         metadata=payload.get("metadata", {}),
     )
 
@@ -405,3 +436,48 @@ def _json_safe(value):
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _diagnostic_sampler_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep compact sampler telemetry even when large arrays are summarized."""
+
+    keys = (
+        "accept_rate",
+        "acceptance_fraction_mean",
+        "acceptance_fraction_min",
+        "acceptance_fraction_max",
+        "inner_acceptance_mean",
+        "inner_acceptance_min",
+        "inner_acceptance_max",
+        "nwalkers",
+        "nsteps",
+        "burnin",
+        "thin",
+        "betas",
+        "ESS",
+        "tempered_ESS",
+        "tmprd_ESS",
+        "log_evidence",
+        "log_evidence_err",
+        "optimizer_success",
+        "optimizer_status",
+        "optimizer_message",
+        "optimizer_nfev",
+        "H",
+        "continuous_names",
+        "discrete_names",
+        "fixed_names",
+        "approximate_discrete_kernel",
+    )
+    kept = {}
+    for key in keys:
+        if key not in meta:
+            continue
+        value = meta[key]
+        if isinstance(value, np.ndarray) and value.size > 10_000:
+            continue
+        if isinstance(value, np.ndarray):
+            kept[key] = value.tolist()
+        else:
+            kept[key] = _json_safe(value)
+    return kept

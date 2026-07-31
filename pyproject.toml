@@ -50,6 +50,9 @@ samplers = [
   "pocomc",
   "tqdm",
 ]
+mc-diagnostics = [
+  "arviz",
+]
 notebooks = [
   "jupyterlab",
   "ipykernel",
@@ -93,6 +96,7 @@ all = [
   "scipy",
   "emcee",
   "pocomc",
+  "arviz",
   "corner",
   "pandas",
   "tqdm",

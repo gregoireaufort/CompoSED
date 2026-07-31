@@ -16,7 +16,9 @@ analysis:
 6. {doc}`inference`: select a compatible traditional sampler.
 7. {doc}`sbi`: simulate, train, validate, and reuse a neural posterior.
 8. {doc}`catalogs`: evaluate finite grids or amortized posteriors over catalogs.
-9. {doc}`results_and_plots`: save, reload, summarize, and check predictions.
+9. {doc}`diagnostics`: inspect MCMC mixing, weighted-sample degeneracy, and
+   method-specific limitations.
+10. {doc}`results_and_plots`: save, reload, summarize, and check predictions.
 
 ```{toctree}
 :maxdepth: 1
@@ -29,5 +31,6 @@ likelihoods
 inference
 sbi
 catalogs
+diagnostics
 results_and_plots
 ```

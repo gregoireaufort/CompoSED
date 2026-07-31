@@ -24,6 +24,9 @@ checks. Passing unit tests does not establish posterior calibration.
   scratch files are not committed.
 - [x] Saved inference products and model grids verify content hashes and
   provenance by default.
+- [x] Sampler diagnostics distinguish MCMC mixing, importance-weight
+  degeneracy, exact-grid concentration, local Laplace checks, and SBI
+  calibration rather than applying one statistic to every method.
 
 ## Scientific
 
@@ -36,7 +39,8 @@ checks. Passing unit tests does not establish posterior calibration.
   age-of-the-Universe constraint.
 - [x] Invalid physical support maps to `-inf` for deterministic likelihoods and
   cannot silently condition an SBI training prior.
-- [x] The analytic bounded-Gaussian MAF validation passes.
+- [ ] A maintained analytic bounded-Gaussian end-to-end MAF calibration test
+  is included and passes.
 - [ ] Each released real-backend MAF example reports held-out rank and coverage
   diagnostics generated from its own simulator and noise distribution.
 - [x] Reference Monte Carlo overlays are labelled as finite reference

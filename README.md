@@ -33,7 +33,7 @@ Then install only the backend stack you need. FSPS users must configure
 Optional inference layers are installed independently:
 
 ```bash
-python -m pip install -e ".[samplers]"  # emcee and PocoMC
+python -m pip install -e ".[samplers,mc-diagnostics]"  # samplers plus ArviZ diagnostics
 python -m pip install -e ".[sbi]"       # MAF: torch and nflows
 python -m pip install -e ".[mdn]"       # MDN only: torch
 ```
@@ -411,9 +411,37 @@ transforms, versions, and training metadata without duplicating the simulation
 table. For pre-existing photometry use `SBITrainingSet.from_photometry`.
 
 See [`docs/photometric_sbi_quickstart.md`](docs/photometric_sbi_quickstart.md)
-and the COSMOS2020 tutorial suite above. The bounded-Gaussian
-calibration in [`docs/maf_validation.md`](docs/maf_validation.md) provides a
-known-posterior regression test for the complete MAF path.
+and the COSMOS2020 tutorial suite above. The tests described in
+[`docs/maf_validation.md`](docs/maf_validation.md) check the MAF software
+contract, including shapes, transforms, persistence, and finite densities.
+They are not a substitute for held-out calibration with the simulator, noise
+model, selection, and prior used by a particular scientific analysis.
+
+## Sampler diagnostics
+
+Traditional inference results use one sampler-aware diagnostics entry point:
+
+```python
+from composed import diagnose
+from composed.plot import plot_diagnostics, plot_traces
+
+report = diagnose(result)
+print(report.summary())
+
+plot_diagnostics(result, report)
+plot_traces(result)
+```
+
+MCMC results use rank-normalized R-hat, bulk/tail ESS, MCSE, and acceptance
+telemetry where chain structure permits it. PocoMC and TAMIS instead report
+importance-weight ESS, entropy/perplexity, maximum weight, and available
+adaptation or evidence information. Exact grids report posterior support
+concentration without calling it Monte Carlo convergence. ArviZ is installed
+with the separate `mc-diagnostics` extra and imported lazily.
+
+Use `save_inference_result(result, path, diagnostics=report)` to bind the
+report into the saved result metadata. See
+[`docs/user_guide/diagnostics.md`](docs/user_guide/diagnostics.md).
 
 ## SBI diagnostics
 
@@ -496,6 +524,11 @@ Cached per-solar-mass grids can profile or marginalize over a separate
 integration grid: pass the same continuous `Prior` declared by the scientific
 model. CompoSED multiplies its density by each irregular-grid cell width.
 Sampler-specific arrays of mass weights are rejected.
+
+Analytic mass profiling assumes a prior that is flat in `log10_mass` over the
+declared bounds. It is not equivalent to marginalizing an informative or
+otherwise non-flat mass prior. In that case, supply an explicit
+`log10_mass_grid` and `log10_mass_prior` and use mass marginalization.
 
 The separate rest-frame fast-projection API is experimental in 0.1.1. It
 accepts only backends that explicitly declare a redshift-independent

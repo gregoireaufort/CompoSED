@@ -83,4 +83,15 @@ paths and records it in result metadata. For MCMC, inspect traces and
 autocorrelation/ESS diagnostics; for importance samplers, inspect normalized
 weights and ESS. A finite result is not by itself evidence of convergence.
 
+```python
+from composed import diagnose
+
+report = diagnose(result)
+print(report.summary())
+```
+
+The report dispatches by inference method: R-hat is not reported for a
+single-chain or importance-sampling result. See {doc}`diagnostics` for the
+complete interpretation and plotting workflow.
+
 See {doc}`../capabilities` for method/prior compatibility.

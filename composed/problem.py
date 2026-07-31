@@ -533,7 +533,9 @@ def fit(
 
     if conditioning is not None:
         raw = _expand_conditioned_sampling_result(raw, conditioning)
-    chain = raw.meta.get("raw_chain") if hasattr(raw, "meta") else None
+    chain = None
+    if hasattr(raw, "meta"):
+        chain = raw.meta.get("diagnostic_chain", raw.meta.get("raw_chain"))
     condition_metadata = (
         {}
         if conditioning is None
@@ -735,12 +737,14 @@ def _expand_conditioned_sampling_result(raw, reduction: _ConditioningReduction):
             cov = free_cov
 
     meta = dict(raw.meta)
-    raw_chain = meta.get("raw_chain")
-    if raw_chain is not None:
+    for chain_key in ("raw_chain", "diagnostic_chain"):
+        raw_chain = meta.get(chain_key)
+        if raw_chain is None:
+            continue
         chain = np.asarray(raw_chain, dtype=float)
         if chain.shape[-1] == reduction.free_space.ndim:
             flat = chain.reshape(-1, reduction.free_space.ndim)
-            meta["raw_chain"] = reduction.expand_rows(flat).reshape(
+            meta[chain_key] = reduction.expand_rows(flat).reshape(
                 *chain.shape[:-1],
                 reduction.full_space.ndim,
             )

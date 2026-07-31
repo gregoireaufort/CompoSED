@@ -26,6 +26,9 @@ def test_run_emcee_seed_reproducible_when_emcee_installed():
     assert np.allclose(result_a.samples, result_b.samples)
     assert np.allclose(result_a.logp, result_b.logp)
     assert np.allclose(result_a.meta["raw_chain"], result_b.meta["raw_chain"])
+    assert result_a.meta["diagnostic_chain"].shape == (12, 8, 1)
+    assert result_a.meta["acceptance_fraction"].shape == (8,)
+    assert 0.0 <= result_a.meta["acceptance_fraction_mean"] <= 1.0
 
 
 def test_run_emcee_rejects_rng_and_seed_together_when_emcee_installed():
@@ -71,6 +74,7 @@ def test_random_walk_removes_and_restores_delta_prior_axes():
     assert np.all(result.samples[:, 1] == 7.0)
     assert np.std(result.samples[:, 0]) > 0.0
     assert result.meta["accept_rate"] > 0.0
+    assert result.meta["diagnostic_chain"].shape == (100, 1, 2)
 
 
 def test_continuous_mcmc_rejects_choice_prior_with_sampler_guidance():

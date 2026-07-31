@@ -254,6 +254,130 @@ def plot_traces(result: InferenceResult, *, parameters: Sequence[str] | None = N
     return fig, axes
 
 
+def plot_diagnostics(result: InferenceResult, report=None):
+    """Plot the diagnostics that are meaningful for ``result``'s sampler.
+
+    MCMC results show rank-normalized R-hat and bulk/tail ESS. Importance and
+    grid results show weight concentration; TAMIS results additionally show
+    beta and per-iteration ESS histories when available. The function does not
+    invent MCMC diagnostics for weighted or neural posterior samples.
+    """
+
+    from composed.diagnostics import DiagnosticReport, diagnose
+
+    plt = _require_matplotlib()
+    if report is None:
+        report = diagnose(result)
+    if not isinstance(report, DiagnosticReport):
+        raise TypeError("report must be a composed.DiagnosticReport.")
+
+    if report.family == "mcmc":
+        names = list(report.parameter_metrics)
+        movable = [name for name in names if not report.parameter_metrics[name].get("fixed", False)]
+        fig, axes = plt.subplots(1, 2, figsize=(10, max(3.2, 0.36 * len(movable) + 1.5)))
+        positions = np.arange(len(movable))
+
+        rhat = [report.parameter_metrics[name].get("rhat") for name in movable]
+        finite_rhat = np.asarray([value is not None for value in rhat], dtype=bool)
+        if np.any(finite_rhat):
+            axes[0].plot(
+                np.asarray([rhat[i] for i in np.flatnonzero(finite_rhat)], dtype=float),
+                positions[finite_rhat],
+                "o",
+                color="tab:blue",
+            )
+            rhat_threshold = float(report.global_metrics.get("rhat_warning_threshold", 1.01))
+            axes[0].axvline(
+                rhat_threshold,
+                color="tab:red",
+                ls="--",
+                lw=1.2,
+                label=f"{rhat_threshold:g}",
+            )
+            axes[0].legend(frameon=False)
+            axes[0].set_xlabel("rank-normalized R-hat")
+        else:
+            axes[0].text(0.5, 0.5, "R-hat unavailable\n(single chain)", ha="center", va="center")
+            axes[0].set_xticks([])
+        axes[0].set_yticks(positions, movable)
+        axes[0].set_title("Between-chain agreement")
+
+        bulk = np.asarray(
+            [report.parameter_metrics[name].get("ess_bulk", np.nan) for name in movable],
+            dtype=float,
+        )
+        tail = np.asarray(
+            [report.parameter_metrics[name].get("ess_tail", np.nan) for name in movable],
+            dtype=float,
+        )
+        height = 0.36
+        axes[1].barh(positions - height / 2, bulk, height=height, label="bulk ESS")
+        axes[1].barh(positions + height / 2, tail, height=height, label="tail ESS")
+        ess_threshold = float(report.global_metrics.get("ess_warning_threshold", 400.0))
+        axes[1].axvline(
+            ess_threshold,
+            color="tab:red",
+            ls="--",
+            lw=1.2,
+            label=f"{ess_threshold:g}",
+        )
+        axes[1].set_yticks(positions, movable)
+        axes[1].set_xlabel("effective samples")
+        axes[1].set_title("Within-chain precision")
+        axes[1].legend(frameon=False)
+        fig.suptitle(f"{result.sampler_name} diagnostics")
+        fig.tight_layout()
+        return fig, axes
+
+    if report.family in {"importance_sampling", "grid"}:
+        metrics = report.global_metrics
+        beta = np.asarray(metrics.get("beta_history", ()), dtype=float)
+        ess_history = np.asarray(metrics.get("iteration_ess_history", ()), dtype=float)
+        n_panel = 3 if beta.size or ess_history.size else 2
+        fig, axes = plt.subplots(1, n_panel, figsize=(5.0 * n_panel, 3.8))
+        axes = np.atleast_1d(axes)
+        weights = np.sort(np.asarray(result.weights, dtype=float))[::-1]
+        positive = weights > 0.0
+        axes[0].plot(np.arange(1, np.sum(positive) + 1), weights[positive], color="tab:blue")
+        axes[0].set_yscale("log")
+        axes[0].set_xlabel("posterior row, sorted")
+        axes[0].set_ylabel("normalized weight")
+        axes[0].set_title("Weight concentration")
+
+        axes[1].plot(np.arange(1, weights.size + 1), np.cumsum(weights), color="tab:orange")
+        axes[1].axhline(0.9, color="0.4", ls="--", lw=1.0)
+        axes[1].set_xlabel("posterior row, sorted")
+        axes[1].set_ylabel("cumulative posterior mass")
+        axes[1].set_ylim(0.0, 1.02)
+        axes[1].set_title(
+            f"ESS={metrics['weight_ess']:.1f} / {metrics['weighted_rows']}"
+        )
+
+        if n_panel == 3:
+            iteration = np.arange(1, max(beta.size, ess_history.size) + 1)
+            if ess_history.size:
+                axes[2].plot(iteration[: ess_history.size], ess_history, "o-", label="ESS")
+                axes[2].set_ylabel("iteration ESS")
+            if beta.size:
+                beta_axis = axes[2].twinx()
+                beta_axis.plot(
+                    iteration[: beta.size], beta, "s--", color="tab:red", label="beta"
+                )
+                beta_axis.set_ylabel("beta", color="tab:red")
+                beta_axis.set_ylim(bottom=0.0)
+            axes[2].set_xlabel("adaptation iteration")
+            axes[2].set_title("Proposal adaptation")
+        fig.suptitle(f"{result.sampler_name} diagnostics")
+        fig.tight_layout()
+        return fig, axes
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.axis("off")
+    ax.text(0.01, 0.99, report.summary(), ha="left", va="top", family="monospace")
+    fig.tight_layout()
+    return fig, np.asarray([ax])
+
+
 def plot_posterior_predictive_sed(
     result: InferenceResult,
     backend,

@@ -59,6 +59,41 @@ def test_corner_hexbin_and_trace_plots_return_figures():
     fig2.canvas.draw()
 
 
+def test_diagnostic_plots_cover_mcmc_and_weighted_results():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.diagnostics import diagnose
+    from composed.plot import plot_diagnostics
+
+    pytest.importorskip("arviz")
+    rng = np.random.default_rng(901)
+    chain = np.transpose(rng.normal(size=(4, 600, 2)), (1, 0, 2))
+    mcmc = InferenceResult(
+        samples=chain.reshape(-1, 2),
+        logp=np.zeros(chain.shape[0] * chain.shape[1]),
+        weights=np.ones(chain.shape[0] * chain.shape[1]),
+        parameter_names=("z", "mass"),
+        sampler_name="emcee",
+        chain=chain,
+    )
+    weighted = InferenceResult(
+        samples=np.arange(12.0).reshape(6, 2),
+        logp=np.zeros(6),
+        weights=np.arange(1.0, 7.0),
+        parameter_names=("z", "mass"),
+        sampler_name="pocomc",
+    )
+
+    mcmc_figure, mcmc_axes = plot_diagnostics(mcmc, diagnose(mcmc))
+    weighted_figure, weighted_axes = plot_diagnostics(weighted, diagnose(weighted))
+
+    assert len(np.atleast_1d(mcmc_axes)) == 2
+    assert len(np.atleast_1d(weighted_axes)) == 2
+    mcmc_figure.canvas.draw()
+    weighted_figure.canvas.draw()
+
+
 def test_corner_hexbin_handles_sparse_importance_weights():
     import matplotlib
 

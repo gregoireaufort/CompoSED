@@ -45,6 +45,7 @@ def test_all_selection_contains_only_release_stacks():
         "sbi",
         "mdn",
         "samplers",
+        "mc_diagnostics",
         "diffusion",
     }
 
@@ -79,6 +80,22 @@ def test_sampler_check_matches_sampler_extra(monkeypatch):
 
     assert [check.name for check in checks] == ["scipy", "emcee", "pocomc", "tqdm"]
     assert requested == ["scipy", "emcee", "pocomc", "tqdm"]
+
+
+def test_mc_diagnostic_check_matches_extra(monkeypatch):
+    checker = load_checker_module()
+    requested = []
+
+    def fake_import_check(module, **kwargs):
+        requested.append(module)
+        return checker.Check(module, True, "fake")
+
+    monkeypatch.setattr(checker, "import_check", fake_import_check)
+
+    checks = checker.check_mc_diagnostics()
+
+    assert [check.name for check in checks] == ["arviz"]
+    assert requested == ["arviz"]
 
 
 def test_diffusion_check_requires_torch_only(monkeypatch):

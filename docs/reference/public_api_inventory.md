@@ -59,6 +59,7 @@ category is a release-review failure.
 
 - Results: `InferenceResult`, `InferenceFailure`, `normalize_sampling_result`,
   `posterior_summary`
+- Diagnostics: `DiagnosticReport`, `diagnose`
 - Persistence: `save_inference_result`, `load_inference_result`
 - Scientific identity: `problem_fingerprint`,
   `require_result_matches_problem`

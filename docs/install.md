@@ -32,6 +32,8 @@ python -m pytest -q
 
 The core tests should not require FSPS, CIGALE, or torch.
 Install traditional samplers with `python -m pip install -e ".[samplers]"`.
+Install ArviZ-backed MCMC diagnostics separately with
+`python -m pip install -e ".[mc-diagnostics]"`.
 Jupyter is deliberately not part of the default environment; users who want a
 kernel can install `ipykernel` in the environment they actually use.
 
@@ -84,6 +86,9 @@ python -m pip install -e ".[diffusion]"
 
 # Traditional samplers such as emcee/pocomc.
 python -m pip install -e ".[samplers]"
+
+# Rank-normalized R-hat, ESS, and MCSE for saved MCMC chains.
+python -m pip install -e ".[mc-diagnostics]"
 
 # Only if this env should appear as a Jupyter kernel.
 python -m pip install ipykernel
@@ -140,6 +145,12 @@ python -m pip install -e ".[diffusion]"  # experimental diffusion SBI
 python -m pip install -e ".[samplers]"   # emcee, PocoMC, and SciPy sampler helpers
 ```
 
+The pinned CIGALE v2022.0 environment uses NumPy 1.23.5, while current ArviZ
+releases require newer NumPy. Do not let an ArviZ installation silently upgrade
+that engine environment. Save the `InferenceResult`, then load and diagnose it
+in a modern CompoSED analysis environment with the `mc-diagnostics` extra; the
+saved chain diagnostics do not need CIGALE to be importable.
+
 ## SBI / Neural Posterior Estimation
 
 The stable neural SBI layer provides both MAF/nflows and a smaller
@@ -183,9 +194,10 @@ from constraining an FSPS/SBI environment.
 - `SPS_HOME`, `fsps`, and `sedpy` for FSPS;
 - `pcigale` for CIGALE;
 - torch and nflows for MAF SBI, and torch alone for MDN or diffusion;
-- SciPy, emcee, PocoMC, and tqdm for the traditional sampler adapters.
+- SciPy, emcee, PocoMC, and tqdm for the traditional sampler adapters;
+- ArviZ separately for rank-normalized MCMC convergence diagnostics.
 
 It does not install anything and it does not prove scientific validity.  It is a
 pre-flight check that the intended backend can be reached before a long run.
-Use `--samplers`, `--diffusion`, or `--all` to check those complete inference
-stacks explicitly.
+Use `--samplers`, `--mc-diagnostics`, `--diffusion`, or `--all` to check those
+inference stacks explicitly.

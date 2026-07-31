@@ -51,6 +51,11 @@ converted explicitly before constructing the dataset.
 while preserving it in backend calls and returned results. This is preferable
 to asking a continuous-only sampler to traverse a `DeltaPrior`.
 
+The methods share `diagnose(result)` but not a fictitious universal convergence
+statistic. MCMC uses optional ArviZ R-hat/ESS/MCSE where chain structure permits it;
+PocoMC and TAMIS use normalized-weight and adaptation diagnostics; grids report
+exact posterior support concentration. See {doc}`user_guide/diagnostics`.
+
 ## Simulation-based inference
 
 | Method | Conditional density | Catalog batching | Device selection | Status |

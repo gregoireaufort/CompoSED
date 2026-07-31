@@ -28,6 +28,7 @@ MDN-only SBI dependency:
 Traditional sampler adapters or experimental diffusion:
 
     python scripts/check_environment.py --samplers
+    python scripts/check_environment.py --mc-diagnostics
     python scripts/check_environment.py --diffusion
 """
 
@@ -230,6 +231,12 @@ def check_samplers() -> list[Check]:
     ]
 
 
+def check_mc_diagnostics() -> list[Check]:
+    """ArviZ-backed MCMC convergence diagnostics."""
+
+    return [import_check("arviz")]
+
+
 def check_diffusion() -> list[Check]:
     """Experimental conditional-diffusion dependency checks."""
 
@@ -250,10 +257,20 @@ def selected_components(args: argparse.Namespace) -> set[str]:
                 "sbi",
                 "mdn",
                 "samplers",
+                "mc_diagnostics",
                 "diffusion",
             }
         )
-    for name in ("core", "fsps", "cigale", "sbi", "mdn", "samplers", "diffusion"):
+    for name in (
+        "core",
+        "fsps",
+        "cigale",
+        "sbi",
+        "mdn",
+        "samplers",
+        "mc_diagnostics",
+        "diffusion",
+    ):
         if getattr(args, name, False):
             selected.add(name)
     if not selected:
@@ -275,6 +292,8 @@ def run_checks(components: set[str]) -> list[tuple[str, list[Check]]]:
         grouped.append(("mdn", check_mdn()))
     if "samplers" in components:
         grouped.append(("samplers", check_samplers()))
+    if "mc_diagnostics" in components:
+        grouped.append(("mc-diagnostics", check_mc_diagnostics()))
     if "diffusion" in components:
         grouped.append(("diffusion", check_diffusion()))
     return grouped
@@ -307,6 +326,12 @@ def parse_args() -> argparse.Namespace:
         "--samplers",
         action="store_true",
         help="Check traditional sampler-adapter dependencies.",
+    )
+    parser.add_argument(
+        "--mc-diagnostics",
+        dest="mc_diagnostics",
+        action="store_true",
+        help="Check ArviZ-backed MCMC convergence diagnostics.",
     )
     parser.add_argument(
         "--diffusion",

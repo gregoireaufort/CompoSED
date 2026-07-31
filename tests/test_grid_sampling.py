@@ -178,7 +178,12 @@ def test_mixed_gibbs_keeps_discrete_block_on_grid_and_updates_continuous_block()
         logp = np.asarray([posterior.log_prob_fn([x]) for x in grid])
         best = int(np.argmax(logp))
         sample = np.asarray([[grid[best]]], dtype=float)
-        return SamplingResult(samples=sample, logp=np.asarray([logp[best]]), map_estimate=sample[0])
+        return SamplingResult(
+            samples=sample,
+            logp=np.asarray([logp[best]]),
+            map_estimate=sample[0],
+            meta={"accept_rate": 1.0},
+        )
 
     posterior = Posterior(log_prob, dim=space.ndim, theta_names=space.names)
     result = run_mixed_gibbs(
@@ -189,6 +194,12 @@ def test_mixed_gibbs_keeps_discrete_block_on_grid_and_updates_continuous_block()
         continuous_sampler=deterministic_continuous_update,
         rng=np.random.default_rng(3),
     )
+
+    assert result.meta["diagnostic_chain"].shape == (result.samples.shape[0], 1, 3)
+    assert result.meta["continuous_names"] == ("x",)
+    assert result.meta["discrete_names"] == ("template",)
+    assert result.meta["fixed_names"] == ("fixed",)
+    assert 0.0 <= result.meta["inner_acceptance_mean"] <= 1.0
 
     assert result.samples.shape == (8, 3)
     assert set(np.unique(result.samples[:, 1])) == {1.0}

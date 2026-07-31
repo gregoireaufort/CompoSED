@@ -37,13 +37,23 @@ The numerical artifact contains a digest binding its scientific metadata.
 Strict loading checks content and metadata integrity. The separate provenance
 sidecar records machine and engine context.
 
+To preserve a diagnostic report in the same bound metadata:
+
+```python
+from composed import diagnose
+
+report = diagnose(result)
+save_inference_result(result, "runs/object_001", diagnostics=report)
+```
+
 ## Corner and traces
 
 ```python
-from composed.plot import plot_corner_hexbin, plot_traces
+from composed.plot import plot_corner_hexbin, plot_diagnostics, plot_traces
 
 fig, axes = plot_corner_hexbin(result)
 fig, axes = plot_traces(result)
+fig, axes = plot_diagnostics(result)
 ```
 
 The corner plot uses hexbins and can overlay a comparison posterior. Trace plots

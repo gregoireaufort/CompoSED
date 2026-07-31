@@ -84,7 +84,14 @@ def run_rw_metropolis(
         logp=logp_thin,
         map_estimate=map_est,
         cov=cov,
-        meta={"accept_rate": acc_rate, "proposal_cov": proposal_cov},
+        meta={
+            "accept_rate": acc_rate,
+            "proposal_cov": proposal_cov,
+            "diagnostic_chain": samples_thin[:, None, :],
+            "nsteps": int(nsteps),
+            "burnin": int(burnin),
+            "thin": int(thin),
+        },
     )
     return _expand_fixed_parameter_result(result, reduction)
 
@@ -145,8 +152,10 @@ def run_emcee(
     chain = sampler.get_chain()
     logp_chain = sampler.get_log_prob()
 
-    samples = sampler.get_chain(discard=burnin, thin=thin, flat=True)
+    diagnostic_chain = sampler.get_chain(discard=burnin, thin=thin, flat=False)
+    samples = diagnostic_chain.reshape(-1, posterior.dim)
     logp = sampler.get_log_prob(discard=burnin, thin=thin, flat=True)
+    acceptance_fraction = np.asarray(sampler.acceptance_fraction, dtype=float)
 
     cov = np.cov(samples.T) if samples.shape[0] > 1 else None
     map_est = samples[np.argmax(logp)] if samples.size > 0 else None
@@ -159,8 +168,15 @@ def run_emcee(
         meta={
             "raw_chain": chain,
             "raw_logp": logp_chain,
+            "diagnostic_chain": diagnostic_chain,
             "nwalkers": nwalkers,
             "nsteps": nsteps,
+            "burnin": int(burnin),
+            "thin": int(thin),
+            "acceptance_fraction": acceptance_fraction,
+            "acceptance_fraction_mean": float(np.mean(acceptance_fraction)),
+            "acceptance_fraction_min": float(np.min(acceptance_fraction)),
+            "acceptance_fraction_max": float(np.max(acceptance_fraction)),
             "seed": seed,
             "emcee_seed": emcee_seed,
         },
@@ -258,12 +274,14 @@ def _expand_fixed_parameter_result(result: SamplingResult, reduction):
         covariance[np.ix_(free, free)] = reduced_cov
 
     meta = dict(result.meta)
-    if "raw_chain" in meta:
-        raw = np.asarray(meta["raw_chain"], dtype=float)
+    for chain_key in ("raw_chain", "diagnostic_chain"):
+        if chain_key not in meta:
+            continue
+        raw = np.asarray(meta[chain_key], dtype=float)
         expanded = np.empty(raw.shape[:-1] + (full_dim,), dtype=float)
         expanded[..., free] = raw
         expanded[..., fixed] = np.asarray(reduction["fixed_values"], dtype=float)
-        meta["raw_chain"] = expanded
+        meta[chain_key] = expanded
     meta["parameter_reduction"] = reduction
     return SamplingResult(
         samples=samples,

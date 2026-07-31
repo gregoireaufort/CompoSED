@@ -110,5 +110,12 @@ def run_laplace(
         logp=np.array([logp_map]),
         map_estimate=theta_map,
         cov=cov,
-        meta={"opt_result": opt, "H": H},
+        meta={
+            "opt_result": opt,
+            "optimizer_success": bool(opt.success),
+            "optimizer_status": int(opt.status),
+            "optimizer_message": str(opt.message),
+            "optimizer_nfev": int(opt.nfev),
+            "H": H,
+        },
     )

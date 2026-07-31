@@ -65,6 +65,21 @@ An absolute `tage_gyr` is also checked against the Universe age whenever a
 redshift is available. The default cosmology is Astropy `Planck18` for both
 named backends unless another cosmology is supplied.
 
+### Time-grid resolution
+
+The FSPS constant, exponential, and delayed-tau adapters evaluate the SFH on a
+linear time-since-onset grid with `n_time=256` by default. This is adequate only
+when the shortest physically important SFH timescale is resolved by several
+grid intervals. Very short `tau_gyr` values in an old population can therefore
+have a correctly normalized but poorly resolved SFH shape.
+
+For analyses allowing short bursts or `tau_gyr` near or below about 0.2 Gyr,
+repeat a representative calculation with a finer grid, for example
+`DelayedTauSFH(n_time=2048)`, and verify that the photometry or posterior is
+stable. The relevant convergence criterion is the ratio of the shortest SFH
+timescale to `tage_gyr / (n_time - 1)`; 0.2 Gyr is a warning scale, not a
+universal physical boundary.
+
 This parameterization enforces the cosmic upper bound only. In particular,
 `ContinuitySFH` also requires the resulting galaxy age to exceed its last
 fixed `lookback_edges_gyr` value. A broad redshift/age-fraction prior can still

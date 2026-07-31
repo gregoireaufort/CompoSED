@@ -31,6 +31,13 @@ FSPS and CIGALE backends accept `z`, `zred`, or `redshift`, with a declared
 default key. The likelihood does not interpret redshift names. Use one name
 consistently in a `ParameterSpace`.
 
+For the FSPS backend, `z=0` is a special absolute-flux convention evaluated at
+10 pc. Every positive redshift instead uses the cosmological luminosity
+distance. The two branches are therefore not a continuous distance model near
+zero. Redshift-fitting priors and deterministic grids should use a strictly
+positive lower bound unless the intended observable is an absolute magnitude
+at 10 pc.
+
 ## Stellar mass
 
 The stable meaning of `log10_mass` is:

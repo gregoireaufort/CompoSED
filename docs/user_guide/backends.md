@@ -38,6 +38,19 @@ FSPS dependencies are imported lazily, but construction requires a usable
 4. integrates observed $f_\lambda$ through sedpy filters;
 5. returns maggies.
 
+IGM absorption is not enabled unless `add_igm_absorption=True` is passed to
+`sp_kwargs`, following the python-FSPS default. Photo-z analyses spanning the
+Lyman break should normally make this choice explicit rather than relying on a
+default. Nebular and dust emission are enabled by the current CompoSED FSPS
+configuration unless explicitly disabled.
+
+FSPS treats stellar metallicity (`logzsol`) and gas metallicity (`gas_logz`) as
+separate parameters. If `gas_logz` is omitted, python-FSPS uses its own default;
+CompoSED does not silently copy `logzsol` into it. A user may fit both values
+independently or tie them explicitly with `Problem(parameter_transform=...)`.
+That choice should be recorded because it changes the physical relation between
+the stellar continuum and nebular emission.
+
 See {doc}`../install` and the backend API reference.
 
 ## CIGALE

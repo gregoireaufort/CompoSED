@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from composed.data import SEDDataset, SpectroPhotometricDataset, SpectrumDataset
 from composed.derived import DerivedSFHQuantities, derive_sfh_quantities
+from composed.diagnostics import DiagnosticReport, diagnose
 from composed.errors import ModelDomainError
 from composed.catalog import CatalogGridResult, run_photometric_grid_catalog
 from composed.catalog_fast import (
@@ -110,6 +111,7 @@ __all__ = [
     "ConstantSFH",
     "ContinuitySFH",
     "DelayedTauSFH",
+    "DiagnosticReport",
     "ExponentialSFH",
     "SFHHistory",
     "SFHModel",
@@ -173,6 +175,7 @@ __all__ = [
     "collect_run_provenance",
     "fit_catalog_with_restframe_grid",
     "derive_sfh_quantities",
+    "diagnose",
     "fit",
     "load_restframe_spectral_grid",
     "load_inference_result",

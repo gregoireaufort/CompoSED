@@ -43,6 +43,23 @@ may have different masks and upper-limit states.
 The grid path supports only finite-valued parameters. It does not silently
 convert a continuous prior into an arbitrary grid.
 
+### Profiled stellar mass
+
+The analytic profile solution for `log10_mass` is a weighted least-squares
+normalization. It is statistically equivalent to optimizing under a prior that
+is flat in `log10_mass` inside the declared bounds. It does **not** include an
+informative or non-flat mass prior.
+
+When the scientific model uses a non-flat mass prior, pass an explicit
+`log10_mass_grid` and the same continuous `log10_mass_prior` used by the model,
+then marginalize over that grid. The grid is a numerical integration axis, not
+a replacement prior. Explicit mass grids are also required when upper limits
+or a nonzero model-discrepancy term prevent use of the analytic profile.
+
+Always inspect `mass_profile_at_boundary`. A boundary solution can indicate
+that the allowed mass range is too narrow or that the model shape is a poor
+description of the object.
+
 ## Experimental fast projection
 
 `composed.catalog_fast` tabulates rest-frame spectra and projects them through

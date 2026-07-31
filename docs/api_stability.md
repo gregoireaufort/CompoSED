@@ -14,10 +14,12 @@ exported by `composed`:
 - named SFHs;
 - photometric `Problem`, `Gaussian`, `fit`, and stable sampler configurations;
 - MAF and MDN SBI configurations and trained-posterior objects;
-- normalized `InferenceResult` objects and provenance-aware persistence.
+- normalized `InferenceResult` objects and provenance-aware persistence;
+- sampler-aware `DiagnosticReport` and `diagnose`.
 
 The FSPS and CIGALE backend classes under `composed.backends` are also stable.
-The plotting functions under `composed.plot` and diagnostics under
+The plotting functions under `composed.plot`, sampler diagnostics under
+`composed.diagnostics`, and SBI calibration diagnostics under
 `inftools.diagnostics` are supported public utilities.
 
 ## Advanced interfaces

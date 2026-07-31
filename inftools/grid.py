@@ -377,6 +377,23 @@ def run_mixed_gibbs(
 
     best = int(np.nanargmax(logp))
     cov = np.cov(samples.T) if samples.shape[0] > 1 else None
+    inner_acceptance = np.asarray(
+        [
+            value
+            for result in inner_results
+            for value in [_result_acceptance_rate(result)]
+            if value is not None
+        ],
+        dtype=float,
+    )
+    acceptance_summary = {}
+    if inner_acceptance.size:
+        acceptance_summary = {
+            "inner_acceptance": inner_acceptance,
+            "inner_acceptance_mean": float(np.mean(inner_acceptance)),
+            "inner_acceptance_min": float(np.min(inner_acceptance)),
+            "inner_acceptance_max": float(np.max(inner_acceptance)),
+        }
     return SamplingResult(
         samples=samples,
         logp=logp,
@@ -384,6 +401,10 @@ def run_mixed_gibbs(
         cov=cov,
         meta={
             "parameter_blocks": blocks,
+            "continuous_names": blocks.continuous_names,
+            "discrete_names": blocks.discrete_names,
+            "fixed_names": blocks.fixed_names,
+            "diagnostic_chain": samples[:, None, :],
             "discrete_log_normalizers": discrete_log_normalizers,
             "discrete_probabilities": discrete_probabilities,
             "discrete_candidate_points": discrete_candidate_points,
@@ -396,6 +417,7 @@ def run_mixed_gibbs(
             "approximate_discrete_kernel": (
                 discrete_candidates is not None or discrete_probability_floor is not None
             ),
+            **acceptance_summary,
         },
     )
 
@@ -468,6 +490,16 @@ def _choose_continuous_state(result, rng: np.random.Generator) -> np.ndarray:
         return np.asarray(samples[int(rng.choice(np.arange(samples.shape[0]), p=weights))], dtype=float)
 
     return np.asarray(samples[-1], dtype=float)
+
+
+def _result_acceptance_rate(result) -> float | None:
+    """Extract one scalar conditional-sampler acceptance diagnostic."""
+
+    meta = getattr(result, "meta", {})
+    for key in ("accept_rate", "acceptance_fraction_mean"):
+        if key in meta and np.isfinite(float(meta[key])):
+            return float(meta[key])
+    return None
 
 
 def _call_continuous_sampler(sampler, posterior: Posterior, x0: np.ndarray, rng: np.random.Generator, kwargs):
