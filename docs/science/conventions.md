@@ -14,11 +14,16 @@ This page is the compact convention sheet for auditing a CompoSED analysis.
 
 ## Spectra
 
+These conventions describe the experimental spectral interface. Only the
+photometric pipeline is release-ready.
+
 - Wavelengths are observed-frame Angstrom.
 - Flux is observed $f_\lambda$ in
   `erg s^-1 cm^-2 Angstrom^-1`.
 - Wavelength arrays are one-dimensional and strictly increasing.
-- The current spectral Gaussian likelihood assumes diagonal uncertainties.
+- The current first-pass spectral Gaussian likelihood assumes diagonal
+  uncertainties and does not yet model covariance, calibration nuisance terms,
+  or a complete instrumental line-spread function.
 
 ## Redshift
 

@@ -251,7 +251,7 @@ class FSPSBackend(SEDBackend):
             kwargs = {
                 "zcontinuous": 1,
                 "sfh": 3,
-                "add_dust_emission": False,
+                "add_dust_emission": True,
                 "add_neb_emission": True,
                 "compute_vega_mags": False,
             }

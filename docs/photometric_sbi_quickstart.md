@@ -310,6 +310,6 @@ Prior coverage, simulator fidelity, the training noise distribution, and
 held-out rank/coverage diagnostics are part of the scientific model, not merely
 neural-network tuning details.
 
-For a complete known-posterior regression test, see
-[`maf_validation.md`](maf_validation.md) and run
-`examples/validate_maf_photometric_sbi.py`.
+For validation guidance and the maintained regression tests, see
+[`maf_validation.md`](maf_validation.md). End-to-end catalog workflows are in
+the [tutorial guide](tutorials/index.md).

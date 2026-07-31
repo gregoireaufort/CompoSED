@@ -1,11 +1,14 @@
 # Forward-Model Backends
 
-Every backend implements the same primary contract:
+Every backend implements the stable photometric contract:
 
 ```python
 predict_photometry(params, filters) -> ModelPhotometry
-predict_spectrum(params, wavelengths=...) -> ModelSpectrum
 ```
+
+FSPS and CIGALE currently also implement
+`predict_spectrum(params, wavelengths=...) -> ModelSpectrum`, but this is an
+experimental interface and does not make spectral fitting production-ready.
 
 The likelihood never imports FSPS or CIGALE. It consumes only these model
 containers and the backend's explicit mass-normalization declaration.

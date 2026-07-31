@@ -8,8 +8,8 @@ each notebook can focus on the inference workflow rather than catalog parsing.
 2. `01_fsps_maf_cosmos2020_catalog.ipynb` trains an FSPS continuity-SFH MAF and
    applies it to a large catalog.
 3. `02_cigale_maf_cosmos2020_catalog.ipynb` trains a CIGALE delayed-tau MAF.
-   Discrete BC03 metallicity is sampled by the simulator and marginalized when
-   it is not a neural target.
+   Its BC03 metallicity is an exact categorical target rather than a relaxed
+   continuous approximation.
 4. `03_cigale_tamis_single_galaxy.ipynb` fits one object with mixed continuous
    and discrete CIGALE parameters using `MixedTAMIS`.
 5. `04_fsps_pocomc_single_galaxy.ipynb` fits the same object with FSPS and
@@ -27,5 +27,5 @@ catalog data. Execute them in a validated backend environment and retain their
 run provenance.
 ```
 
-For shorter script examples, see
-[`examples`](https://github.com/gregoireaufort/CompoSED/tree/main/examples).
+The notebooks are the maintained user-facing workflows. Focused executable
+checks for individual contracts live in the test suite.

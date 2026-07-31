@@ -1,5 +1,12 @@
 # Validation Provenance Checklist
 
+```{admonition} Spectral artifacts
+:class: note
+References to spectra on this page concern experimental backend-validation
+artifacts. They do not make the spectral likelihood a stable fitting interface;
+only the pure photometric pipeline is release-ready.
+```
+
 Validation plots are only useful if the cached arrays behind them can be traced
 back to the code and model inputs that produced them.
 

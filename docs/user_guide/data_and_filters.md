@@ -43,6 +43,12 @@ convention before converting it.
 
 ## Spectra
 
+```{admonition} Experimental interface
+:class: warning
+`SpectrumDataset` and the spectral likelihood are not production-ready. The
+current interface is intended for scientific validation and API development.
+```
+
 `SpectrumDataset` uses:
 
 - observed wavelength in Angstrom;
@@ -63,6 +69,10 @@ spectrum = SpectrumDataset(
 The mask is applied to wavelength, flux, and sigma together.
 
 ## Joint data
+
+Joint spectrophotometric fitting is experimental for the same reason: the
+spectral term does not yet provide the full instrumental and covariance model
+expected for production analyses.
 
 ```python
 data = SpectroPhotometricDataset(

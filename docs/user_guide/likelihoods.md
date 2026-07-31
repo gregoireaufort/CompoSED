@@ -76,11 +76,17 @@ an error; implicit inference from class names or flux scale is forbidden.
 
 ## Spectra and joint fits
 
+```{admonition} Experimental interface
+:class: warning
+Only the photometric likelihood is release-ready. Spectral and joint
+spectrophotometric likelihoods are retained for development and validation.
+```
+
 The spectral likelihood uses active observed pixels on the supplied wavelength
 grid and the same mass-normalization rule. A joint
 `SpectroPhotometricDataset` sums the two data likelihoods and adds the prior
 once.
 
-The stable spectral likelihood is diagonal Gaussian. Covariance matrices,
-calibration nuisance models, and instrumental line-spread convolution are not
-part of the 0.1 likelihood.
+The current first-pass spectral likelihood is diagonal Gaussian. Covariance
+matrices, calibration nuisance models, and instrumental line-spread
+convolution are not implemented, which is why this path is experimental.

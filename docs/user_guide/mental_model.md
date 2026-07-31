@@ -14,8 +14,10 @@ quantities:
 
 ```python
 model = backend.predict_photometry(params, filters)
-spectrum = backend.predict_spectrum(params, wavelengths=wave_obs)
 ```
+
+`predict_spectrum(...)` also exists as an experimental development interface;
+it is not part of the release-ready fitting workflow.
 
 It owns the call to FSPS or CIGALE, redshifting, luminosity distance, and filter
 integration. It must declare whether its output is absolute or per unit
@@ -39,10 +41,10 @@ parameters = ParameterSpace(
 
 ## 3. Data
 
-`SEDDataset`, `SpectrumDataset`, or `SpectroPhotometricDataset` records the
-observed arrays and the mask actually consumed by the likelihood. Data are
-single-object containers; catalog workflows stack many such objects or use an
-amortized neural posterior.
+The stable `SEDDataset` records the observed photometric arrays and the mask
+actually consumed by the likelihood. Data are single-object containers;
+catalog workflows stack many such objects or use an amortized neural posterior.
+`SpectrumDataset` and `SpectroPhotometricDataset` are experimental.
 
 ## 4. Likelihood
 

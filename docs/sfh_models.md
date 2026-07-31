@@ -130,9 +130,9 @@ CIGALE v2022.0 evaluates these native histories on a 1 Myr grid. CompoSED
 converts Gyr parameters to the nearest integer Myr and records no claim that a
 finite FSPS grid and CIGALE's native discrete history are pointwise identical.
 
-The real-engine adapter check is:
+The backend SFH checks are:
 
 ```bash
-SPS_HOME=/path/to/fsps python examples/validate_named_sfh_backends.py fsps
-python examples/validate_named_sfh_backends.py cigale
+SPS_HOME=/path/to/fsps python -m pytest -q -m fsps tests/test_fsps_backend.py
+python -m pytest -q -m cigale tests/test_cigale_backend.py
 ```

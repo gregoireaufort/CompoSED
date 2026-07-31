@@ -27,6 +27,8 @@ checks. Passing unit tests does not establish posterior calibration.
 
 ## Scientific
 
+- [x] The documented stable release surface is photometry-only; spectral and
+  joint spectrophotometric interfaces are labeled experimental.
 - [x] Mass scaling is applied exactly once and `log10_mass` means present-day
   surviving stellar mass for every stable backend.
 - [x] FSPS photometry agrees with the independent direct FSPS/sedpy reference.

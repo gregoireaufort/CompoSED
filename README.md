@@ -2,6 +2,11 @@
 
 Composable Bayesian SED fitting and photo-z inference.
 
+The release-ready CompoSED workflow is **photometry only**. Backend spectrum
+generation and spectral or joint spectrophotometric fitting remain
+experimental interfaces: they are available for development and validation,
+but are not part of the supported analysis pipeline yet.
+
 The documentation source starts at [`docs/index.md`](docs/index.md). It contains
 the workflow-oriented user guide, scientific conventions, capability matrix,
 and generated API reference. A local HTML build is:
@@ -73,7 +78,6 @@ print(like.log_prob(np.array([0.5])))
 ```
 
 Backends expose `predict_photometry(params, filters) -> ModelPhotometry` and
-may expose `predict_spectrum(params, wavelengths=...) -> ModelSpectrum`. They
 must declare their `MassNormalization`. The likelihood multiplies by
 `10**log10_mass` only for `MassNormalization.PER_SOLAR_MASS`. In the public
 contract, `log10_mass` is the present-day surviving stellar mass and per-mass
@@ -91,41 +95,6 @@ CompoSED is an inference/interface layer around scientific modeling codes. If
 you use the CIGALE or FSPS paths, cite those projects as well as CompoSED. See
 `docs/citations.md` for the current citation checklist and a short
 acknowledgement template.
-
-## Spectral likelihood
-
-Spectra use observed-frame Angstrom and observed `f_lambda` in
-`erg s^-1 cm^-2 Angstrom^-1`.
-
-```python
-import numpy as np
-
-from composed import GaussianSpectralLikelihood, ParameterSpace, SpectrumDataset
-from composed.backends.mock import MockBackend
-from composed.priors import DeltaPrior
-
-data = SpectrumDataset(
-    wavelength=np.array([5000.0, 5100.0, 5200.0]),
-    flux=np.array([1.0, 1.2, 0.9]),
-    sigma=np.array([0.1, 0.1, 0.1]),
-)
-
-backend = MockBackend(
-    flux=[],
-    spectrum_wavelength=[5000.0, 5100.0, 5200.0],
-    spectrum_flux=[1.0, 1.1, 0.95],
-)
-space = ParameterSpace(names=["z"], priors={"z": DeltaPrior(0.0)})
-like = GaussianSpectralLikelihood(backend, data, space)
-
-print(like.log_prob([0.0]))
-```
-
-`GaussianSpectralLikelihood` requests the model on the active data wavelength
-grid, applies the dataset mask to wavelength/flux/sigma together, and applies
-mass normalization with the same explicit rule as the photometric likelihood.
-Calibration polynomials, covariance matrices, and instrumental convolution are
-not included in this first pass.
 
 ## FSPS backend
 
@@ -156,8 +125,9 @@ phot = backend.predict_photometry(
 print(dict(zip(phot.band_names, phot.flux)))
 ```
 
-The backend returns observed-frame photometry in maggies and observed-frame
-spectra in `f_lambda` cgs per Angstrom. With the default
+The stable backend output is observed-frame photometry in maggies. Its
+experimental spectrum output uses observed-frame `f_lambda` cgs per Angstrom.
+With the default
 `MassNormalization.PER_SOLAR_MASS`, the tabular SFH is internally normalized
 to one solar mass formed. The backend then divides the FSPS spectrum by
 `sp.stellar_mass`, returning luminosity per one solar mass of surviving stars.
@@ -174,7 +144,8 @@ age conventions, normalization, and backend support.
 
 `CIGALEBackend` is optional and requires CIGALE/`pcigale` and its database. It
 uses CIGALE's `SedWarehouse.get_sed` API and returns observed-frame maggies for
-photometry and observed-frame `f_lambda` cgs per Angstrom for spectra. Native
+photometry. Its experimental spectrum output uses observed-frame `f_lambda`
+cgs per Angstrom. Native
 CIGALE filter names can be passed as strings; sedpy filters are also supported
 via `photometry_mode="sedpy"`.
 
@@ -221,8 +192,9 @@ phot_per_stellar_msun = backend.predict_photometry(
 Named CIGALE SFHs use native v2022.0 modules. The stable shared subset is
 constant, exponential, and delayed-tau; arbitrary native CIGALE SFH modules
 remain available through the original module-list API. See
-`examples/cigale_photometry_demo.py`, `docs/cigale_backend.md`, and
-[`docs/sfh_models.md`](docs/sfh_models.md).
+[`docs/cigale_backend.md`](docs/cigale_backend.md),
+[`docs/sfh_models.md`](docs/sfh_models.md), and the maintained
+[`COSMOS2020 tutorials`](notebooks/tutorials/README.md).
 
 The dedicated CIGALE environment pins NumPy 1.23.5 because upstream v2022.0's
 exact constant-SFH module still uses the removed `np.float` alias.
@@ -243,17 +215,11 @@ Run the optional pytest integration checks with:
 python -m pytest -q -m fsps
 ```
 
-Run the standalone numerical validation script with:
-
-```bash
-python examples/validate_fsps_backend.py
-```
-
-The script compares `FSPSBackend` against an independent direct
-`python-fsps` + `sedpy` calculation in the same environment. It checks flux
-shape, finite positive maggies, relative flux agreement, and AB magnitude
-agreement. CI or lightweight development environments may skip these tests when
-FSPS, sedpy, or `SPS_HOME` are unavailable.
+The marked integration test compares `FSPSBackend` against an independent
+direct `python-fsps` + `sedpy` calculation in the same environment. It checks
+flux shape, finite positive maggies, relative flux agreement, and AB magnitude
+agreement. CI or lightweight development environments may skip it when FSPS,
+sedpy, or `SPS_HOME` are unavailable.
 
 FSPS spectra are converted with the fixed constants
 `L_sun = 3.828e33 erg/s`, `1 pc = 3.085677581491367e18 cm`, and the AB
@@ -422,8 +388,7 @@ curved high-dimensional posteriors. Both expose physical-space `sample` and
 transforms. MAF additionally supports inferred `ChoicePrior` axes through an
 exact categorical posterior over their Cartesian support and a continuous flow
 conditioned on the selected category. Its `log_prob` is therefore a categorical
-log mass plus a continuous log density. MDN remains continuous-only. A complete
-small MDN run is in `examples/sbi_mdn_mock_photometry_demo.py`.
+log mass plus a continuous log density. MDN remains continuous-only.
 
 Uniform and log-uniform targets use invertible bounded transforms, so physical
 samples remain inside prior support without rejection. Catalog inference is
@@ -475,65 +440,9 @@ diagnostics = run_sbi_diagnostics(
 )
 ```
 
-TARP diagnostics are optional and require the external `tarp` package.  Normal
-rank and coverage diagnostics do not require torch, nflows, or TARP.  See
-`docs/sbi_diagnostics.md` and `examples/sbi_diagnostics_demo.py`.
-
-## Experimental conditional diffusion SBI
-
-`inftools.experimental.diffusion` ports the masked conditional diffusion idea
-used in the development notebooks into a generic array-based estimator. This
-code is not part of the stable CompoSED `0.1` public API. Import it from
-the experimental namespace explicitly; no diffusion names are exported from
-`composed`.
-
-It learns a joint feature vector such as:
-
-```text
-[magnitudes, optional magnitude_errors, physical_parameters]
-```
-
-The mask convention is:
-
-```python
-mask == True   # known / conditioned / clamped
-mask == False  # unknown / sampled
-```
-
-Known entries are reclamped at every reverse-diffusion step.  This lets the
-same trained model sample `parameters | photometry`, `photometry | parameters`,
-or mixed inpainting problems.
-
-```python
-import numpy as np
-
-from inftools.experimental.diffusion import ConditionalDiffusionEstimator, FeatureMetadata
-
-meta = FeatureMetadata.from_groups({
-    "mags": ["g", "r"],
-    "params": ["z", "log10_mass"],
-})
-
-estimator = ConditionalDiffusionEstimator(meta, model="mlp", hidden_features=64, device="auto")
-estimator.fit(
-    x_train,
-    mask_config={"unknown_fraction": {"mags": 0.0, "params": 1.0}},
-    epochs=20,
-    batch_size=128,
-)
-
-known = np.array([[g_obs, r_obs, np.nan, np.nan]])
-mask = np.array([[True, True, False, False]])
-samples = estimator.sample(known, mask, num_samples=512, steps=50)
-```
-
-This path requires torch and is explicitly experimental.  It does not call
-CompoSED backends by itself; feed it a precomputed training table from a
-forward model, simulation campaign, or empirical labeled dataset.  See
-`docs/experimental_diffusion_sbi.md` and
-`examples/experimental_diffusion_sbi_demo.py`.  `device="auto"` tries CUDA,
-then MPS, then CPU, validates a tiny float32 workload before training, and keeps
-diffusion tensors in float32 to avoid Apple MPS float64 failures.
+TARP diagnostics are optional and require the external `tarp` package. Normal
+rank and coverage diagnostics do not require torch, nflows, or TARP. See
+[`docs/sbi_diagnostics.md`](docs/sbi_diagnostics.md).
 
 ## Parallel MixedTAMIS evaluation
 

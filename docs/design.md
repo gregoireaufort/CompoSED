@@ -1,5 +1,12 @@
 # CompoSED Design Notes
 
+```{admonition} Release boundary
+:class: warning
+Only the photometric pipeline described here is release-ready. Spectral model
+outputs, spectral likelihoods, and joint spectrophotometric inference are
+first-pass experimental interfaces.
+```
+
 ## Package Architecture
 
 `composed` is split around stable interfaces rather than physical model details:
@@ -8,7 +15,8 @@
 - `priors.py` and `parameters.py` define scalar priors and the ordered parameter vector contract.
 - `filters.py` contains a thin `FilterSet` wrapper for backend filter objects.
 - `backends/` contains forward-model implementations behind a common interface.
-- `likelihood.py` evaluates backend-agnostic photometric and spectral likelihoods.
+- `likelihood.py` evaluates the stable backend-agnostic photometric likelihood
+  and the experimental spectral likelihood.
 - `problem.py` composes backend, parameter transform, data, likelihood, and sampler-facing callbacks.
 - `sfh.py` contains named, backend-independent SFH equations and their explicit backend adapters.
 - `transforms/` contains lower-level physical or catalog-specific transforms, such as Pop-COSMOS utilities.
@@ -29,13 +37,14 @@ predict_photometry(params, filters) -> ModelPhotometry
 element so the likelihood can align model and observed bands without assuming
 positional order. Duplicate names are invalid.
 
-Backends may also expose spectra:
+Backends may also expose spectra through an experimental contract:
 
 ```python
 predict_spectrum(params, wavelengths=None, wavelength_range=None, resolution=None) -> ModelSpectrum
 ```
 
-The first-pass spectral contract is intentionally simple and auditable:
+The first-pass spectral contract is intentionally simple and auditable, but is
+not production-ready:
 
 - `wavelengths` and `wavelength_range` are observed-frame Angstrom.
 - `ModelSpectrum.flux` is observed `f_lambda` in `erg s^-1 cm^-2 Angstrom^-1`.
@@ -140,10 +149,11 @@ problem.simulate(theta, noise_model, rng)
 problem.simulate_with_uncertainty(theta, noise_model, rng)
 ```
 
-Photometry and spectroscopy can be combined with
+Photometry and spectroscopy can be combined experimentally with
 `SpectroPhotometricDataset`; their likelihood terms are summed and the prior is
-added once. `fit(problem, method, seed=...)` performs inference-method
-capability checks and normalizes outputs to `InferenceResult`.
+added once. This joint path is not part of the stable release surface.
+`fit(problem, method, seed=...)` performs inference-method capability checks
+and normalizes outputs to `InferenceResult`.
 
 For photometric SBI, ``simulate_with_uncertainty`` returns the same active-band
 flux vector as the likelihood plus the raw ``sigma_catalog`` sampled by the
@@ -255,9 +265,12 @@ Catalog redshifts are not rounded by default. When grouping is requested, the
 input and evaluated redshifts are both retained and positive redshifts may not
 round to the special 10 pc `z=0` convention.
 
-`GaussianSpectralLikelihood` uses `SpectrumDataset.active_arrays()`, requests a
+The experimental `GaussianSpectralLikelihood` uses
+`SpectrumDataset.active_arrays()`, requests a
 model spectrum at the active observed wavelengths, checks that the returned
 wavelength grid matches the data grid, and then evaluates a diagonal Gaussian
 likelihood in the dataset flux units. Calibration polynomials, covariance
 matrices, line masks, and instrumental line-spread functions are intentionally
-left out of the first pass.
+left out of the first pass. Until those scientific components are implemented
+and validated, this must not be presented as a production spectrum-fitting
+pipeline.

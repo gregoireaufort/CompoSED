@@ -4,24 +4,31 @@ This page describes the supported combinations in CompoSED 0.1. It is a
 selection guide, not a claim that every optional scientific engine is installed
 in the same environment.
 
+```{admonition} Release scope
+:class: warning
+Only the pure photometric pipeline is release-ready. Spectrum generation,
+spectral likelihoods, and joint spectrophotometric fits are experimental.
+```
+
 ## Forward models
 
-| Backend | Photometry | Spectrum | Named SFHs | Status |
+| Backend | Photometry | Spectrum generation | Named SFHs | Status |
 |---|---:|---:|---:|---|
-| FSPS | yes | yes | yes | stable |
-| CIGALE v2022.0 | yes | yes | supported subset | stable |
-| Mock | yes | yes | not applicable | testing/examples |
-| Fast rest-frame catalog projection | yes | no | restricted | experimental |
+| FSPS | stable | experimental | yes | photometry stable |
+| CIGALE v2022.0 | stable | experimental | supported subset | photometry stable |
+| Mock | testing | experimental testing | not applicable | testing |
+| Fast rest-frame catalog projection | experimental | no | restricted | experimental |
 
 FSPS requires `python-fsps`, sedpy, and `SPS_HOME`. CIGALE is installed
 separately from its upstream v2022.0 release. See {doc}`install`.
 
 ## Observations
 
-| Data | Gaussian detections | Masks | Upper limits | Joint fit |
-|---|---:|---:|---:|---:|
-| Photometry | yes | yes | one-sided Gaussian CDF | yes |
-| Spectrum | yes | yes | no | yes |
+| Data | Gaussian detections | Masks | Upper limits | Status |
+|---|---:|---:|---:|---|
+| Photometry | yes | yes | one-sided Gaussian CDF | stable |
+| Spectrum | first pass | first pass | no | experimental |
+| Joint spectrophotometry | first pass | first pass | photometry only | experimental |
 
 Photometric upper limits are represented in linear flux units. The model is
 compared to a flux ceiling; an AB limiting magnitude must therefore be

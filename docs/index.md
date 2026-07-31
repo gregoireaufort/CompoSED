@@ -43,9 +43,11 @@ backend configuration, simulation noise, and random seeds.
 
 ```{admonition} Release scope
 :class: note
-The stable release backends are FSPS and CIGALE v2022.0. Neural MAF and MDN
-posterior estimators are stable optional layers. Conditional diffusion and fast
-rest-frame catalog projection remain experimental and are labeled accordingly.
+The release-ready inference pipeline is photometric. FSPS and CIGALE v2022.0
+are stable photometric backends, and neural MAF and MDN posterior estimators are
+stable optional photometric layers. Spectrum generation, spectral and joint
+likelihoods, conditional diffusion, and fast rest-frame catalog projection
+remain experimental and are labeled accordingly.
 ```
 
 ## Start here

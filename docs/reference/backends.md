@@ -1,5 +1,12 @@
 # Backends
 
+```{admonition} Stability
+:class: warning
+`predict_photometry` and `ModelPhotometry` form the stable backend contract.
+`predict_spectrum` and `ModelSpectrum` are experimental development
+interfaces; their presence does not imply a production-ready spectral fit.
+```
+
 ## Common contract
 
 ```{automodule} composed.backends.base

@@ -1,5 +1,9 @@
 # User Guide
 
+This guide documents the release-ready photometric workflow. Sections that
+describe spectrum generation, spectral likelihoods, or joint
+spectrophotometric fits are explicitly experimental.
+
 The guide follows the order in which a scientist constructs and audits an
 analysis:
 

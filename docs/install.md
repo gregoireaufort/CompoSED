@@ -63,10 +63,10 @@ export SPS_HOME=/path/to/fsps
 
 python -m pip install -e ".[fsps,plot]"
 python scripts/check_environment.py --fsps
-python examples/validate_fsps_backend.py
+python -m pytest -q -m fsps tests/test_fsps_backend.py tests/test_fsps_real_validation.py
 ```
 
-The validation script checks a real `FSPSBackend` call against a direct
+The marked validation test checks a real `FSPSBackend` call against a direct
 `python-fsps` + `sedpy` calculation in the same environment.
 
 This environment intentionally does not install notebooks, pocomc, emcee,
@@ -115,7 +115,7 @@ conda activate composed-cigale
 python -m pip install -e ".[cigale,plot]"
 
 python scripts/check_environment.py --cigale
-python examples/cigale_photometry_demo.py
+python -m pytest -q -m cigale tests/test_cigale_backend.py
 ```
 
 The dedicated recipe pins NumPy 1.23.5 because CIGALE v2022.0's native
@@ -149,7 +149,7 @@ pre-existing paired photometric dataset.
 ```bash
 python -m pip install -e ".[sbi]"
 python scripts/check_environment.py --sbi
-python examples/sbi_mock_photometry_demo.py
+python -m pytest -q tests/test_sbi.py tests/test_sbi_pipeline.py
 ```
 
 The MDN only requires torch:
@@ -157,14 +157,13 @@ The MDN only requires torch:
 ```bash
 python -m pip install -e ".[mdn]"
 python scripts/check_environment.py --mdn
-python examples/sbi_mdn_mock_photometry_demo.py
 ```
 
 The conditional diffusion path is experimental and uses torch only:
 
 ```bash
 python -m pip install -e ".[diffusion]"
-python examples/minimal_photometric_diffusion_sbi.py
+python -m pytest -q -m diffusion tests/test_experimental_diffusion.py
 ```
 
 GPU/MPS/CUDA choices are torch installation issues rather than CompoSED API

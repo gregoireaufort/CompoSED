@@ -25,6 +25,12 @@ The spectral mJy-to-`f_lambda` conversion uses
 metadata and regression-tested. No solar-luminosity constant is introduced:
 native CIGALE W/nm and mJy are preserved through these conversions.
 
+```{admonition} Experimental spectrum output
+:class: warning
+The conversion above documents the backend's experimental spectrum output.
+Only CIGALE photometry is part of the release-ready CompoSED fitting pipeline.
+```
+
 Observed-frame photometry should include CIGALE's `redshifting` module. CIGALE's
 current `redshifting` module also applies its built-in IGM attenuation while
 redshifting the spectrum. In the pinned CIGALE v2022.0 engine this module uses
@@ -64,14 +70,16 @@ surviving stellar mass. The original `sfh.integrated`, `stellar.m_star`, and
 their ratio remain available in `ModelPhotometry.metadata` or
 `ModelSpectrum.metadata` for inspection.
 
-The standalone numerical check can be run in the CIGALE environment with:
+The backend and surviving-mass normalization checks can be run in the CIGALE
+environment with:
 
 ```bash
-python examples/validate_cigale_mass_normalization.py
+python -m pytest -q -m cigale tests/test_cigale_backend.py
 ```
 
-It compares the backend against an independent direct `SedWarehouse` call and
-explicit division by `stellar.m_star`.
+The marked tests call the real engine where available; the ordinary unit tests
+also check the explicit division by `stellar.m_star` with a controlled
+`SedWarehouse` response.
 
 ## Parameter Specs
 

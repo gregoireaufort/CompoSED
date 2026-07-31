@@ -50,10 +50,10 @@ any rare backend/noise failures are explicitly replaced with
 labels the resulting parameter distribution as simulator-success-conditioned.
 
 The CIGALE MAF simulation prior includes the same finite BC03 metallicity
-choices as the mixed-TAMIS tutorial. Metallicty is not a neural target in that
-notebook, so the MAF posterior over the continuous target parameters is
-marginalized over the simulated metallicity prior. The displayed physical SFH
-curve states the metallicity value used for that derived visualization.
+choices as the mixed-TAMIS tutorial. Metallicity is an explicit categorical
+neural target: CompoSED learns its exact posterior probability on the declared
+BC03 support and conditions the continuous flow on that category. It never
+interpolates continuously between BC03 templates.
 
 The CIGALE notebooks require the upstream v2022.0 engine and database described
 in `docs/install.md`. The FSPS notebooks require python-fsps, sedpy, and a valid
@@ -61,10 +61,6 @@ in `docs/install.md`. The FSPS notebooks require python-fsps, sedpy, and a valid
 `sbi` extras respectively; the self-contained TAMIS path does not use the
 separate historical `TAMIS` Python package.
 
-After training either MAF, its held-out simulator calibration can be generated
-without retraining:
-
-```bash
-python examples/validate_cosmos2020_maf_calibration.py fsps
-python examples/validate_cosmos2020_maf_calibration.py cigale
-```
+After training either MAF, use the held-out simulation and diagnostics cells in
+the corresponding tutorial to inspect ranks, marginal coverage, and posterior
+residuals without treating catalog estimates as truth.

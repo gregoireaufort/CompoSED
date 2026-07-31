@@ -1,8 +1,10 @@
 # API Reference
 
-The reference is curated around the supported user surface. Start with
-{doc}`../user_guide/mental_model` if you are choosing components rather than
-looking up a known name.
+The reference includes both the stable photometric surface and experimental
+interfaces. Spectrum generation, spectral likelihoods, and joint
+spectrophotometric fitting are experimental even when their classes appear
+here. Start with {doc}`../user_guide/mental_model` if you are choosing
+components rather than looking up a known name.
 
 ```{toctree}
 :maxdepth: 1

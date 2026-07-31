@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Clarified the release boundary throughout the documentation: only the pure
+  photometric pipeline is stable; spectrum generation, spectral likelihoods,
+  and joint spectrophotometric fitting remain experimental.
 - Added a Sphinx/MyST/Furo documentation site with a workflow-oriented user
   guide, scientific-convention sheet, capability matrix, curated API
   reference, offline strict build, Read the Docs configuration, and
@@ -95,8 +98,7 @@ First public alpha release.
 
 ### Stable public surface
 
-- Unified `Problem` and `fit` workflow for photometric, spectral, and joint
-  spectrophotometric inference.
+- Unified stable `Problem` and `fit` workflow for photometric inference.
 - Explicit masks, Gaussian errors, sigma floors, censored photometric upper
   limits, flux units, and surviving-stellar-mass normalization.
 - FSPS and CIGALE v2022.0 forward-model backends.
@@ -112,6 +114,8 @@ First public alpha release.
 
 ### Experimental
 
+- Spectrum generation, spectral likelihoods, and joint spectrophotometric
+  inference are first-pass experimental interfaces.
 - Conditional diffusion remains in an explicit experimental namespace and is
   not part of the stable 0.1 API.
 - The finite-difference Laplace runner, the adapter for the separately

@@ -1,13 +1,16 @@
 # Public API Inventory
 
-This checklist maps the stable `composed` namespace and its documented
-submodules to the reference pages. It is maintained deliberately; adding an
-export without a documentation category is a release-review failure.
+This checklist maps the `composed` namespace and its documented submodules to
+the reference pages. The stable release surface is photometric; experimental
+exports are identified explicitly. Adding an export without a documentation
+category is a release-review failure.
 
 ## Data and model contracts
 
-- Data: `SEDDataset`, `SpectrumDataset`, `SpectroPhotometricDataset`
-- Model outputs: `ModelPhotometry`, `ModelSpectrum`, `SEDBackend`
+- Stable data: `SEDDataset`
+- Experimental data: `SpectrumDataset`, `SpectroPhotometricDataset`
+- Stable model output: `ModelPhotometry`, `SEDBackend.predict_photometry`
+- Experimental model output: `ModelSpectrum`, `SEDBackend.predict_spectrum`
 - Filters: `FilterSet`, `load_filter_set`
 - Units: `MassNormalization`, `MassReference`
 - Domain failures: `ModelDomainError`
@@ -25,8 +28,8 @@ export without a documentation category is a release-review failure.
 ## Statistical problem
 
 - Likelihood configuration: `Gaussian`
-- Direct likelihoods: `GaussianPhotometricLikelihood`,
-  `GaussianSpectralLikelihood`
+- Stable direct likelihood: `GaussianPhotometricLikelihood`
+- Experimental direct likelihood: `GaussianSpectralLikelihood`
 - Composition: `Problem`
 - Execution: `fit`
 

@@ -58,6 +58,27 @@ def test_constructing_fsps_backend_raises_helpful_error_if_fsps_missing(monkeypa
         FSPSBackend()
 
 
+def test_fsps_dust_emission_defaults_to_python_fsps_and_can_be_overridden(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    captured_kwargs = []
+    fake_fsps = types.ModuleType("fsps")
+
+    def stellar_population(**kwargs):
+        captured_kwargs.append(dict(kwargs))
+        return FakeStellarPopulation()
+
+    fake_fsps.StellarPopulation = stellar_population
+    monkeypatch.setitem(sys.modules, "fsps", fake_fsps)
+
+    FSPSBackend()._stellar_population()
+    FSPSBackend(sp_kwargs={"add_dust_emission": False})._stellar_population()
+
+    assert captured_kwargs[0]["add_dust_emission"] is True
+    assert captured_kwargs[1]["add_dust_emission"] is False
+
+
 def test_invalid_sfh_time_grid_raises_clear_error(monkeypatch):
     import composed.backends.fsps as fsps_backend
 
