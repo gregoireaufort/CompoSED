@@ -29,6 +29,17 @@ result = fit(
 )
 ```
 
+For Problem-based SBI, ``infer=`` selects parameters; it does not define a
+second numerical ordering. CompoSED arranges selected targets in the canonical
+``problem.parameters.names`` order before building the training matrix. The
+neural ``sample()`` and ``log_prob()`` methods use
+``result.inference_state.theta_names`` in that canonical order.
+``result.parameter_names`` preserves the inferred order but may additionally
+contain conditioned or ``DeltaPrior`` columns. The sequence originally
+supplied to ``infer=`` is retained as ``requested_infer`` in the training and
+fit metadata. For SBI trained from pre-existing arrays,
+``SBITrainingSet.theta_names`` remains the authoritative column order.
+
 The simulation path:
 
 1. samples `theta` from `Problem.parameters`;

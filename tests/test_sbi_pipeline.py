@@ -161,6 +161,25 @@ def test_problem_simulation_is_the_declared_sbi_source():
     assert training.metadata["problem"] == problem.specification()
 
 
+def test_problem_simulation_canonicalizes_requested_infer_order():
+    problem = toy_problem()
+    requested = ("log10_mass", "z")
+    training = simulate_sbi_training_set(
+        problem,
+        Simulate(n=12, noise_fn=zero_noise, infer=requested, context="flux"),
+        rng=124,
+    )
+
+    # infer= selects axes. ParameterSpace.names determines every numerical
+    # column order used by Problem-based simulation, training, and inference.
+    assert problem.parameters.names == ("z", "log10_mass", "dust")
+    assert training.theta_names == ("z", "log10_mass")
+    assert training.metadata["requested_infer"] == requested
+    assert training.metadata["inferred_parameter_names"] == training.theta_names
+    assert np.array_equal(training.theta[:, 0], training.theta_full[:, 0])
+    assert np.array_equal(training.theta[:, 1], training.theta_full[:, 1])
+
+
 def test_problem_simulation_separates_condition_columns_from_inferred_targets():
     problem = toy_problem()
     training = simulate_sbi_training_set(
@@ -240,6 +259,74 @@ def test_problem_fit_sbi_uses_conditions_as_training_context(monkeypatch):
     assert result.metadata["conditions"] == {"z": 0.35}
     assert result.metadata["conditioned_parameter_names"] == ("z",)
     assert result.metadata["marginalized_parameter_names"] == ("dust",)
+
+
+def test_problem_fit_and_trained_posterior_share_canonical_target_order(monkeypatch):
+    import composed.sbi as sbi_module
+
+    problem = toy_problem()
+    requested = ("log10_mass", "z")
+    seen = {}
+
+    class FakeTrained:
+        def __init__(self, training_set):
+            self.training_set = training_set
+            self.theta_names = training_set.theta_names
+            self.history = {"train_loss": [1.0]}
+            self.estimator = type("Estimator", (), {"device": "cpu"})()
+
+        def sample(
+            self,
+            photometry,
+            *,
+            conditions=None,
+            num_samples,
+            batch_size=None,
+            seed=None,
+        ):
+            del photometry, conditions, batch_size, seed
+            assert self.theta_names == ("z", "log10_mass")
+            one_draw = np.asarray([0.25, 10.5], dtype=float)
+            return np.broadcast_to(
+                one_draw,
+                (1, int(num_samples), one_draw.size),
+            ).copy()
+
+        def log_prob(self, theta, photometry, **kwargs):
+            del photometry, kwargs
+            seen["density_input"] = np.asarray(theta, dtype=float)
+            return -1.0
+
+    def fake_train_sbi(training_set, method, *, seed=None):
+        del method, seed
+        seen["training_set"] = training_set
+        return FakeTrained(training_set)
+
+    monkeypatch.setattr(sbi_module, "train_sbi", fake_train_sbi)
+
+    result = fit(
+        problem,
+        method=MAF(num_samples=4),
+        training=Simulate(
+            n=24,
+            noise_fn=small_noise,
+            infer=requested,
+        ),
+        seed=25,
+    )
+
+    posterior = result.inference_state
+    assert posterior.theta_names == ("z", "log10_mass")
+    assert result.parameter_names == posterior.theta_names
+    assert np.all(result.samples == np.asarray([0.25, 10.5]))
+    assert result.metadata["requested_infer"] == requested
+    assert result.metadata["inferred_parameter_names"] == posterior.theta_names
+    assert seen["training_set"].metadata["requested_infer"] == requested
+
+    direct = posterior.sample(problem.data, num_samples=3)[0]
+    assert np.all(direct == np.asarray([0.25, 10.5]))
+    posterior.log_prob(np.asarray([0.25, 10.5]), problem.data)
+    assert np.array_equal(seen["density_input"], np.asarray([0.25, 10.5]))
 
 
 def test_problem_fit_sbi_rejects_target_condition_overlap():
@@ -1195,7 +1282,7 @@ def test_train_maf_photometric_sbi_shape():
 
 
 @pytest.mark.sbi
-def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
+def test_standalone_preexisting_maf_and_problem_fit_share_training_api(tmp_path):
     if importlib.util.find_spec("torch") is None or importlib.util.find_spec("nflows") is None:
         pytest.skip("torch/nflows are not installed.")
 
@@ -1217,8 +1304,9 @@ def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
     assert trained.training_set.source == "presampled_forward_model"
     assert trained.sample(x[:2], num_samples=5).shape == (2, 5, 2)
 
+    problem = toy_problem()
     result = fit(
-        toy_problem(),
+        problem,
         method=MAF(
             hidden_features=16,
             num_transforms=2,
@@ -1227,16 +1315,36 @@ def test_standalone_preexisting_maf_and_problem_fit_share_training_api():
             batch_size=16,
             num_samples=5,
         ),
-        training=Simulate(n=64, noise_fn=small_noise, infer=["z", "log10_mass"]),
+        training=Simulate(n=64, noise_fn=small_noise, infer=["log10_mass", "z"]),
         seed=35,
     )
     assert result.samples.shape == (5, 2)
+    assert result.parameter_names == ("z", "log10_mass")
     assert result.logp is None
     assert result.map_estimate is None
     assert result.inference_state.training_set.source == "composed.problem.simulate"
     assert result.inference_state.training_set.context.mode == "snr_logsigma"
+    assert result.inference_state.theta_names == result.parameter_names
+    assert result.metadata["requested_infer"] == ("log10_mass", "z")
+    assert result.metadata["inferred_parameter_names"] == result.parameter_names
     assert np.all((result.samples[:, 0] >= 0.0) & (result.samples[:, 0] <= 1.0))
     assert np.all((result.samples[:, 1] >= 9.0) & (result.samples[:, 1] <= 11.0))
+    assert np.all(
+        np.isfinite(
+            result.inference_state.log_prob(
+                result.samples,
+                problem.data,
+            )
+        )
+    )
+
+    checkpoint = result.inference_state.save(tmp_path / "canonical_order_maf")
+    restored = TrainedMAFSBI.load(checkpoint, device="cpu")
+    assert restored.theta_names == ("z", "log10_mass")
+    assert tuple(
+        restored.metadata["training_set_metadata"]["requested_infer"]
+    ) == ("log10_mass", "z")
+    assert np.all(np.isfinite(restored.log_prob(result.samples, problem.data)))
 
 
 @pytest.mark.sbi

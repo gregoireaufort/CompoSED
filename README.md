@@ -317,6 +317,15 @@ posterior = result.inference_state
 posterior.save("runs/photoz_maf")
 ```
 
+In Problem-based SBI, `infer=` selects target names but does not establish a
+separate column convention. Targets are ordered according to
+`problem.parameters.names`. `posterior.theta_names` is the canonical inferred
+subset used by `sample()` and `log_prob()`; `result.parameter_names` preserves
+that order while possibly adding conditioned or `DeltaPrior` columns. The
+originally requested sequence is retained in
+`result.metadata["requested_infer"]` for provenance. Pre-existing-array SBI
+instead uses the explicitly supplied `SBITrainingSet.theta_names` order.
+
 The three uncertainties in this workflow are deliberately separate:
 
 - `sigma_catalog` is the raw survey uncertainty. It is stored in

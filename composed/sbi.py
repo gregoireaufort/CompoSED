@@ -1395,7 +1395,14 @@ PhotometricTrainingSet = SBITrainingSet
 
 @dataclass(frozen=True)
 class Simulate:
-    """Training simulations drawn from the declared Problem prior and simulator."""
+    """Training simulations drawn from the declared Problem prior and simulator.
+
+    For Problem-based SBI, ``infer`` selects parameters but does not define a
+    numerical column order. Selected targets are always arranged in the
+    canonical ``Problem.parameters.names`` order before simulation products
+    are transformed or passed to a neural estimator. The requested sequence is
+    retained in training and result metadata for provenance.
+    """
 
     n: int
     noise_fn: Callable[[np.ndarray], np.ndarray] | None = None
@@ -2859,6 +2866,17 @@ def simulate_sbi_training_set(
     if not isinstance(problem.data, SEDDataset):
         raise NotImplementedError("Problem-driven SBI currently supports photometric SEDDataset observations.")
 
+    condition_names = _ordered_parameter_subset(
+        problem.parameters.names,
+        simulation.condition_on,
+        label="condition_on",
+    )
+    requested_infer, inferred_names = _canonical_sbi_targets(
+        problem.parameters.names,
+        simulation.infer,
+        condition_names=condition_names,
+    )
+
     generator = np.random.default_rng(rng)
     theta_full, x_native, sigma_native, sim_metadata = simulate_training_set(
         problem.parameters,
@@ -2876,33 +2894,13 @@ def simulate_sbi_training_set(
         mp_context=simulation.mp_context,
         return_sigma=True,
     )
-    condition_names = _ordered_parameter_subset(
-        problem.parameters.names,
-        simulation.condition_on,
-        label="condition_on",
-    )
-    inferred_request = (
-        tuple(
-            name
-            for name in problem.parameters.names
-            if name not in set(condition_names)
-        )
-        if simulation.infer is None
-        else tuple(str(name) for name in simulation.infer)
-    )
-    overlap = sorted(set(inferred_request) & set(condition_names))
-    if overlap:
-        raise ValueError(
-            "Parameters cannot be both inferred and conditioned: "
-            + ", ".join(overlap)
-        )
-    if not inferred_request:
-        raise ValueError("SBI requires at least one inferred parameter.")
-    inferred_names, theta = _select_inferred_parameters(
+    selected_names, theta = _select_inferred_parameters(
         theta_full,
         problem.parameters.names,
-        inferred_request,
+        inferred_names,
     )
+    if selected_names != inferred_names:
+        raise RuntimeError("Internal SBI target ordering changed after simulation.")
     parameter_index = {
         name: index for index, name in enumerate(problem.parameters.names)
     }
@@ -2983,6 +2981,8 @@ def simulate_sbi_training_set(
             "flux_unit": problem.data.flux_unit,
             "feature_transform": transform_name,
             "photometric_context": context.specification(),
+            "requested_infer": requested_infer,
+            "inferred_parameter_names": inferred_names,
             "conditioned_parameter_names": condition_names,
             "observation_state": {
                 "availability": "1 for every active simulated band",
@@ -3329,33 +3329,11 @@ def fit_sbi_problem(
             )
         canonical_conditions[name] = value
 
-    inferred_names = (
-        tuple(
-            name
-            for name in problem.parameters.names
-            if name not in set(condition_names)
-        )
-        if simulation.infer is None
-        else tuple(str(name) for name in simulation.infer)
+    requested_infer, inferred_names = _canonical_sbi_targets(
+        problem.parameters.names,
+        simulation.infer,
+        condition_names=condition_names,
     )
-    if len(set(inferred_names)) != len(inferred_names):
-        raise ValueError("infer parameter names must be unique.")
-    unknown_inferred = sorted(
-        set(inferred_names) - set(problem.parameters.names)
-    )
-    if unknown_inferred:
-        raise ValueError(
-            "infer contains unknown parameter(s): "
-            + ", ".join(unknown_inferred)
-        )
-    overlap = sorted(set(inferred_names) & set(condition_names))
-    if overlap:
-        raise ValueError(
-            "Parameters cannot be both inferred and conditioned: "
-            + ", ".join(overlap)
-        )
-    if not inferred_names:
-        raise ValueError("SBI requires at least one inferred parameter.")
     _validate_sbi_targets(
         problem.parameters,
         inferred_names,
@@ -3369,7 +3347,6 @@ def fit_sbi_problem(
 
     effective_simulation = replace(
         simulation,
-        infer=inferred_names,
         condition_on=condition_names,
     )
     training_set = simulate_sbi_training_set(
@@ -3377,6 +3354,8 @@ def fit_sbi_problem(
         effective_simulation,
         rng=seed,
     )
+    if training_set.theta_names != inferred_names:
+        raise RuntimeError("Problem-based SBI target ordering changed during simulation.")
     trained = train_sbi(training_set, method, seed=seed)
     samples = _sample_problem_posterior(
         problem,
@@ -3424,6 +3403,7 @@ def fit_sbi_problem(
             ),
             "target_transform": training_set.theta_transform.specification(),
             "conditions": canonical_conditions,
+            "requested_infer": requested_infer,
             "conditioned_parameter_names": condition_names,
             "inferred_parameter_names": training_set.theta_names,
             "fixed_parameter_names": fixed_names,
@@ -4055,6 +4035,39 @@ def _ordered_parameter_subset(
     return tuple(name for name in parameter_names if name in requested_set)
 
 
+def _canonical_sbi_targets(
+    parameter_names: Sequence[str],
+    infer: Sequence[str] | None,
+    *,
+    condition_names: Sequence[str] = (),
+) -> tuple[tuple[str, ...] | None, tuple[str, ...]]:
+    """Resolve requested SBI targets into the model's canonical order."""
+
+    parameter_names = tuple(str(name) for name in parameter_names)
+    condition_names = tuple(str(name) for name in condition_names)
+    requested_infer = (
+        None if infer is None else tuple(str(name) for name in infer)
+    )
+    inferred_names = (
+        tuple(name for name in parameter_names if name not in set(condition_names))
+        if requested_infer is None
+        else _ordered_parameter_subset(
+            parameter_names,
+            requested_infer,
+            label="infer",
+        )
+    )
+    overlap = sorted(set(inferred_names) & set(condition_names))
+    if overlap:
+        raise ValueError(
+            "Parameters cannot be both inferred and conditioned: "
+            + ", ".join(overlap)
+        )
+    if not inferred_names:
+        raise ValueError("SBI requires at least one inferred parameter.")
+    return requested_infer, inferred_names
+
+
 def _condition_matrix(
     values,
     *,
@@ -4136,13 +4149,13 @@ def _select_inferred_parameters(
     infer: Sequence[str] | None,
 ) -> tuple[tuple[str, ...], np.ndarray]:
     parameter_names = tuple(str(name) for name in parameter_names)
-    inferred_names = parameter_names if infer is None else tuple(str(name) for name in infer)
-    if len(set(inferred_names)) != len(inferred_names):
-        raise ValueError("infer parameter names must be unique.")
+    requested = parameter_names if infer is None else tuple(str(name) for name in infer)
+    inferred_names = _ordered_parameter_subset(
+        parameter_names,
+        requested,
+        label="infer",
+    )
     name_to_index = {name: i for i, name in enumerate(parameter_names)}
-    missing = [name for name in inferred_names if name not in name_to_index]
-    if missing:
-        raise ValueError(f"infer contains unknown parameter(s): {', '.join(missing)}")
     indices = [name_to_index[name] for name in inferred_names]
     return inferred_names, np.asarray(theta_full, dtype=float)[:, indices]
 

@@ -99,6 +99,12 @@ plot_effective_prior(
 )
 ```
 
+Here ``infer=["zred", "log10_mass"]`` selects the targets. Their array order
+is always the corresponding order in ``problem.parameters.names``; inspect
+``posterior.theta_names`` or ``result.parameter_names`` rather than relabelling
+columns with the literal ``infer=`` list. CompoSED records the requested list
+separately in ``result.metadata["requested_infer"]``.
+
 `samples` has shape `(num_samples, n_parameters)` for the observed object.
 The fitted `UniformPrior` and `LogUniformPrior` bounds are encoded through
 invertible transforms, so the MAF produces physical samples inside prior
