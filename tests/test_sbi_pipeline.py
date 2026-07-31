@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import warnings
 
 import numpy as np
 import pytest
@@ -18,6 +19,8 @@ from composed.sbi import (
     MDN,
     PhotometricContext,
     PriorSupportTransform,
+    SBIContextSupportWarning,
+    SBIPosteriorSaturationWarning,
     SBITrainingSet,
     Simulate,
     TrainedDiffusionSBI,
@@ -710,6 +713,97 @@ def test_maf_catalog_sampling_chunks_context_rows_without_object_loops():
     assert summary.mean.dtype == np.float32
 
 
+def test_trained_maf_warns_on_context_extrapolation_without_clipping():
+    class RecordingEstimator:
+        theta_dim = 1
+        x_dim = 1
+
+        def __init__(self):
+            self.context = None
+
+        def sample(self, context, num_samples):
+            self.context = np.asarray(context, dtype=float)
+            return np.zeros((self.context.shape[0], int(num_samples), 1))
+
+    training = SBITrainingSet.from_arrays(
+        theta=np.asarray([[0.2], [0.8]]),
+        x=np.asarray([[0.0], [1.0]]),
+        theta_names=["z"],
+        x_names=["flux"],
+        source="context_support_test",
+        parameter_space=ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)}),
+    )
+    estimator = RecordingEstimator()
+    trained = TrainedMAFSBI(estimator, training, history={})
+
+    with pytest.warns(SBIContextSupportWarning, match="outside"):
+        samples = trained.sample(np.asarray([[1.5]]), num_samples=16)
+
+    assert samples.shape == (1, 16, 1)
+    assert np.array_equal(estimator.context, [[1.5]])
+    assert trained.schema["context_feature_min"] == [0.0]
+    assert trained.schema["context_feature_max"] == [1.0]
+
+
+def test_trained_maf_warns_when_bounded_posterior_saturates_at_edge():
+    class SaturatedEstimator:
+        theta_dim = 1
+        x_dim = 1
+
+        def sample(self, context, num_samples):
+            n_object = np.asarray(context).shape[0]
+            return np.full((n_object, int(num_samples), 1), 8.0)
+
+    training = SBITrainingSet.from_arrays(
+        theta=np.asarray([[0.2], [0.8]]),
+        x=np.asarray([[0.0], [1.0]]),
+        theta_names=["z"],
+        x_names=["flux"],
+        source="boundary_saturation_test",
+        parameter_space=ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)}),
+    )
+    trained = TrainedMAFSBI(SaturatedEstimator(), training, history={})
+
+    with pytest.warns(SBIPosteriorSaturationWarning, match="upper edge"):
+        samples = trained.sample(np.asarray([[0.5]]), num_samples=32)
+
+    assert np.all(samples > 0.99)
+
+
+def test_trained_maf_does_not_warn_for_broad_central_bounded_posterior():
+    class BroadEstimator:
+        theta_dim = 1
+        x_dim = 1
+
+        def sample(self, context, num_samples):
+            n_object = np.asarray(context).shape[0]
+            values = np.linspace(-2.0, 2.0, int(num_samples))
+            return np.broadcast_to(
+                values[None, :, None],
+                (n_object, int(num_samples), 1),
+            ).copy()
+
+    training = SBITrainingSet.from_arrays(
+        theta=np.asarray([[0.2], [0.8]]),
+        x=np.asarray([[0.0], [1.0]]),
+        theta_names=["z"],
+        x_names=["flux"],
+        source="non_saturated_test",
+        parameter_space=ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)}),
+    )
+    trained = TrainedMAFSBI(BroadEstimator(), training, history={})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        samples = trained.sample(np.asarray([[0.5]]), num_samples=32)
+
+    assert samples.shape == (1, 32, 1)
+    assert not any(
+        isinstance(warning.message, SBIPosteriorSaturationWarning)
+        for warning in caught
+    )
+
+
 def test_preexisting_training_set_is_complete_without_a_problem():
     training = SBITrainingSet.from_arrays(
         theta=np.asarray([[0.1, 9.0], [0.5, 10.0], [0.9, 11.0]]),
@@ -784,9 +878,14 @@ def test_problem_fit_maf_rejects_spectral_data_with_controlled_error():
         )
 
 
-def test_simulate_configuration_rejects_negative_retry_budget():
-    with pytest.raises(ValueError, match="max_retries must be non-negative"):
-        Simulate(n=8, noise_fn=small_noise, max_retries=-1)
+def test_simulate_configuration_rejects_invalid_retry_warning_fraction():
+    with pytest.raises(ValueError, match="warn_retry_fraction"):
+        Simulate(n=8, noise_fn=small_noise, warn_retry_fraction=0.0)
+
+
+def test_simulate_configuration_rejects_attempt_budget_below_requested_rows():
+    with pytest.raises(ValueError, match="max_attempts must be at least"):
+        Simulate(n=8, noise_fn=small_noise, max_attempts=7)
 
 
 def test_simulate_configuration_rejects_unknown_failure_policy():
@@ -1327,6 +1426,14 @@ def test_trained_maf_save_load_roundtrip_preserves_schema_and_weights(tmp_path):
     assert loaded.x_names == trained.x_names
     assert loaded.band_names == trained.band_names
     assert loaded.context.specification() == trained.context.specification()
+    assert np.allclose(
+        manifest["schema"]["context_feature_min"],
+        np.min(training.x, axis=0),
+    )
+    assert np.allclose(
+        manifest["schema"]["context_feature_max"],
+        np.max(training.x, axis=0),
+    )
     saved_problem = manifest["metadata"]["training_set_metadata"]["problem"]
     assert saved_problem["backend"] == problem.specification()["backend"]
     assert saved_problem["parameters"] == list(problem.parameters.names)

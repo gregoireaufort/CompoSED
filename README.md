@@ -345,15 +345,40 @@ training = Simulate(
     noise_model=survey_noise,
     infer=["zred", "log10_mass"],
     failure_policy="resample",
-    max_retries=100,
+    warn_retry_fraction=0.05,
 )
 ```
 
 The returned training metadata then labels the theta distribution
 `"simulator_success_conditioned"` and records its acceptance fraction and
-failure examples. For redshift-dependent galaxy ages, use the named SFH
-`age_kind="fraction_of_universe"` parameterization so prior draws are valid by
-construction.
+failure examples. Once failed attempts exceed `warn_retry_fraction`, CompoSED
+warns without stopping or clipping the run. Set an explicit
+`max_attempts=N` only when a hard compute budget is required.
+
+Inspect the effective training prior whenever rows were replaced:
+
+```python
+from composed.plot import plot_effective_prior
+
+plot_effective_prior(
+    result.inference_state.training_set,
+    problem.parameters,
+)
+```
+
+For redshift-dependent galaxy ages,
+`age_kind="fraction_of_universe"` guarantees
+`tage <= age_universe(z)`. For `ContinuitySFH`, it does **not** guarantee that
+the age exceeds the last fixed lookback-bin edge. The age-fraction prior and
+`lookback_edges_gyr` must still be chosen compatibly; rejected rows remain
+part of the effective-prior check above.
+
+At inference, MAF and MDN checkpoints compare the encoded observation vector
+with each training feature's minimum and maximum. Extrapolation emits a
+warning but is not clipped. A second warning identifies bounded posterior
+marginals that are both very narrow and pressed against a prior edge. These
+are deliberately simple triage checks, not a multivariate out-of-distribution
+test.
 
 Use the same workflow with a small, closed-form mixture posterior by changing
 only the method:

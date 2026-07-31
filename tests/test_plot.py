@@ -12,6 +12,7 @@ from composed.parameters import ParameterSpace
 from composed.priors import UniformPrior
 from composed.problem import Problem
 from composed.results import InferenceResult
+from composed.sbi import SBITrainingSet
 from composed.units import MassNormalization
 
 
@@ -117,6 +118,59 @@ def test_corner_hexbin_overlays_weighted_comparison_on_shared_axes():
     assert axes[0, 0].get_xlim() == pytest.approx(axes[1, 0].get_xlim())
     assert {"MAF", "reference MC"} <= set(axes[0, 0].get_legend_handles_labels()[1])
     assert len(axes[1, 0].collections) >= 2
+    fig.canvas.draw()
+
+
+def test_effective_prior_plot_compares_accepted_rows_to_declared_prior():
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from composed.plot import plot_effective_prior
+
+    parameter_space = ParameterSpace(
+        names=("z", "dust"),
+        priors={
+            "z": UniformPrior(0.0, 2.0),
+            "dust": UniformPrior(0.0, 1.0),
+        },
+    )
+    accepted = np.asarray(
+        [
+            [0.2, 0.1],
+            [0.4, 0.2],
+            [0.6, 0.3],
+            [0.8, 0.4],
+        ]
+    )
+    training = SBITrainingSet(
+        theta=accepted,
+        x=np.ones((4, 1)),
+        theta_names=parameter_space.names,
+        x_names=("flux",),
+        source="effective_prior_plot_test",
+        theta_full=accepted,
+        full_parameter_names=parameter_space.names,
+        metadata={
+            "simulate_training_set": {
+                "acceptance_fraction": 0.8,
+                "n_failures": 1,
+            }
+        },
+    )
+
+    fig, axes = plot_effective_prior(
+        training,
+        parameter_space,
+        reference_size=100,
+        max_points=100,
+        seed=4,
+    )
+
+    assert axes.shape == (2, 2)
+    assert "acceptance 80.0%" in fig._suptitle.get_text()
+    assert {"accepted simulations", "declared prior"} <= set(
+        axes[0, 0].get_legend_handles_labels()[1]
+    )
     fig.canvas.draw()
 
 

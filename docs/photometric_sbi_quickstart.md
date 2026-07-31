@@ -90,12 +90,24 @@ result = fit(
 samples = result.samples
 posterior = result.inference_state
 posterior.save("runs/fsps_photoz_maf")
+
+from composed.plot import plot_effective_prior
+
+plot_effective_prior(
+    posterior.training_set,
+    problem.parameters,
+)
 ```
 
 `samples` has shape `(num_samples, n_parameters)` for the observed object.
 The fitted `UniformPrior` and `LogUniformPrior` bounds are encoded through
 invertible transforms, so the MAF produces physical samples inside prior
 support rather than relying on post-hoc rejection.
+
+The effective-prior plot compares accepted simulator rows with fresh draws
+from `problem.parameters`. It should be inspected whenever
+`failure_policy="resample"` is used, because backend-domain rejection can
+change both marginal support and parameter correlations.
 
 `ChoicePrior` may also be included in `Simulate.infer`. CompoSED enumerates the
 Cartesian product of the declared choice axes and trains

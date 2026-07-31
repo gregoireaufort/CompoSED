@@ -30,6 +30,7 @@ from itertools import product
 import json
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
+import warnings
 
 import numpy as np
 
@@ -51,6 +52,7 @@ from inftools.sbi import (
     HybridMAFPosteriorEstimator,
     MAFPosteriorEstimator,
     MDNPosteriorEstimator,
+    SBISimulationFailureWarning,
     Standardizer,
     simulate_training_set,
     train_maf_posterior_from_dataset,
@@ -60,6 +62,14 @@ from inftools.sbi import (
 
 ObservationTransform = str | Callable[[np.ndarray], np.ndarray]
 PhotometryTransform = ObservationTransform
+
+
+class SBIContextSupportWarning(RuntimeWarning):
+    """An observed SBI context lies outside the training-set coordinate box."""
+
+
+class SBIPosteriorSaturationWarning(RuntimeWarning):
+    """A bounded neural posterior is narrow and pressed against a prior edge."""
 
 
 @dataclass(frozen=True)
@@ -1394,7 +1404,8 @@ class Simulate:
     condition_on: Sequence[str] | None = None
     context: PhotometricContext | str = "snr_logsigma"
     feature_transform: ObservationTransform | None = None
-    max_retries: int = 100
+    warn_retry_fraction: float | None = 0.05
+    max_attempts: int | None = None
     failure_policy: Literal["raise", "resample"] = "raise"
     batch_size: int = 1
     n_workers: int = 1
@@ -1412,8 +1423,22 @@ class Simulate:
             raise TypeError("Simulate requires a callable noise_model (noise_fn is a compatibility alias).")
         object.__setattr__(self, "noise_model", resolved_noise)
         object.__setattr__(self, "noise_fn", resolved_noise)
-        if int(self.max_retries) < 0:
-            raise ValueError("Simulate.max_retries must be non-negative.")
+        if self.warn_retry_fraction is not None:
+            warning_fraction = float(self.warn_retry_fraction)
+            if (
+                not np.isfinite(warning_fraction)
+                or warning_fraction <= 0.0
+                or warning_fraction > 1.0
+            ):
+                raise ValueError(
+                    "Simulate.warn_retry_fraction must be in (0, 1] or None."
+                )
+            object.__setattr__(self, "warn_retry_fraction", warning_fraction)
+        if self.max_attempts is not None:
+            max_attempts = int(self.max_attempts)
+            if max_attempts < int(self.n):
+                raise ValueError("Simulate.max_attempts must be at least Simulate.n.")
+            object.__setattr__(self, "max_attempts", max_attempts)
         failure_policy = str(self.failure_policy).lower()
         if failure_policy not in {"raise", "resample"}:
             raise ValueError("Simulate.failure_policy must be 'raise' or 'resample'.")
@@ -1944,6 +1969,25 @@ class TrainedMAFSBI:
             conditions=conditions,
             input_units=input_units,
         )
+        samples = self._sample_context_features(
+            x,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            seed=seed,
+        )
+        self._warn_posterior_boundary_saturation(samples)
+        return samples
+
+    def _sample_context_features(
+        self,
+        x: np.ndarray,
+        *,
+        num_samples: int,
+        batch_size: int | None,
+        seed: int | None,
+    ) -> np.ndarray:
+        """Sample an already validated, encoded context matrix."""
+
         n_object = x.shape[0]
         if batch_size is None:
             batch_size = n_object
@@ -2167,17 +2211,23 @@ class TrainedMAFSBI:
         stds = np.empty((n_object, n_parameter), dtype=dtype)
         n_chunk = (n_object + batch_size - 1) // batch_size
         chunk_seeds = None if seed is None else np.random.SeedSequence(int(seed)).generate_state(n_chunk)
+        saturation_records: dict[str, list[int]] = {}
 
         for chunk_index, start in enumerate(range(0, n_object, batch_size)):
             stop = min(start + batch_size, n_object)
             chunk_seed = None if chunk_seeds is None else int(chunk_seeds[chunk_index])
-            draws = self.sample(
+            draws = self._sample_context_features(
                 x[start:stop],
-                input_units="features",
                 num_samples=int(num_samples),
                 batch_size=stop - start,
                 seed=chunk_seed,
             )
+            for name, local_indices in self._posterior_boundary_saturation_records(
+                draws
+            ).items():
+                saturation_records.setdefault(name, []).extend(
+                    start + int(index) for index in local_indices
+                )
             chunk_quantiles = np.transpose(
                 np.quantile(draws, levels, axis=1),
                 (1, 0, 2),
@@ -2197,6 +2247,7 @@ class TrainedMAFSBI:
             means[start:stop] = np.mean(draws, axis=1)
             stds[start:stop] = np.std(draws, axis=1)
 
+        self._emit_posterior_boundary_saturation_warning(saturation_records)
         return MAFCatalogSummary(
             quantile_levels=levels,
             quantile_values=quantile_values,
@@ -2212,6 +2263,23 @@ class TrainedMAFSBI:
         )
 
     def _context_features(
+        self,
+        photometry: np.ndarray | SEDDataset,
+        *,
+        sigma: np.ndarray | None,
+        conditions,
+        input_units: str,
+    ) -> np.ndarray:
+        features = self._build_context_features(
+            photometry,
+            sigma=sigma,
+            conditions=conditions,
+            input_units=input_units,
+        )
+        self._warn_context_outside_training_support(features)
+        return features
+
+    def _build_context_features(
         self,
         photometry: np.ndarray | SEDDataset,
         *,
@@ -2328,6 +2396,132 @@ class TrainedMAFSBI:
             base
             if condition_values.shape[1] == 0
             else np.column_stack([base, condition_values])
+        )
+
+    def _warn_context_outside_training_support(self, features: np.ndarray) -> None:
+        """Report simple per-feature extrapolation without modifying observations."""
+
+        lower_values = self.schema.get("context_feature_min")
+        upper_values = self.schema.get("context_feature_max")
+        if lower_values is None or upper_values is None:
+            return
+        lower = np.asarray(lower_values, dtype=float)
+        upper = np.asarray(upper_values, dtype=float)
+        if lower.shape != (len(self.x_names),) or upper.shape != lower.shape:
+            raise RuntimeError(
+                "Saved SBI context-support bounds do not match the feature schema."
+            )
+        scale = np.maximum.reduce(
+            [np.ones_like(lower), np.abs(lower), np.abs(upper)]
+        )
+        tolerance = 1.0e-12 * scale
+        outside = (features < lower[None, :] - tolerance[None, :]) | (
+            features > upper[None, :] + tolerance[None, :]
+        )
+        if not np.any(outside):
+            return
+
+        affected_objects = np.flatnonzero(np.any(outside, axis=1))
+        affected_features = np.flatnonzero(np.any(outside, axis=0))
+        details = []
+        for index in affected_features[:6]:
+            observed = features[outside[:, index], index]
+            details.append(
+                f"{self.x_names[index]}: observed "
+                f"[{np.min(observed):.5g}, {np.max(observed):.5g}], training "
+                f"[{lower[index]:.5g}, {upper[index]:.5g}]"
+            )
+        if affected_features.size > 6:
+            details.append(f"{affected_features.size - 6} additional feature(s)")
+        warnings.warn(
+            f"{affected_objects.size}/{features.shape[0]} observation(s) lie outside "
+            "the coordinate-wise SBI training range. Samples are extrapolations; "
+            "inputs were not clipped. " + "; ".join(details),
+            SBIContextSupportWarning,
+            stacklevel=4,
+        )
+
+    def _posterior_boundary_saturation_records(
+        self,
+        samples: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Locate narrow bounded marginals pressed against a prior edge."""
+
+        samples = np.asarray(samples, dtype=float)
+        if samples.ndim != 3 or samples.shape[1] < 8:
+            return {}
+        q16, q50, q84 = np.quantile(samples, (0.16, 0.5, 0.84), axis=1)
+        records: dict[str, np.ndarray] = {}
+        for index, (name, kind) in enumerate(
+            zip(self.target_transform.names, self.target_transform.kinds)
+        ):
+            if kind not in {"uniform", "log_uniform"}:
+                continue
+            lower = float(self.target_transform.lower[index])
+            upper = float(self.target_transform.upper[index])
+            if kind == "log_uniform":
+                if np.any(q16[:, index] <= 0.0):
+                    continue
+                denominator = np.log(upper) - np.log(lower)
+                normalized = np.column_stack(
+                    [
+                        (np.log(values[:, index]) - np.log(lower)) / denominator
+                        for values in (q16, q50, q84)
+                    ]
+                )
+            else:
+                denominator = upper - lower
+                normalized = np.column_stack(
+                    [
+                        (values[:, index] - lower) / denominator
+                        for values in (q16, q50, q84)
+                    ]
+                )
+            width = normalized[:, 2] - normalized[:, 0]
+            median = normalized[:, 1]
+            narrow = width <= 0.01
+            lower_edge = narrow & (median <= 0.05)
+            upper_edge = narrow & (median >= 0.95)
+            if np.any(lower_edge):
+                records[f"{name} (lower edge)"] = np.flatnonzero(lower_edge)
+            if np.any(upper_edge):
+                records[f"{name} (upper edge)"] = np.flatnonzero(upper_edge)
+        return records
+
+    def _warn_posterior_boundary_saturation(self, samples: np.ndarray) -> None:
+        self._emit_posterior_boundary_saturation_warning(
+            {
+                name: [int(index) for index in indices]
+                for name, indices in self._posterior_boundary_saturation_records(
+                    samples
+                ).items()
+            },
+            stacklevel=4,
+        )
+
+    def _emit_posterior_boundary_saturation_warning(
+        self,
+        records: Mapping[str, Sequence[int]],
+        *,
+        stacklevel: int = 3,
+    ) -> None:
+        if not records:
+            return
+        details = []
+        for name, indices in records.items():
+            unique = sorted(set(int(index) for index in indices))
+            preview = ", ".join(str(index) for index in unique[:5])
+            suffix = "" if len(unique) <= 5 else ", ..."
+            details.append(
+                f"{name}: {len(unique)} object(s), indices [{preview}{suffix}]"
+            )
+        warnings.warn(
+            "A bounded SBI marginal is both narrow (16-84% width <= 1% of "
+            "the prior coordinate) and close to a prior edge (median within 5%). "
+            "This can indicate posterior truncation, context extrapolation, or "
+            "neural saturation. " + "; ".join(details),
+            SBIPosteriorSaturationWarning,
+            stacklevel=stacklevel,
         )
 
     def save(self, path: str | Path, *, overwrite: bool = False) -> Path:
@@ -2672,7 +2866,8 @@ def simulate_sbi_training_set(
         n=int(simulation.n),
         noise_fn=simulation.noise_fn,
         rng=generator,
-        max_retries=int(simulation.max_retries),
+        warn_retry_fraction=simulation.warn_retry_fraction,
+        max_attempts=simulation.max_attempts,
         failure_policy=simulation.failure_policy,
         return_metadata=True,
         batch_size=int(simulation.batch_size),
@@ -2816,7 +3011,8 @@ def simulate_photometric_training_set(
     feature_transform: PhotometryTransform = "flux",
     context: PhotometricContext | str = "flux",
     rng: np.random.Generator | int | None = None,
-    max_retries: int = 100,
+    warn_retry_fraction: float | None = 0.05,
+    max_attempts: int | None = None,
     failure_policy: Literal["raise", "resample"] = "raise",
     simulation_batch_size: int = 1,
     n_workers: int = 1,
@@ -2864,7 +3060,8 @@ def simulate_photometric_training_set(
             infer=infer,
             context=context,
             feature_transform=feature_transform,
-            max_retries=max_retries,
+            warn_retry_fraction=warn_retry_fraction,
+            max_attempts=max_attempts,
             failure_policy=failure_policy,
             batch_size=simulation_batch_size,
             n_workers=n_workers,
@@ -2886,7 +3083,8 @@ def train_diffusion_photometric_sbi(
     mask: Sequence[bool] | None = None,
     feature_transform: PhotometryTransform = "flux",
     rng: np.random.Generator | int | None = None,
-    max_retries: int = 100,
+    warn_retry_fraction: float | None = 0.05,
+    max_attempts: int | None = None,
     failure_policy: Literal["raise", "resample"] = "raise",
     simulation_batch_size: int = 1,
     n_workers: int = 1,
@@ -2917,7 +3115,8 @@ def train_diffusion_photometric_sbi(
         mask=mask,
         feature_transform=feature_transform,
         rng=rng,
-        max_retries=max_retries,
+        warn_retry_fraction=warn_retry_fraction,
+        max_attempts=max_attempts,
         failure_policy=failure_policy,
         simulation_batch_size=simulation_batch_size,
         n_workers=n_workers,
@@ -3704,6 +3903,8 @@ def _maf_schema_from_training_set(training_set: SBITrainingSet) -> dict[str, obj
         "feature_transform": _transform_name(feature_transform),
         "native_input_supported": bool(native_supported),
         "training_source": training_set.source,
+        "context_feature_min": np.min(training_set.x, axis=0).tolist(),
+        "context_feature_max": np.max(training_set.x, axis=0).tolist(),
     }
 
 
@@ -3729,6 +3930,28 @@ def _validate_maf_schema(schema: Mapping[str, object]) -> None:
     context = schema.get("photometric_context")
     if context is not None:
         PhotometricContext.from_specification(context)
+    lower_values = schema.get("context_feature_min")
+    upper_values = schema.get("context_feature_max")
+    if (lower_values is None) != (upper_values is None):
+        raise ValueError(
+            "MAF checkpoint must store both context_feature_min and "
+            "context_feature_max, or neither for a legacy checkpoint."
+        )
+    if lower_values is not None:
+        lower = np.asarray(lower_values, dtype=float)
+        upper = np.asarray(upper_values, dtype=float)
+        expected = (len(tuple(schema["x_names"])),)
+        if (
+            lower.shape != expected
+            or upper.shape != expected
+            or not np.all(np.isfinite(lower))
+            or not np.all(np.isfinite(upper))
+            or np.any(upper < lower)
+        ):
+            raise ValueError(
+                "MAF checkpoint context support bounds must be finite, ordered, "
+                "and match x_names."
+            )
 
 
 def _distribution_version(name: str) -> str:

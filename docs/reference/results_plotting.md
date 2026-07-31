@@ -6,5 +6,5 @@
 ```
 
 ```{automodule} composed.plot
-:members: plot_corner_hexbin, plot_traces, plot_posterior_predictive_sed, plot_posterior_predictive
+:members: plot_corner_hexbin, plot_effective_prior, plot_traces, plot_posterior_predictive_sed, plot_posterior_predictive
 ```

@@ -176,10 +176,13 @@ Training simulation does not silently repair an invalid prior. The default
 and reports its parameter vector. A scientist may explicitly select
 `failure_policy="resample"`, but the resulting theta table is then sampled from
 the declared prior conditional on simulator success. That fact, the acceptance
-fraction, and failure examples are stored in the training metadata. For coupled
-physical support such as age versus redshift, prefer a valid
-parameterization such as `age_kind="fraction_of_universe"` rather than
-success-conditioned rejection.
+fraction, and failure examples are stored in the training metadata. For
+coupled physical support such as age versus redshift,
+`age_kind="fraction_of_universe"` enforces the Universe-age upper bound.
+Model-specific constraints remain separate: `ContinuitySFH`, for example,
+also requires the galaxy age to exceed its final fixed lookback-bin edge.
+Whenever resampling is used, compare the accepted effective prior with the
+declared prior rather than treating the two as interchangeable.
 
 Uniform and log-uniform inferred parameters are mapped to an unconstrained
 neural target space before MAF training and mapped back after sampling. This

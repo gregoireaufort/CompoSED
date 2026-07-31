@@ -277,7 +277,7 @@ def main() -> None:
         infer=problem.parameters.names,
         context=PhotometricContext("snr_logsigma", flux_unit="maggies"),
         failure_policy="resample",
-        max_retries=max(1000, args.n_test),
+        warn_retry_fraction=0.05,
         n_workers=args.n_workers,
         batch_size=128,
         executor="process" if args.n_workers > 1 else "serial",

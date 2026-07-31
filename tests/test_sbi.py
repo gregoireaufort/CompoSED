@@ -47,12 +47,14 @@ def test_importing_inftools_works_without_constructing_sbi_estimator():
     assert hasattr(inftools, "MAFPosteriorEstimator")
     assert hasattr(inftools, "HybridMAFPosteriorEstimator")
     assert hasattr(inftools, "MDNPosteriorEstimator")
+    assert hasattr(inftools, "SBISimulationFailureWarning")
 
 
 def test_importing_inftools_sbi_works_without_dependencies():
     import inftools.sbi as sbi
 
     assert hasattr(sbi, "simulate_training_set")
+    assert hasattr(sbi, "SBISimulationFailureWarning")
     assert hasattr(sbi, "train_maf_posterior_from_dataset")
     assert hasattr(sbi, "train_mdn_posterior_from_dataset")
 
@@ -338,7 +340,6 @@ def test_parallel_training_simulation_does_not_run_unused_retry_reserve():
         n=17,
         noise_fn=lambda flux: np.zeros_like(flux),
         rng=np.random.default_rng(13),
-        max_retries=100,
         batch_size=4,
         n_workers=2,
         executor="thread",
@@ -360,7 +361,6 @@ def test_process_training_simulation_does_not_run_unused_retry_reserve():
         n=17,
         noise_fn=zero_noise,
         rng=np.random.default_rng(14),
-        max_retries=100,
         batch_size=4,
         n_workers=2,
         executor="process",
@@ -384,7 +384,7 @@ def test_process_training_simulation_replaces_only_failed_rows():
             n=17,
             noise_fn=zero_noise,
             rng=np.random.default_rng(15),
-            max_retries=100,
+            warn_retry_fraction=0.05,
             failure_policy="resample",
             batch_size=4,
             n_workers=2,
@@ -400,6 +400,9 @@ def test_process_training_simulation_replaces_only_failed_rows():
     assert meta["failure_policy"] == "resample"
     assert meta["returned_prior"] == "simulator_success_conditioned"
     assert meta["acceptance_fraction"] == pytest.approx(17 / meta["attempts"])
+    assert meta["failure_fraction"] == pytest.approx(
+        len(meta["failures"]) / meta["attempts"]
+    )
 
 
 def test_parallel_training_simulation_returns_matching_sigma_rows():
@@ -445,7 +448,7 @@ def test_simulate_training_set_retries_failures():
             n=2,
             noise_fn=lambda flux: np.zeros_like(flux),
             rng=np.random.default_rng(4),
-            max_retries=3,
+            warn_retry_fraction=0.05,
             failure_policy="resample",
             return_metadata=True,
         )
@@ -453,6 +456,36 @@ def test_simulate_training_set_retries_failures():
     assert x.shape == (2, 1)
     assert len(meta["failures"]) == 1
     assert meta["returned_prior"] == "simulator_success_conditioned"
+
+
+def test_resampling_warns_on_failure_fraction_but_keeps_running():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+    calls = {"n": 0}
+
+    def simulator(theta, noise_fn=None, rng=None):
+        del noise_fn, rng
+        calls["n"] += 1
+        if calls["n"] <= 5:
+            raise ValueError("temporary invalid domain")
+        return np.asarray(theta, dtype=float)
+
+    with pytest.warns(RuntimeWarning, match="failure fraction"):
+        theta, x, meta = simulate_training_set(
+            ps,
+            simulator,
+            n=3,
+            noise_fn=zero_noise,
+            rng=np.random.default_rng(45),
+            warn_retry_fraction=0.1,
+            failure_policy="resample",
+            return_metadata=True,
+        )
+
+    assert theta.shape == x.shape == (3, 1)
+    assert meta["attempts"] == 8
+    assert meta["n_failures"] == 5
+    assert meta["failure_fraction"] == pytest.approx(5 / 8)
+    assert meta["failure_fraction_warning_count"] >= 1
 
 
 def test_simulate_training_set_fails_loudly_by_default():
@@ -495,33 +528,47 @@ def test_successful_training_set_retains_exact_declared_prior_draws():
     assert meta["acceptance_fraction"] == 1.0
 
 
-def test_simulate_training_set_raises_after_too_many_failures():
+def test_simulate_training_set_stops_only_at_explicit_attempt_budget():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
 
     def simulator(theta, noise_fn=None, rng=None):
         raise ValueError("always fails")
 
-    with pytest.raises(RuntimeError, match="Too many failed simulations"):
+    with pytest.warns(RuntimeWarning, match="failure fraction"):
+        with pytest.raises(RuntimeError, match="max_attempts=2"):
+            simulate_training_set(
+                ps,
+                simulator,
+                n=1,
+                noise_fn=lambda flux: flux,
+                max_attempts=2,
+                failure_policy="resample",
+            )
+
+
+def test_simulate_training_set_rejects_attempt_budget_below_requested_rows():
+    ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
+
+    with pytest.raises(ValueError, match="max_attempts must be at least n"):
         simulate_training_set(
             ps,
-            simulator,
-            n=1,
+            identity_simulator,
+            n=2,
             noise_fn=lambda flux: flux,
-            max_retries=1,
-            failure_policy="resample",
+            max_attempts=1,
         )
 
 
-def test_simulate_training_set_rejects_negative_retry_budget():
+def test_simulate_training_set_rejects_invalid_retry_warning_fraction():
     ps = ParameterSpace(["z"], {"z": UniformPrior(0.0, 1.0)})
 
-    with pytest.raises(ValueError, match="max_retries must be non-negative"):
+    with pytest.raises(ValueError, match="warn_retry_fraction"):
         simulate_training_set(
             ps,
             lambda theta, noise_fn=None, rng=None: np.asarray(theta),
             n=1,
             noise_fn=lambda flux: flux,
-            max_retries=-1,
+            warn_retry_fraction=1.1,
         )
 
 

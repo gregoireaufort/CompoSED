@@ -49,6 +49,20 @@ fig, axes = plot_traces(result)
 The corner plot uses hexbins and can overlay a comparison posterior. Trace plots
 use the sampler chain when available.
 
+For simulator-generated SBI, compare accepted training rows with the declared
+prior:
+
+```python
+from composed.plot import plot_effective_prior
+
+fig, axes = plot_effective_prior(
+    result.inference_state.training_set,
+    problem.parameters,
+)
+```
+
+This is a training-distribution check, not a posterior plot.
+
 ## Posterior predictive
 
 ```python

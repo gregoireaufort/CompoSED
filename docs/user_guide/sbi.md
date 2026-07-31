@@ -40,7 +40,26 @@ The simulation path:
 
 `failure_policy="raise"` is the default. Choosing `"resample"` changes the
 effective training measure to the prior conditional on simulator success and is
-recorded in metadata.
+recorded in metadata. `warn_retry_fraction=0.05` warns when more than 5% of
+attempted rows have failed; the warning does not stop the simulation. Use
+`max_attempts` only when an explicit hard compute ceiling is required.
+
+The effective prior is a standard simulation check:
+
+```python
+from composed.plot import plot_effective_prior
+
+fig, axes = plot_effective_prior(
+    result.inference_state.training_set,
+    problem.parameters,
+)
+```
+
+The filled distribution contains accepted simulator rows. Orange contours are
+fresh draws from the declared prior. Any difference is caused by simulator
+success conditioning, including correlations introduced by physical-domain
+failures. For `ContinuitySFH`, an age expressed as a fraction of Universe age
+still has to exceed the final fixed lookback-bin edge.
 
 ## Pre-existing pairs
 
@@ -77,6 +96,13 @@ samples = posterior.sample(
 The shape is `(n_object, n_sample, n_parameter)`. Objects are batched inside
 the neural estimator; CompoSED does not sample one SED at a time.
 
+The trained MAF/MDN stores the minimum and maximum of every encoded context
+feature. At inference it warns when an object leaves that coordinate-wise box,
+without clipping or changing the observation. It also warns when a bounded
+posterior marginal has a 16-84% width below 1% of its prior coordinate while
+its median lies within 5% of a prior edge. These checks are intentionally
+minimal: passing them does not prove multivariate in-distribution support.
+
 ## Device policy
 
 `device="auto"` selects CUDA, then MPS, then CPU. Neural tensors use float32 on
@@ -90,6 +116,7 @@ SBI quality depends on prior coverage, simulator fidelity, noise-model
 fidelity, and training capacity. At minimum:
 
 - use held-out simulations;
+- inspect the effective accepted prior against the declared prior;
 - run rank and coverage diagnostics;
 - compare selected objects to a trusted Monte Carlo posterior;
 - inspect posterior predictive photometry;

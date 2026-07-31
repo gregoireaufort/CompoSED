@@ -65,6 +65,13 @@ An absolute `tage_gyr` is also checked against the Universe age whenever a
 redshift is available. The default cosmology is Astropy `Planck18` for both
 named backends unless another cosmology is supplied.
 
+This parameterization enforces the cosmic upper bound only. In particular,
+`ContinuitySFH` also requires the resulting galaxy age to exceed its last
+fixed `lookback_edges_gyr` value. A broad redshift/age-fraction prior can still
+produce invalid continuity histories at young ages. Choose compatible edges
+and priors, or use explicit simulator resampling and inspect the resulting
+effective prior. The current fixed-bin construction is otherwise unchanged.
+
 ## Normalization
 
 Constant, exponential, delayed-tau, and continuity histories are numerically

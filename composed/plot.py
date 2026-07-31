@@ -137,6 +137,89 @@ def plot_corner_hexbin(
     return fig, axes
 
 
+def plot_effective_prior(
+    training_set,
+    parameter_space,
+    *,
+    parameters: Sequence[str] | None = None,
+    reference_size: int = 50_000,
+    max_points: int = 50_000,
+    seed: int | None = 0,
+):
+    """Compare accepted simulator parameters with the declared prior.
+
+    This plot is specifically for simulator-generated SBI training sets.
+    Rejected forward-model rows are absent from ``training_set.theta_full``;
+    their replacement can therefore introduce correlations or truncate
+    marginal support even when the declared :class:`ParameterSpace` factors.
+    The accepted table is shown as the filled distribution and fresh declared
+    prior draws as orange contours.
+    """
+
+    from composed.parameters import ParameterSpace
+    from composed.sbi import SBITrainingSet
+
+    if not isinstance(training_set, SBITrainingSet):
+        raise TypeError("plot_effective_prior requires an SBITrainingSet.")
+    if not isinstance(parameter_space, ParameterSpace):
+        raise TypeError("plot_effective_prior requires a ParameterSpace.")
+    full_names = tuple(training_set.full_parameter_names)
+    if full_names != tuple(parameter_space.names):
+        raise ValueError(
+            "SBITrainingSet.full_parameter_names must exactly match the "
+            "declared ParameterSpace order."
+        )
+    accepted = np.asarray(training_set.theta_full, dtype=float)
+    if accepted.ndim != 2 or accepted.shape[1] != len(full_names):
+        raise ValueError("SBITrainingSet.theta_full does not match its parameter names.")
+    reference_size = int(reference_size)
+    if reference_size <= 0:
+        raise ValueError("reference_size must be positive.")
+
+    rng = np.random.default_rng(seed)
+    declared = parameter_space.sample_prior(reference_size, rng=rng)
+    accepted_result = InferenceResult(
+        samples=accepted,
+        logp=None,
+        weights=np.ones(accepted.shape[0], dtype=float),
+        parameter_names=full_names,
+        sampler_name="effective_sbi_prior",
+    )
+    declared_result = InferenceResult(
+        samples=declared,
+        logp=None,
+        weights=np.ones(declared.shape[0], dtype=float),
+        parameter_names=full_names,
+        sampler_name="declared_prior",
+    )
+    fig, axes = plot_corner_hexbin(
+        accepted_result,
+        parameters=parameters,
+        comparison_result=declared_result,
+        result_label="accepted simulations",
+        comparison_label="declared prior",
+        max_points=max_points,
+        seed=seed,
+    )
+
+    simulation_metadata = training_set.metadata.get("simulate_training_set", {})
+    acceptance = simulation_metadata.get("acceptance_fraction")
+    failures = simulation_metadata.get(
+        "n_failures",
+        len(simulation_metadata.get("failures", ())),
+    )
+    if acceptance is None:
+        title = "Effective SBI training prior"
+    else:
+        title = (
+            "Effective SBI training prior "
+            f"(acceptance {float(acceptance):.1%}, failures {int(failures)})"
+        )
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    return fig, axes
+
+
 def plot_traces(result: InferenceResult, *, parameters: Sequence[str] | None = None):
     """Plot MCMC traces when available, otherwise the sample sequence."""
 

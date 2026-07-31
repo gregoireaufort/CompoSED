@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 import importlib
@@ -9,6 +10,10 @@ from typing import Any, Callable, Literal
 import warnings
 
 import numpy as np
+
+
+class SBISimulationFailureWarning(RuntimeWarning):
+    """Warning emitted when simulator rejection changes an SBI training prior."""
 
 
 def _require_torch_dependency():
@@ -1438,7 +1443,8 @@ def simulate_training_set(
     n: int,
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator | None = None,
-    max_retries: int = 100,
+    warn_retry_fraction: float | None = 0.05,
+    max_attempts: int | None = None,
     failure_policy: Literal["raise", "resample"] = "raise",
     return_metadata: bool = False,
     batch_size: int = 1,
@@ -1461,7 +1467,9 @@ def simulate_training_set(
     on the declared prior conditioned on simulator success. Set
     ``failure_policy="resample"`` only when that conditioning is scientifically
     intended; the returned metadata records the failures and acceptance
-    fraction. Process execution
+    fraction. During resampling, ``warn_retry_fraction`` warns when failed
+    attempts exceed the requested fraction; it does not stop the run.
+    ``max_attempts`` is an optional explicit hard cost ceiling. Process execution
     requires ``simulator`` and ``noise_fn`` to be pickleable; in notebooks,
     define them as top-level functions/classes or use ``executor="thread"``
     only for thread-safe simulators.
@@ -1472,9 +1480,18 @@ def simulate_training_set(
     n = int(n)
     if n < 0:
         raise ValueError("n must be non-negative.")
-    max_retries = int(max_retries)
-    if max_retries < 0:
-        raise ValueError("max_retries must be non-negative.")
+    if warn_retry_fraction is not None:
+        warn_retry_fraction = float(warn_retry_fraction)
+        if (
+            not np.isfinite(warn_retry_fraction)
+            or warn_retry_fraction <= 0.0
+            or warn_retry_fraction > 1.0
+        ):
+            raise ValueError("warn_retry_fraction must be in (0, 1] or None.")
+    if max_attempts is not None:
+        max_attempts = int(max_attempts)
+        if max_attempts < n:
+            raise ValueError("max_attempts must be at least n.")
     failure_policy = str(failure_policy).lower()
     if failure_policy not in {"raise", "resample"}:
         raise ValueError("failure_policy must be 'raise' or 'resample'.")
@@ -1496,9 +1513,13 @@ def simulate_training_set(
                 "attempts": 0,
                 "failures": [],
                 "n_failures": 0,
+                "failure_fraction": 0.0,
                 "acceptance_fraction": 1.0,
                 "failure_policy": failure_policy,
                 "returned_prior": "declared_prior",
+                "warn_retry_fraction": warn_retry_fraction,
+                "max_attempts": max_attempts,
+                "failure_fraction_warning_count": 0,
                 "batch_size": batch_size,
                 "n_workers": n_workers,
                 "executor": executor,
@@ -1514,7 +1535,8 @@ def simulate_training_set(
             n=n,
             noise_fn=noise_fn,
             rng=rng,
-            max_retries=max_retries,
+            warn_retry_fraction=warn_retry_fraction,
+            max_attempts=max_attempts,
             failure_policy=failure_policy,
             return_sigma=bool(return_sigma),
         )
@@ -1525,7 +1547,8 @@ def simulate_training_set(
             n=n,
             noise_fn=noise_fn,
             rng=rng,
-            max_retries=max_retries,
+            warn_retry_fraction=warn_retry_fraction,
+            max_attempts=max_attempts,
             failure_policy=failure_policy,
             batch_size=batch_size,
             n_workers=n_workers,
@@ -1537,6 +1560,7 @@ def simulate_training_set(
     metadata.update(
         {
             "n_failures": len(metadata["failures"]),
+            "failure_fraction": float(len(metadata["failures"]) / metadata["attempts"]),
             "acceptance_fraction": float(n / metadata["attempts"]),
             "failure_policy": failure_policy,
             "returned_prior": (
@@ -1544,6 +1568,8 @@ def simulate_training_set(
                 if metadata["failures"]
                 else "declared_prior"
             ),
+            "warn_retry_fraction": warn_retry_fraction,
+            "max_attempts": max_attempts,
             "batch_size": batch_size,
             "n_workers": n_workers,
             "executor": executor,
@@ -1556,7 +1582,7 @@ def simulate_training_set(
             f"Replaced {len(metadata['failures'])} failed simulation(s). Returned theta rows "
             "are draws from the declared prior conditioned on simulator success; inspect "
             "metadata['failures'] before training.",
-            RuntimeWarning,
+            SBISimulationFailureWarning,
             stacklevel=2,
         )
     if return_metadata:
@@ -1575,7 +1601,8 @@ def _simulate_training_set_serial(
     n: int,
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator,
-    max_retries: int,
+    warn_retry_fraction: float | None,
+    max_attempts: int | None,
     failure_policy: Literal["raise", "resample"],
     return_sigma: bool,
 ):
@@ -1584,11 +1611,14 @@ def _simulate_training_set_serial(
     x_rows = []
     sigma_rows = []
     attempts = 0
+    warning_state = _failure_warning_state(warn_retry_fraction)
     while len(theta_rows) < n:
-        if attempts - len(theta_rows) > int(max_retries):
-            raise RuntimeError(
-                f"Too many failed simulations: {len(failures)} failures while collecting {len(theta_rows)}/{n}."
-            )
+        _raise_if_attempt_budget_exhausted(
+            attempts=attempts,
+            accepted=len(theta_rows),
+            requested=n,
+            max_attempts=max_attempts,
+        )
         attempts += 1
         theta = parameter_space.sample_prior(1, rng=rng)[0]
         try:
@@ -1618,6 +1648,13 @@ def _simulate_training_set_serial(
                     "failure_policy='resample' to train on the simulator-success-conditioned prior."
                 ) from exc
             failures.append(failure)
+            _warn_if_failure_fraction_high(
+                failures=failures,
+                attempts=attempts,
+                accepted=len(theta_rows),
+                requested=n,
+                warning_state=warning_state,
+            )
             continue
         theta_rows.append(theta)
         x_rows.append(x)
@@ -1626,7 +1663,11 @@ def _simulate_training_set_serial(
     theta_out = np.asarray(theta_rows, dtype=float)
     x_out = np.asarray(x_rows, dtype=float)
     sigma_out = np.asarray(sigma_rows, dtype=float) if return_sigma else None
-    return theta_out, x_out, sigma_out, {"attempts": attempts, "failures": failures}
+    return theta_out, x_out, sigma_out, {
+        "attempts": attempts,
+        "failures": failures,
+        "failure_fraction_warning_count": warning_state["count"],
+    }
 
 
 def _simulate_training_set_parallel(
@@ -1636,7 +1677,8 @@ def _simulate_training_set_parallel(
     n: int,
     noise_fn: Callable[[np.ndarray], np.ndarray],
     rng: np.random.Generator,
-    max_retries: int,
+    warn_retry_fraction: float | None,
+    max_attempts: int | None,
     failure_policy: Literal["raise", "resample"],
     batch_size: int,
     n_workers: int,
@@ -1666,12 +1708,23 @@ def _simulate_training_set_parallel(
     sigma_rows = []
     failures = []
     attempts = 0
+    warning_state = _failure_warning_state(warn_retry_fraction)
     with pool_cls(**pool_kwargs) as pool:
         while len(theta_rows) < n:
             # Only simulate the rows still required. Failed rows are replaced
             # in a later wave, keeping the expensive backend workers alive
             # without evaluating the unused retry reserve.
             n_candidate = n - len(theta_rows)
+            if max_attempts is not None:
+                remaining_attempts = max_attempts - attempts
+                if remaining_attempts <= 0:
+                    _raise_if_attempt_budget_exhausted(
+                        attempts=attempts,
+                        accepted=len(theta_rows),
+                        requested=n,
+                        max_attempts=max_attempts,
+                    )
+                n_candidate = min(n_candidate, remaining_attempts)
             theta_candidates = parameter_space.sample_prior(n_candidate, rng=rng)
             chunks = [
                 theta_candidates[start : start + batch_size]
@@ -1684,7 +1737,6 @@ def _simulate_training_set_parallel(
                 dtype=np.uint32,
             )
             payloads = [(chunk, int(seed)) for chunk, seed in zip(chunks, seeds)]
-            attempts += n_candidate
 
             for good_theta, good_x, good_sigma, bad in pool.map(
                 _simulate_chunk_from_worker,
@@ -1695,6 +1747,7 @@ def _simulate_training_set_parallel(
                 x_rows.extend(good_x)
                 sigma_rows.extend(good_sigma)
                 failures.extend(bad)
+                attempts += len(good_theta) + len(bad)
                 if failure_policy == "raise" and bad:
                     first = bad[0]
                     raise RuntimeError(
@@ -1704,17 +1757,93 @@ def _simulate_training_set_parallel(
                         "Fix the prior/parameterization or explicitly set "
                         "failure_policy='resample' to train on the simulator-success-conditioned prior."
                     )
+                if bad:
+                    _warn_if_failure_fraction_high(
+                        failures=failures,
+                        attempts=attempts,
+                        accepted=len(theta_rows),
+                        requested=n,
+                        warning_state=warning_state,
+                    )
 
-            if len(theta_rows) < n and len(failures) > max_retries:
-                raise RuntimeError(
-                    f"Too many failed simulations: {len(failures)} failures "
-                    f"while collecting {len(theta_rows)}/{n}."
+            if len(theta_rows) < n:
+                _raise_if_attempt_budget_exhausted(
+                    attempts=attempts,
+                    accepted=len(theta_rows),
+                    requested=n,
+                    max_attempts=max_attempts,
                 )
 
     theta_out = np.asarray(theta_rows[:n], dtype=float)
     x_out = np.asarray(x_rows[:n], dtype=float)
     sigma_out = np.asarray(sigma_rows[:n], dtype=float) if return_sigma else None
-    return theta_out, x_out, sigma_out, {"attempts": attempts, "failures": failures}
+    return theta_out, x_out, sigma_out, {
+        "attempts": attempts,
+        "failures": failures,
+        "failure_fraction_warning_count": warning_state["count"],
+    }
+
+
+def _failure_warning_state(warn_retry_fraction: float | None) -> dict[str, float | int | None]:
+    return {
+        "next_fraction": warn_retry_fraction,
+        "count": 0,
+    }
+
+
+def _warn_if_failure_fraction_high(
+    *,
+    failures: list[dict[str, Any]],
+    attempts: int,
+    accepted: int,
+    requested: int,
+    warning_state: dict[str, float | int | None],
+) -> None:
+    """Warn during a long resampling run without changing or truncating it."""
+
+    threshold = warning_state["next_fraction"]
+    if threshold is None or not failures:
+        return
+    minimum_attempts = min(100, max(1, int(requested)))
+    failure_fraction = len(failures) / int(attempts)
+    if attempts < minimum_attempts or failure_fraction < float(threshold):
+        return
+
+    counts = Counter(str(failure["error_type"]) for failure in failures)
+    top_errors = ", ".join(
+        f"{name} ({count})" for name, count in counts.most_common(3)
+    )
+    warnings.warn(
+        "SBI simulator failure fraction is "
+        f"{failure_fraction:.1%} after {attempts} attempts "
+        f"({accepted}/{requested} accepted so far). The effective training prior "
+        "is being conditioned on simulator success. "
+        f"Most common failures: {top_errors}.",
+        SBISimulationFailureWarning,
+        stacklevel=4,
+    )
+    warning_state["count"] = int(warning_state["count"]) + 1
+    warning_step = max(float(threshold), 0.05)
+    next_fraction = float(threshold)
+    while next_fraction <= failure_fraction:
+        next_fraction += warning_step
+    warning_state["next_fraction"] = next_fraction
+
+
+def _raise_if_attempt_budget_exhausted(
+    *,
+    attempts: int,
+    accepted: int,
+    requested: int,
+    max_attempts: int | None,
+) -> None:
+    if max_attempts is None or attempts < max_attempts:
+        return
+    raise RuntimeError(
+        f"Reached explicit max_attempts={max_attempts} after collecting "
+        f"{accepted}/{requested} simulations. Increase or remove max_attempts "
+        "to continue resampling."
+    )
 
 
 def train_maf_posterior_from_dataset(

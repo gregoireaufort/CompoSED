@@ -48,6 +48,8 @@ export without a documentation category is a release-review failure.
   `train_maf_photometric_sbi`, `train_mdn_photometric_sbi`
 - Catalog/result helpers: `MAFCatalogSummary`, `MAFPhotometricSBIResult`,
   `MDNPhotometricSBIResult`, `transform_photometry`
+- Warnings: `SBISimulationFailureWarning`, `SBIContextSupportWarning`,
+  `SBIPosteriorSaturationWarning`
 - Noise: `ConditionalCatalogNoise`, `EmpiricalPhotometricNoise`
 
 ## Results and provenance
@@ -72,5 +74,5 @@ export without a documentation category is a release-review failure.
   `fit_catalog_with_restframe_grid`, `save_restframe_spectral_grid`,
   `load_restframe_spectral_grid`
 
-Backend classes and plotting functions live in their documented submodules
-rather than the top-level namespace.
+Backend classes and plotting functions, including `plot_effective_prior`, live
+in their documented submodules rather than the top-level namespace.
