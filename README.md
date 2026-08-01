@@ -189,15 +189,19 @@ phot_per_stellar_msun = backend.predict_photometry(
 )
 ```
 
-Named CIGALE SFHs use native v2022.0 modules. The stable shared subset is
-constant, exponential, and delayed-tau; arbitrary native CIGALE SFH modules
-remain available through the original module-list API. See
+Named SFHs use one cross-backend contract: CompoSED first evaluates the
+canonical tabular history, then sends it to FSPS directly or projects it onto
+CIGALE's chronological 1 Myr grid. Constant, exponential, delayed-tau,
+continuity, and arbitrary tabular histories therefore work with both engines.
+Native CIGALE SFH modules remain available through the original module-list
+API when `sfh` is omitted. See
 [`docs/cigale_backend.md`](docs/cigale_backend.md),
 [`docs/sfh_models.md`](docs/sfh_models.md), and the maintained
 [`COSMOS2020 tutorials`](notebooks/tutorials/README.md).
 
-The dedicated CIGALE environment pins NumPy 1.23.5 because upstream v2022.0's
-exact constant-SFH module still uses the removed `np.float` alias.
+The in-memory CompoSED SFH bridge does not patch the CIGALE installation or
+write temporary SFH files. Its source and projection convention are included
+in saved Problem provenance.
 
 ## Running Real FSPS Validation Locally
 

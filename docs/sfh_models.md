@@ -12,21 +12,19 @@ The stable models are:
 
 | Name | Equation or input | FSPS | CIGALE v2022.0 |
 |---|---|---:|---:|
-| `constant` | `SFR(t) = constant` | yes | `sfhperiodic`, one rectangular episode |
-| `exponential` | `SFR(t) proportional to exp(-t/tau)` | yes | `sfh2exp`, no burst |
-| `delayed_tau` | `SFR(t) proportional to t exp(-t/tau)` | yes | `sfhdelayed`, no burst |
-| `continuity` | piecewise-constant adjacent SFR ratios | yes | no |
-| `tabular` | user-supplied time and SFR arrays | yes | no |
+| `constant` | `SFR(t) = constant` | yes | yes |
+| `exponential` | `SFR(t) proportional to exp(-t/tau)` | yes | yes |
+| `delayed_tau` | `SFR(t) proportional to t exp(-t/tau)` | yes | yes |
+| `continuity` | piecewise-constant adjacent SFR ratios | yes | yes |
+| `tabular` | user-supplied time and SFR arrays | yes | yes |
 
-The exact CIGALE constant adapter uses upstream `sfhperiodic`. In CIGALE
-v2022.0 that module still references `np.float`, so the dedicated
-`envs/composed-cigale.yml` recipe pins NumPy 1.23.5. On newer NumPy CompoSED
-raises a targeted error instead of changing the SFH equation.
-
-The CIGALE adapters call native upstream modules. Continuity and arbitrary
-tabular histories are deliberately not emulated through temporary files in the
-production CIGALE backend. Users can still use any native CIGALE SFH module by
-listing it directly in `CIGALEBackend.modules` and omitting `sfh=`.
+All five named models first produce the same canonical `SFHHistory`. FSPS
+receives that table directly. CIGALE receives an in-memory projection onto its
+native chronological 1 Myr bins, normalized so
+`sum(SFR [Msun/yr]) * 1e6 yr = 1 Msun` formed. The process-local module is
+registered at runtime; CompoSED does not patch the CIGALE installation and does
+not create temporary files. Users can still use any native CIGALE SFH module
+by listing it directly in `CIGALEBackend.modules` and omitting `sfh=`.
 
 ## Scalar Parameters And Priors
 
@@ -62,12 +60,15 @@ sfh = DelayedTauSFH(
 At every evaluation CompoSED computes
 `tage_gyr = age_fraction * age_universe(z)`. Fractions must lie in `(0, 1]`.
 An absolute `tage_gyr` is also checked against the Universe age whenever a
-redshift is available. The default cosmology is Astropy `Planck18` for both
-named backends unless another cosmology is supplied.
+redshift is available. The default follows each backend's declared
+convention: FSPS uses its backend cosmology, while CIGALE named-SFH ages use
+`WMAP7` to match CIGALE v2022.0 redshifting. A supplied cosmology changes
+named-SFH age conversion but does not replace CIGALE's internal redshifting
+cosmology.
 
 ### Time-grid resolution
 
-The FSPS constant, exponential, and delayed-tau adapters evaluate the SFH on a
+The constant, exponential, and delayed-tau models evaluate the SFH on a
 linear time-since-onset grid with `n_time=256` by default. This is adequate only
 when the shortest physically important SFH timescale is resolved by several
 grid intervals. Very short `tau_gyr` values in an old population can therefore
@@ -80,6 +81,14 @@ stable. The relevant convergence criterion is the ratio of the shortest SFH
 timescale to `tage_gyr / (n_time - 1)`; 0.2 Gyr is a warning scale, not a
 universal physical boundary.
 
+Increasing `n_time` costs linearly in SFH array construction and memory. A few
+thousand points are normally negligible beside an SPS call. Very large values
+can still matter for hundreds of thousands of SBI simulations, especially
+with several process workers. FSPS receives the full table; CIGALE first
+integrates it into its fixed 1 Myr representation, so increasing `n_time`
+beyond convergence cannot increase CIGALE's final time resolution. Benchmark
+representative end-to-end simulations rather than only the SFH function.
+
 This parameterization enforces the cosmic upper bound only. In particular,
 `ContinuitySFH` also requires the resulting galaxy age to exceed its last
 fixed `lookback_edges_gyr` value. A broad redshift/age-fraction prior can still
@@ -90,15 +99,17 @@ effective prior. The current fixed-bin construction is otherwise unchanged.
 ## Normalization
 
 Constant, exponential, delayed-tau, and continuity histories are numerically
-normalized to form one solar mass before reaching FSPS. Native CIGALE SFH
-modules are called with `normalise=True`, which has the same internal formed
-mass convention. The backends then convert their spectra to luminosity per one
-solar mass of surviving stars. Consequently the public `log10_mass` remains
-present-day surviving stellar mass; the SFH object never applies mass scaling.
+normalized to form one solar mass. The named CIGALE bridge independently
+checks its projected 1 Myr bins against the same formed-mass convention. Native
+CIGALE SFH modules are called with `normalise=True`. The backends then convert
+their spectra to luminosity per one solar mass of surviving stars.
+Consequently the public `log10_mass` remains present-day surviving stellar
+mass; the SFH object never applies mass scaling.
 
-`TabularSFH` preserves its input amplitude. `FSPSBackend` normalizes it only
-when its declared `mass_normalization` is `PER_SOLAR_MASS`; with `ABSOLUTE`, the
-supplied SFR amplitude is retained.
+`TabularSFH` preserves its input amplitude. A per-solar-mass backend normalizes
+that amplitude before synthesis; FSPS with `MassNormalization.ABSOLUTE`
+retains it. CIGALE supports only the per-solar-mass mode, so its tabular bridge
+always normalizes to one solar mass formed.
 
 ## Continuity Convention
 
@@ -141,13 +152,16 @@ backend, parameters = build_cigale_backend_and_parameter_space(
 )
 ```
 
-CIGALE v2022.0 evaluates these native histories on a 1 Myr grid. CompoSED
-converts Gyr parameters to the nearest integer Myr and records no claim that a
-finite FSPS grid and CIGALE's native discrete history are pointwise identical.
+CIGALE v2022.0 evaluates stellar populations from a 1 Myr SFH array. CompoSED
+rounds the history endpoint to the nearest integer Myr, integrates the
+piecewise-linear canonical SFH into those bins, and records the source age,
+integer CIGALE age, time-scale adjustment, normalization, bridge schema, and
+source hash. The residual FSPS/CIGALE difference then comes from engine and
+SSP conventions rather than different named SFH equations.
 
 The backend SFH checks are:
 
 ```bash
 SPS_HOME=/path/to/fsps python -m pytest -q -m fsps tests/test_fsps_backend.py
-python -m pytest -q -m cigale tests/test_cigale_backend.py
+python -m pytest -q -m cigale tests/test_cigale_backend.py tests/test_cigale_tabular_sfh.py
 ```

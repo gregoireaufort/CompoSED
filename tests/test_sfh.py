@@ -166,36 +166,19 @@ def test_named_sfh_registry_and_backend_support_are_deterministic():
         "continuity",
         "tabular",
     )
-    assert available_sfh_models("cigale") == ("constant", "exponential", "delayed_tau")
+    assert available_sfh_models("cigale") == (
+        "constant",
+        "exponential",
+        "delayed_tau",
+        "continuity",
+        "tabular",
+    )
     assert isinstance(make_sfh("delayed"), DelayedTauSFH)
     assert isinstance(make_sfh("exp"), ExponentialSFH)
 
     with pytest.raises(ValueError, match="Unknown SFH model"):
         make_sfh("not-a-history")
-    with pytest.raises(ValueError, match="does not support backend 'cigale'"):
-        coerce_sfh_model(ContinuitySFH(), backend="cigale")
-
-
-def test_cigale_adapters_use_native_v2022_modules_and_myr_units():
-    delayed = DelayedTauSFH().cigale_parameters({"tage_gyr": 3.0, "tau_gyr": 0.5})
-    exponential = ExponentialSFH().cigale_parameters({"tage_gyr": 3.0, "tau_gyr": 0.5})
-    constant = ConstantSFH().cigale_parameters({"tage_gyr": 3.0})
-
-    assert delayed["age_main"] == 3000
-    assert delayed["tau_main"] == 500.0
-    assert delayed["f_burst"] == 0.0
-    assert delayed["normalise"] is True
-    assert exponential["age"] == 3000
-    assert exponential["tau_main"] == 500.0
-    assert exponential["f_burst"] == 0.0
-    assert constant == {
-        "type_bursts": 2,
-        "delta_bursts": 3001,
-        "tau_bursts": 3000.0,
-        "age": 3000,
-        "sfr_A": 1.0,
-        "normalise": True,
-    }
+    assert isinstance(coerce_sfh_model(ContinuitySFH(), backend="cigale"), ContinuitySFH)
 
 
 class FakeCosmology:

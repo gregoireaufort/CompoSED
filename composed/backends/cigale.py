@@ -12,6 +12,13 @@ from typing import Any, ClassVar, Mapping, Sequence
 
 import numpy as np
 
+from composed.backends._cigale_tabular import (
+    CIGALE_TABULAR_MODULE,
+    cigale_tabular_bridge_specification,
+    project_sfh_to_cigale_1myr,
+    register_cigale_tabular_module,
+    registered_cigale_sfh,
+)
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.errors import ModelDomainError
 from composed.filters import FilterSet
@@ -45,10 +52,14 @@ class CIGALEBackend(SEDBackend):
       density in mJy after the CIGALE ``redshifting`` module has supplied the
       luminosity distance.
     - Native CIGALE filter photometry is converted from mJy to maggies.
-    - CIGALE v2022.0's native ``redshifting`` module uses the WMAP7
-      cosmology. The default named-SFH age conversion here therefore also uses
-      Astropy ``WMAP7``. A custom cosmology affects CompoSED's named-SFH age
-      conversion only; it cannot change upstream CIGALE redshifting.
+    - Named CompoSED SFHs are evaluated as canonical tabular histories, then
+      integrated into CIGALE's chronological 1 Myr SFR bins. This is the same
+      SFH model contract used by the FSPS backend. Native CIGALE SFH modules
+      remain available when listed explicitly in ``modules`` with ``sfh=None``.
+    - CIGALE v2022.0's native ``redshifting`` module uses the WMAP7 cosmology.
+      The default named-SFH age conversion here therefore also uses Astropy
+      ``WMAP7``. A custom cosmology affects CompoSED's named-SFH age conversion
+      only; it cannot change upstream CIGALE redshifting.
     - ``MJY_PER_MAGGIE = 3.631e6`` follows the exact AB zero point
       ``3631 Jy``. ``C_A_PER_S = 2.99792458e18`` is the exact speed of light
       in Angstrom/s used for the mJy-to-``f_lambda`` conversion. No solar
@@ -93,21 +104,13 @@ class CIGALEBackend(SEDBackend):
             raise ValueError("CIGALEBackend requires at least one CIGALE module.")
         self.sfh = coerce_sfh_model(self.sfh, backend="cigale")
         if self.sfh is not None:
-            if self.sfh.name == "constant" and not hasattr(np, "float"):
-                raise ImportError(
-                    "The exact named constant CIGALE SFH uses upstream v2022.0 "
-                    "module 'sfhperiodic', which still references the removed np.float "
-                    "alias. Use the dedicated CompoSED CIGALE environment with "
-                    "NumPy 1.23.5, or patch that upstream alias explicitly. CompoSED "
-                    "does not replace the constant history with a long-tau approximation."
-                )
             existing_sfh_modules = tuple(module for module in modules if _is_sfh_module(module))
             if existing_sfh_modules:
                 raise ValueError(
                     "CIGALEBackend received both sfh=<named model> and native SFH module(s): "
                     f"{', '.join(existing_sfh_modules)}. Use one SFH declaration only."
                 )
-            modules = (str(self.sfh.cigale_module_name), *modules)
+            modules = (CIGALE_TABULAR_MODULE, *modules)
         self.modules = modules
 
         self.mass_normalization = MassNormalization(self.mass_normalization)
@@ -129,9 +132,9 @@ class CIGALEBackend(SEDBackend):
             )
 
         module_parameters = _normalize_module_parameters(self.module_parameters)
-        if self.sfh is not None and self.sfh.cigale_module_name in module_parameters:
+        if self.sfh is not None and CIGALE_TABULAR_MODULE in module_parameters:
             raise ValueError(
-                f"Parameters for generated CIGALE module {self.sfh.cigale_module_name!r} "
+                f"Parameters for generated CIGALE module {CIGALE_TABULAR_MODULE!r} "
                 "come from the named SFH object and may not also appear in module_parameters."
             )
         unknown_modules = set(module_parameters) - set(modules)
@@ -281,24 +284,56 @@ class CIGALEBackend(SEDBackend):
         )
 
     def _sed_from_params(self, params: Mapping[str, Any]):
-        params = dict(params)
-        module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=True)
-        sed = self._sed_warehouse().get_sed(module_list, parameter_list)
-        if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
-            mass_metadata = self._validate_per_solar_mass_sed(sed)
-        else:  # pragma: no cover - constructor currently rejects this mode.
-            mass_metadata = {}
-        return sed, module_list, mass_metadata
+        return self._run_cigale_sed(dict(params), include_redshifting=True)
 
     def _rest_sed_from_params(self, params: Mapping[str, Any]):
-        params = dict(params)
-        module_list, parameter_list = self._build_cigale_configuration(params, include_redshifting=False)
-        sed = self._sed_warehouse().get_sed(module_list, parameter_list)
+        return self._run_cigale_sed(dict(params), include_redshifting=False)
+
+    def _run_cigale_sed(self, params: dict[str, Any], *, include_redshifting: bool):
+        projected_sfh = self._project_named_sfh(params)
+        if projected_sfh is None:
+            module_list, parameter_list = self._build_cigale_configuration(
+                params,
+                include_redshifting=include_redshifting,
+                sfh_history_hash=None,
+            )
+            sed = self._sed_warehouse().get_sed(module_list, parameter_list)
+            sfh_metadata = {"sfh_execution": "native_cigale"}
+        else:
+            # Registration is deliberately repeated in every process. Spawned
+            # catalog workers do not inherit the parent process's sys.modules
+            # entry or its process-local history registry.
+            register_cigale_tabular_module()
+            with registered_cigale_sfh(projected_sfh.sfr_msun_per_yr) as history_hash:
+                module_list, parameter_list = self._build_cigale_configuration(
+                    params,
+                    include_redshifting=include_redshifting,
+                    sfh_history_hash=history_hash,
+                )
+                sed = self._sed_warehouse().get_sed(module_list, parameter_list)
+            sfh_metadata = {
+                "sfh_execution": "composed_tabular_1myr",
+                "sfh_model": self.sfh.specification(),
+                "sfh_projection": projected_sfh.metadata(),
+                "sfh_history_sha256": history_hash,
+            }
+
         if self.mass_normalization == MassNormalization.PER_SOLAR_MASS:
             mass_metadata = self._validate_per_solar_mass_sed(sed)
         else:  # pragma: no cover - constructor currently rejects this mode.
             mass_metadata = {}
+        mass_metadata.update(sfh_metadata)
         return sed, module_list, mass_metadata
+
+    def _project_named_sfh(self, params: Mapping[str, Any]):
+        if self.sfh is None:
+            return None
+        history = self.sfh.evaluate(
+            params,
+            redshift=self._redshift_for_named_sfh(params),
+            cosmology=self._cosmology(),
+        )
+        return project_sfh_to_cigale_1myr(history)
 
     def _sed_warehouse(self):
         if self.cache_warehouse and self._warehouse is not None:
@@ -311,7 +346,12 @@ class CIGALEBackend(SEDBackend):
             warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
             from pcigale.warehouse import SedWarehouse
 
-        nocache = list(self.nocache_modules) if self.nocache_modules is not None else None
+        nocache = list(self.nocache_modules) if self.nocache_modules is not None else []
+        if self.sfh is not None and CIGALE_TABULAR_MODULE not in nocache:
+            # CIGALE's module_cache is unbounded. The bridge module carries a
+            # full SFH array, so retaining one instance per simulation would
+            # make large SBI simulations grow without bound.
+            nocache.append(CIGALE_TABULAR_MODULE)
         warehouse = SedWarehouse(nocache=nocache)
         if self.cache_warehouse:
             self._warehouse = warehouse
@@ -322,6 +362,7 @@ class CIGALEBackend(SEDBackend):
         params: Mapping[str, Any],
         *,
         include_redshifting: bool,
+        sfh_history_hash: str | None,
     ) -> tuple[list[str], list[dict[str, Any]]]:
         configs = {module: {} for module in self.modules}
         used = set()
@@ -342,13 +383,10 @@ class CIGALEBackend(SEDBackend):
             configs[entry.module][entry.parameter] = _coerce_cigale_value(value, entry.dtype)
 
         if self.sfh is not None:
-            sfh_redshift = self._redshift_for_named_sfh(params)
-            configs[str(self.sfh.cigale_module_name)].update(
-                self.sfh.cigale_parameters(
-                    params,
-                    redshift=sfh_redshift,
-                    cosmology=self._cosmology(),
-                )
+            if sfh_history_hash is None:
+                raise RuntimeError("Named CIGALE SFH configuration requires a registered history hash.")
+            configs[CIGALE_TABULAR_MODULE].update(
+                {"history_hash": str(sfh_history_hash), "normalise": True}
             )
             used.update(self.sfh.required_parameters)
 
@@ -464,6 +502,9 @@ class CIGALEBackend(SEDBackend):
             "mjy_per_maggie": MJY_PER_MAGGIE,
             "speed_of_light_angstrom_per_s": C_A_PER_S,
             "solar_luminosity_conversion": "none; native CIGALE W/nm and mJy are preserved",
+            "named_sfh_execution": (
+                None if self.sfh is None else cigale_tabular_bridge_specification()
+            ),
         }
 
     def _validate_per_solar_mass_sed(self, sed) -> dict[str, float]:

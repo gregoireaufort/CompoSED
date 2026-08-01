@@ -44,11 +44,16 @@ class SFHHistory:
 
 
 class SFHModel:
-    """Base contract for a named SFH parameterization."""
+    """Base contract for a named SFH parameterization.
+
+    Every named model produces the same canonical history for every backend:
+    increasing time since star-formation onset in Gyr and SFR in Msun/yr.
+    Backend-specific code is responsible only for projecting that history onto
+    the population-synthesis engine's native time representation.
+    """
 
     name: ClassVar[str] = "sfh"
     supported_backends: ClassVar[tuple[str, ...]] = ()
-    cigale_module_name: ClassVar[str | None] = None
 
     @property
     def required_parameters(self) -> tuple[str, ...]:
@@ -66,15 +71,6 @@ class SFHModel:
         cosmology=None,
     ) -> SFHHistory:
         raise NotImplementedError
-
-    def cigale_parameters(
-        self,
-        params: Mapping[str, object],
-        *,
-        redshift: float | None = None,
-        cosmology=None,
-    ) -> dict[str, object]:
-        raise ValueError(f"SFH model {self.name!r} has no native CIGALE v2022.0 adapter.")
 
     def specification(self) -> dict[str, object]:
         return {
@@ -134,7 +130,6 @@ class ConstantSFH(_AgeParameterizedSFH):
 
     name: ClassVar[str] = "constant"
     supported_backends: ClassVar[tuple[str, ...]] = ("fsps", "cigale")
-    cigale_module_name: ClassVar[str] = "sfhperiodic"
 
     def evaluate(self, params, *, redshift=None, cosmology=None) -> SFHHistory:
         age_gyr = self._age_gyr(params, redshift=redshift, cosmology=cosmology)
@@ -144,17 +139,6 @@ class ConstantSFH(_AgeParameterizedSFH):
             np.ones_like(time),
             {"model": self.name, "age_gyr": age_gyr},
         )
-
-    def cigale_parameters(self, params, *, redshift=None, cosmology=None) -> dict[str, object]:
-        age_myr = _cigale_age_myr(self._age_gyr(params, redshift=redshift, cosmology=cosmology))
-        return {
-            "type_bursts": 2,
-            "delta_bursts": age_myr + 1,
-            "tau_bursts": float(age_myr),
-            "age": age_myr,
-            "sfr_A": 1.0,
-            "normalise": True,
-        }
 
 
 @dataclass(frozen=True)
@@ -204,19 +188,6 @@ class DelayedTauSFH(_TauSFH):
     name: ClassVar[str] = "delayed_tau"
     mode: ClassVar[str] = "delayed_tau"
     supported_backends: ClassVar[tuple[str, ...]] = ("fsps", "cigale")
-    cigale_module_name: ClassVar[str] = "sfhdelayed"
-
-    def cigale_parameters(self, params, *, redshift=None, cosmology=None) -> dict[str, object]:
-        age_myr = _cigale_age_myr(self._age_gyr(params, redshift=redshift, cosmology=cosmology))
-        return {
-            "tau_main": 1000.0 * self._tau_gyr(params),
-            "age_main": age_myr,
-            "tau_burst": 50.0,
-            "age_burst": 1,
-            "f_burst": 0.0,
-            "sfr_A": 1.0,
-            "normalise": True,
-        }
 
 
 @dataclass(frozen=True)
@@ -226,19 +197,6 @@ class ExponentialSFH(_TauSFH):
     name: ClassVar[str] = "exponential"
     mode: ClassVar[str] = "exponential"
     supported_backends: ClassVar[tuple[str, ...]] = ("fsps", "cigale")
-    cigale_module_name: ClassVar[str] = "sfh2exp"
-
-    def cigale_parameters(self, params, *, redshift=None, cosmology=None) -> dict[str, object]:
-        age_myr = _cigale_age_myr(self._age_gyr(params, redshift=redshift, cosmology=cosmology))
-        return {
-            "tau_main": 1000.0 * self._tau_gyr(params),
-            "tau_burst": 50.0,
-            "f_burst": 0.0,
-            "age": age_myr,
-            "burst_age": 1,
-            "sfr_0": 1.0,
-            "normalise": True,
-        }
 
 
 @dataclass(frozen=True)
@@ -258,7 +216,7 @@ class ContinuitySFH(SFHModel):
     samples_per_bin: int = 8
     boundary_epsilon_gyr: float = 1.0e-5
     name: ClassVar[str] = "continuity"
-    supported_backends: ClassVar[tuple[str, ...]] = ("fsps",)
+    supported_backends: ClassVar[tuple[str, ...]] = ("fsps", "cigale")
 
     def __post_init__(self) -> None:
         if not str(self.age):
@@ -368,7 +326,7 @@ class TabularSFH(SFHModel):
     time: str = "tabular_time_gyr"
     sfr: str = "tabular_sfr_msun_per_yr"
     name: ClassVar[str] = "tabular"
-    supported_backends: ClassVar[tuple[str, ...]] = ("fsps",)
+    supported_backends: ClassVar[tuple[str, ...]] = ("fsps", "cigale")
 
     def __post_init__(self) -> None:
         if not str(self.time) or not str(self.sfr):
@@ -525,13 +483,6 @@ def _finite_parameter(params: Mapping[str, object], name: str) -> float:
     if not np.isfinite(scalar):
         raise ModelDomainError(f"SFH parameter {name!r} must be finite.")
     return scalar
-
-
-def _cigale_age_myr(age_gyr: float) -> int:
-    age_myr = int(np.rint(1000.0 * float(age_gyr)))
-    if age_myr < 2:
-        raise ModelDomainError("CIGALE named SFHs require a galaxy age of at least 2 Myr.")
-    return age_myr
 
 
 def _validate_history_arrays(time: np.ndarray, sfr: np.ndarray) -> None:

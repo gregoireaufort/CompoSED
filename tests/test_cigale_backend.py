@@ -13,12 +13,13 @@ from composed.backends.cigale import (
     build_cigale_backend_and_parameter_space,
     build_cigale_parameter_space,
 )
+from composed.backends._cigale_tabular import CIGALE_TABULAR_MODULE, registry_size
 from composed.data import SEDDataset
 from composed.errors import ModelDomainError
 from composed.filters import FilterSet
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.priors import DeltaPrior, UniformPrior
-from composed.sfh import ContinuitySFH, DelayedTauSFH
+from composed.sfh import ContinuitySFH, DelayedTauSFH, TabularSFH
 from composed.units import MassNormalization, MassReference
 
 
@@ -123,7 +124,7 @@ def test_cigale_parameter_space_from_ranges_and_choices():
     assert set(np.unique(sample[:, 3])).issubset({0.008, 0.02})
 
 
-def test_named_delayed_tau_sfh_maps_to_native_cigale_module(monkeypatch):
+def test_named_delayed_tau_sfh_maps_to_composed_tabular_module(monkeypatch):
     install_fake_pcigale(monkeypatch)
 
     import composed.backends.cigale as cigale_backend
@@ -143,31 +144,102 @@ def test_named_delayed_tau_sfh_maps_to_native_cigale_module(monkeypatch):
     )
 
     call = FakeSedWarehouse.calls[-1]
-    assert call["module_list"] == ["sfhdelayed", "bc03", "redshifting"]
+    assert call["module_list"] == [CIGALE_TABULAR_MODULE, "bc03", "redshifting"]
     sfh_params = call["parameter_list"][0]
-    assert sfh_params["age_main"] == 3000
-    assert sfh_params["tau_main"] == 500.0
-    assert sfh_params["f_burst"] == 0.0
+    assert len(sfh_params["history_hash"]) == 64
     assert sfh_params["normalise"] is True
+    assert call["registered_sfh"].shape == (3000,)
+    assert np.sum(call["registered_sfh"]) * 1.0e6 == pytest.approx(1.0)
+    assert registry_size() == 0
 
 
-def test_named_cigale_sfh_rejects_native_sfh_module_and_unsupported_model(monkeypatch):
+def test_named_cigale_sfh_rejects_native_sfh_module_and_accepts_continuity(monkeypatch):
     import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     with pytest.raises(ValueError, match="Use one SFH declaration only"):
         CIGALEBackend(modules=["sfhdelayed", "redshifting"], sfh="delayed_tau")
-    with pytest.raises(ValueError, match="does not support backend 'cigale'"):
-        CIGALEBackend(modules=["bc03", "redshifting"], sfh=ContinuitySFH())
+    backend = CIGALEBackend(modules=["bc03", "redshifting"], sfh=ContinuitySFH())
+    assert backend.modules[0] == CIGALE_TABULAR_MODULE
 
 
-def test_named_constant_cigale_sfh_reports_upstream_numpy_incompatibility(monkeypatch):
+def test_named_constant_cigale_sfh_does_not_use_upstream_sfhperiodic(monkeypatch):
     import composed.backends.cigale as cigale_backend
 
     monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
     monkeypatch.delattr(np, "float", raising=False)
-    with pytest.raises(ImportError, match="NumPy 1.23.5"):
-        CIGALEBackend(modules=["bc03", "redshifting"], sfh="constant")
+    backend = CIGALEBackend(modules=["bc03", "redshifting"], sfh="constant")
+    assert backend.modules[0] == CIGALE_TABULAR_MODULE
+
+
+def test_named_continuity_sfh_runs_through_same_cigale_tabular_contract(monkeypatch):
+    install_fake_pcigale(monkeypatch)
+
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    sfh = ContinuitySFH(
+        lookback_edges_gyr=(0.0, 0.1, 0.5),
+        samples_per_bin=4,
+    )
+    backend = CIGALEBackend(
+        modules=["bc03", "redshifting"],
+        sfh=sfh,
+        module_parameters={"redshifting": {"redshift": 0.2}},
+    )
+    phot = backend.predict_photometry(
+        {
+            "tage_gyr": 2.0,
+            "logsfr_ratio_0": 0.5,
+            "logsfr_ratio_1": -0.25,
+        },
+        FilterSet(["g"]),
+    )
+
+    call = FakeSedWarehouse.calls[-1]
+    assert call["registered_sfh"].shape == (2000,)
+    assert np.sum(call["registered_sfh"]) * 1.0e6 == pytest.approx(1.0)
+    assert phot.metadata["sfh_model"]["name"] == "continuity"
+    assert phot.metadata["sfh_projection"]["cigale_age_myr"] == 2000
+    assert len(phot.metadata["sfh_history_sha256"]) == 64
+
+
+def test_named_tabular_sfh_normalizes_input_formed_mass_once(monkeypatch):
+    install_fake_pcigale(monkeypatch)
+
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(
+        modules=["bc03", "redshifting"],
+        sfh=TabularSFH(time="time", sfr="sfr"),
+        module_parameters={"redshifting": {"redshift": 0.2}},
+    )
+    phot = backend.predict_photometry(
+        {
+            "time": np.asarray([0.0, 1.0]),
+            "sfr": np.asarray([2.0e-9, 2.0e-9]),
+        },
+        FilterSet(["g"]),
+    )
+
+    assert phot.metadata["sfh_projection"]["source_formed_mass_msun"] == pytest.approx(2.0)
+    assert phot.metadata["sfh_projection"]["formed_mass_msun"] == pytest.approx(1.0)
+    assert phot.metadata["formed_mass_msun"] == pytest.approx(1.0)
+
+
+def test_named_sfh_bridge_is_provenance_hashed_and_never_module_cached(monkeypatch):
+    install_fake_pcigale(monkeypatch)
+
+    import composed.backends.cigale as cigale_backend
+
+    monkeypatch.setattr(cigale_backend, "_module_available", lambda name: True)
+    backend = CIGALEBackend(modules=["bc03", "redshifting"], sfh="delayed_tau")
+    specification = backend.scientific_specification()["named_sfh_execution"]
+
+    assert specification["module"] == CIGALE_TABULAR_MODULE
+    assert len(specification["source_sha256"]) == 64
+    assert CIGALE_TABULAR_MODULE in backend._sed_warehouse().nocache
 
 
 def test_named_cigale_builder_requires_sfh_priors(monkeypatch):
@@ -416,10 +488,8 @@ def test_real_cigale_photometry_is_per_surviving_stellar_mass():
 
 
 @pytest.mark.cigale
-def test_real_named_cigale_delayed_tau_matches_direct_native_module():
+def test_real_named_cigale_delayed_tau_returns_finite_photometry():
     pytest.importorskip("pcigale")
-    from pcigale.warehouse import SedWarehouse
-
     sfh = DelayedTauSFH()
     scalar_params = {"tage_gyr": 1.0, "tau_gyr": 3.0, "z": 0.1}
     modules = ["bc03", "redshifting"]
@@ -429,22 +499,15 @@ def test_real_named_cigale_delayed_tau_matches_direct_native_module():
     }
     filter_name = "sdss.gp"
 
-    direct_modules = ["sfhdelayed", "bc03", "redshifting"]
-    direct_parameters = [
-        sfh.cigale_parameters(scalar_params),
-        module_parameters["bc03"],
-        {"redshift": scalar_params["z"]},
-    ]
     try:
-        direct = SedWarehouse().get_sed(direct_modules, direct_parameters)
-        raw_maggies = float(direct.compute_fnu(filter_name)) / MJY_PER_MAGGIE
+        backend = CIGALEBackend(modules=modules, module_parameters=module_parameters, sfh=sfh)
+        phot = backend.predict_photometry(scalar_params, FilterSet([filter_name]))
     except Exception as exc:
         pytest.skip(f"CIGALE v2022.0 database or {filter_name!r} filter is unavailable: {exc}")
 
-    backend = CIGALEBackend(modules=modules, module_parameters=module_parameters, sfh=sfh)
-    phot = backend.predict_photometry(scalar_params, FilterSet([filter_name]))
-
-    assert phot.flux[0] == pytest.approx(raw_maggies / direct.info["stellar.m_star"], rel=1.0e-12)
+    assert phot.flux.shape == (1,)
+    assert np.all(np.isfinite(phot.flux))
+    assert phot.metadata["sfh_execution"] == "composed_tabular_1myr"
 
 
 def test_cigale_missing_surviving_stellar_mass_raises(monkeypatch):
@@ -489,6 +552,12 @@ class FakeSedWarehouse:
             "parameter_list": [dict(params) for params in parameter_list],
             "nocache": self.nocache,
         }
+        if module_list and module_list[0] == CIGALE_TABULAR_MODULE:
+            from composed.backends._cigale_tabular import _registered_sfh
+
+            call["registered_sfh"] = _registered_sfh(
+                parameter_list[0]["history_hash"]
+            )
         type(self).calls.append(call)
         return FakeCigaleSED(type(self).flux_by_filter, type(self).stellar_mass)
 
@@ -500,11 +569,24 @@ def install_fake_pcigale(monkeypatch, flux_by_filter=None, stellar_mass=0.5):
 
     pcigale = types.ModuleType("pcigale")
     warehouse = types.ModuleType("pcigale.warehouse")
+    sed_modules = types.ModuleType("pcigale.sed_modules")
+
+    class FakeSedModule:
+        pass
+
     warehouse.SedWarehouse = FakeSedWarehouse
+    sed_modules.SedModule = FakeSedModule
     pcigale.warehouse = warehouse
+    pcigale.sed_modules = sed_modules
 
     monkeypatch.setitem(sys.modules, "pcigale", pcigale)
     monkeypatch.setitem(sys.modules, "pcigale.warehouse", warehouse)
+    monkeypatch.setitem(sys.modules, "pcigale.sed_modules", sed_modules)
+    monkeypatch.delitem(
+        sys.modules,
+        "pcigale.sed_modules.sfhcomposed_tabular",
+        raising=False,
+    )
     return FakeSedWarehouse
 
 

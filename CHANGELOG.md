@@ -30,6 +30,11 @@
   learned COSMOS survey-noise model and explicit likelihood discrepancy.
 - CIGALE v2022.0 provenance now records its native WMAP7 redshifting
   cosmology and exact mJy/maggie and spectral conversion constants.
+- Named SFHs now have one universal backend contract. Constant, exponential,
+  delayed-tau, continuity, and tabular histories are evaluated once in
+  CompoSED, passed directly to FSPS, and projected in memory onto CIGALE's
+  chronological 1 Myr grid. Native CIGALE SFH modules remain available when
+  explicitly requested.
 
 ## 0.1.1
 

@@ -123,14 +123,12 @@ python scripts/check_environment.py --cigale
 python -m pytest -q -m cigale tests/test_cigale_backend.py
 ```
 
-The dedicated recipe pins NumPy 1.23.5 because CIGALE v2022.0's native
-`sfhperiodic` module, used for an exact constant SFH, still references the
-removed `np.float` alias. CompoSED reports this incompatibility explicitly on
-newer NumPy and does not silently replace a constant history with an
-approximately constant long-timescale model. Exponential and delayed-tau
-native modules do not have this specific limitation. The recipe also pins
-`setuptools<81` because CIGALE v2022.0 imports the legacy `pkg_resources`
-module at runtime.
+The dedicated recipe pins NumPy 1.23.5 for compatibility with legacy native
+CIGALE v2022.0 modules such as `sfhperiodic`, which still reference the removed
+`np.float` alias. Named CompoSED SFHs use the in-memory tabular bridge and do
+not depend on `sfhperiodic`, but the native module-list API remains available.
+The recipe also pins `setuptools<81` because CIGALE v2022.0 imports the legacy
+`pkg_resources` module at runtime.
 
 CompoSED does not hide CIGALE's database/module setup.  If CIGALE cannot build
 one SED through `pcigale.warehouse.SedWarehouse`, CompoSED cannot use it either.

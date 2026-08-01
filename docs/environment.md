@@ -11,8 +11,9 @@ instructions.
 - Python 3.11.
 - CIGALE target release: `v2022.0` from
   <https://gitlab.lam.fr/cigale/cigale/-/tree/v2022.0>.
-- NumPy 1.23.5 in the CIGALE environment, preserving the upstream
-  `sfhperiodic` implementation.
+- NumPy 1.23.5 in the CIGALE environment, preserving compatibility with
+  legacy native modules such as `sfhperiodic`. Named CompoSED SFHs use the
+  separate in-memory tabular bridge.
 - `astro-sedpy==0.4.1` for the FSPS/sedpy photometry path.
 - `SPS_HOME` points at the local FSPS data directory.
 

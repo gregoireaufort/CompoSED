@@ -15,7 +15,7 @@ spectral likelihoods, and joint spectrophotometric fits are experimental.
 | Backend | Photometry | Spectrum generation | Named SFHs | Status |
 |---|---:|---:|---:|---|
 | FSPS | stable | experimental | yes | photometry stable |
-| CIGALE v2022.0 | stable | experimental | supported subset | photometry stable |
+| CIGALE v2022.0 | stable | experimental | all stable named SFHs plus native modules | photometry stable |
 | Mock | testing | experimental testing | not applicable | testing |
 | Fast rest-frame catalog projection | experimental | no | restricted | experimental |
 

@@ -64,12 +64,13 @@ mass_reference: MassReference
 
 Backends may use any internal physics library, but they should raise ordinary Python numerical exceptions for invalid model states and return finite model fluxes for valid states.
 
-FSPS and CIGALE are both backend implementations of this same contract. FSPS
-accepts either a named CompoSED SFH or explicit tabular arrays and forwards
-ordinary FSPS parameters into `python-fsps`. CIGALE accepts either a supported
-named SFH plus an ordered list of non-SFH modules, or the original complete
-native module list. It calls `pcigale.warehouse.SedWarehouse`. Neither backend
-owns the likelihood or the priors.
+FSPS and CIGALE are both backend implementations of this same contract. A
+named CompoSED SFH always becomes one canonical tabular history. FSPS receives
+that table directly; CIGALE receives its mass-preserving 1 Myr projection
+through a CompoSED-owned in-memory module. CIGALE also accepts the original
+complete native module list when `sfh` is omitted. It calls
+`pcigale.warehouse.SedWarehouse`. Neither backend owns the likelihood or the
+priors.
 
 The production FSPS backend reuses one mutable `StellarPopulation` for speed,
 but resets every parameter overridden by the preceding call before evaluating
@@ -104,9 +105,11 @@ rebuilt; they cannot be safely relabeled because their flux amplitudes differ.
 Stable named SFHs live in `composed/sfh.py`. They consume scalar named values,
 produce a canonical increasing time-since-onset grid in Gyr and SFR in solar
 masses per year, and record their conventions in metadata. Priors remain in
-`ParameterSpace`. Backend-specific translations are explicit: FSPS receives a
-tabular history, while the supported CIGALE subset maps to native v2022.0 SFH
-modules.
+`ParameterSpace`. Backend-specific translations are explicit: FSPS receives
+the canonical history, while CIGALE receives chronological 1 Myr bin averages
+normalized to one solar mass formed. The latter is passed by a content hash
+through a short-lived process-local registry, keeping CIGALE's cache keys
+hashable and bounded during large simulations.
 
 Lower-level physical transforms live under `composed/transforms/`. For
 example, Pop-COSMOS continuity-SFH utilities convert catalog theta rows into

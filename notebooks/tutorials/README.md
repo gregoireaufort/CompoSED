@@ -4,7 +4,7 @@ Run the notebooks in numerical order:
 
 1. `00_prepare_cosmos2020_ugrizYJH.ipynb` reads the full FARMER catalog once and writes the shared 100,000-object artifact.
 2. `01_fsps_maf_cosmos2020_catalog.ipynb` trains an FSPS continuity-SFH MAF and summarizes 100,000 posteriors.
-3. `02_cigale_maf_cosmos2020_catalog.ipynb` repeats the catalog workflow with native CIGALE delayed-tau modeling.
+3. `02_cigale_maf_cosmos2020_catalog.ipynb` repeats the catalog workflow with a CompoSED delayed-tau history projected onto CIGALE's 1 Myr SFH grid.
 4. `03_cigale_tamis_single_galaxy.ipynb` fits one stored galaxy with CIGALE and CompoSED's self-contained mixed-proposal TAMIS. The BC03 metallicity choices form an explicit categorical block.
 5. `04_fsps_pocomc_single_galaxy.ipynb` fits the same galaxy with FSPS continuity SFHs and PocoMC.
 

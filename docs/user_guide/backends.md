@@ -69,7 +69,10 @@ backend, parameters = build_cigale_backend_and_parameter_space(
 
 The CIGALE backend calls `pcigale.warehouse.SedWarehouse` and targets upstream
 CIGALE v2022.0. SFH modules are normalized, and native CIGALE mJy photometry is
-converted to maggies. Module order remains the caller's scientific choice.
+converted to maggies. Named CompoSED SFHs use the same canonical history as
+FSPS and are projected in memory onto CIGALE's 1 Myr grid. Module order remains
+the caller's scientific choice. Listing a native CIGALE SFH module with
+`sfh=None` retains the original CIGALE behavior.
 
 See {doc}`../cigale_backend` for parameter specifications and native module
 details.

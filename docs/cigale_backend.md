@@ -104,10 +104,13 @@ backend, parameter_space = build_cigale_backend_and_parameter_space(
 )
 ```
 
-CompoSED maps constant, exponential, and delayed-tau histories to native
-CIGALE v2022.0 modules with `normalise=True`. See `docs/sfh_models.md` for the
-equations and unit conversion. Continuity and arbitrary tabular histories are
-not silently approximated in this backend.
+CompoSED evaluates constant, exponential, delayed-tau, continuity, and tabular
+histories through the same `SFHModel.evaluate()` contract used by FSPS. It then
+integrates the history into CIGALE's chronological 1 Myr bins and enforces one
+solar mass formed. The in-memory module is registered independently inside
+every process, is excluded from CIGALE's unbounded module cache, and is
+identified by source hash in Problem provenance. See `docs/sfh_models.md` for
+the equations, units, and time-grid convergence guidance.
 
 The original native-module API remains available for every CIGALE SFH. Module
 parameters are specified as a nested dictionary:
