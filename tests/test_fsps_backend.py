@@ -1,6 +1,7 @@
 import os
 import sys
 import types
+import warnings
 
 import numpy as np
 import pytest
@@ -77,6 +78,71 @@ def test_fsps_dust_emission_defaults_to_python_fsps_and_can_be_overridden(monkey
 
     assert captured_kwargs[0]["add_dust_emission"] is True
     assert captured_kwargs[1]["add_dust_emission"] is False
+
+
+def test_fsps_warns_once_when_gas_metallicity_is_left_implicit(monkeypatch):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(
+        mass_normalization=MassNormalization.ABSOLUTE,
+        cosmology=FakeCosmology(age_gyr=20.0),
+    )
+    backend._sp = FakeStellarPopulation()
+    common = {
+        "z": 0.0,
+        "logzsol": -0.4,
+        "tabular_time_gyr": [0.0, 1.0],
+        "tabular_sfr_msun_per_yr": [1.0, 1.0],
+    }
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        backend.predict_rest_spectrum(common)
+        backend.predict_rest_spectrum(common)
+
+    matching = [item for item in caught if "gas_logz" in str(item.message)]
+    assert len(matching) == 1
+    assert backend._sp.params["gas_logz"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("sp_kwargs", "call_parameters"),
+    [
+        ({"gas_logz": -0.2}, {}),
+        (None, {"gas_logz": -0.4}),
+        ({"add_neb_emission": False}, {}),
+    ],
+)
+def test_fsps_does_not_warn_when_gas_metallicity_is_explicit_or_nebular_is_off(
+    monkeypatch,
+    sp_kwargs,
+    call_parameters,
+):
+    import composed.backends.fsps as fsps_backend
+
+    monkeypatch.setattr(fsps_backend, "_module_available", lambda name: True)
+    backend = FSPSBackend(
+        sp_kwargs=sp_kwargs,
+        mass_normalization=MassNormalization.ABSOLUTE,
+        cosmology=FakeCosmology(age_gyr=20.0),
+    )
+    backend._sp = FakeStellarPopulation()
+    if sp_kwargs:
+        backend._sp.params.update(sp_kwargs)
+    parameters = {
+        "z": 0.0,
+        "logzsol": -0.4,
+        "tabular_time_gyr": [0.0, 1.0],
+        "tabular_sfr_msun_per_yr": [1.0, 1.0],
+        **call_parameters,
+    }
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        backend.predict_rest_spectrum(parameters)
+
+    assert not any("gas_logz" in str(item.message) for item in caught)
 
 
 def test_invalid_sfh_time_grid_raises_clear_error(monkeypatch):
@@ -268,6 +334,7 @@ def test_photometry_output_shape_matches_number_of_filters(monkeypatch):
         {
             "z": 0.0,
             "logzsol": -0.2,
+            "gas_logz": -0.2,
             "dust2": 0.1,
             "tabular_time_gyr": [0.0, 1.0, 2.0],
             "tabular_sfr_msun_per_yr": [1.0, 1.0, 1.0],
@@ -509,13 +576,20 @@ def test_real_fsps_named_delayed_tau_matches_its_explicit_tabular_history():
 
     filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
     sfh = DelayedTauSFH(n_time=64)
-    scalar_params = {"zred": 0.1, "tage_gyr": 5.0, "tau_gyr": 1.5, "logzsol": -0.3}
+    scalar_params = {
+        "zred": 0.1,
+        "tage_gyr": 5.0,
+        "tau_gyr": 1.5,
+        "logzsol": -0.3,
+        "gas_logz": -0.3,
+    }
     named = FSPSBackend(sfh=sfh).predict_photometry(scalar_params, filters)
 
     history = sfh.evaluate(scalar_params, redshift=0.1)
     tabular_params = {
         "zred": 0.1,
         "logzsol": -0.3,
+        "gas_logz": -0.3,
         "tabular_time_gyr": history.time_gyr,
         "tabular_sfr_msun_per_yr": history.sfr_msun_per_yr,
     }
@@ -541,6 +615,7 @@ def test_real_fsps_high_redshift_continuity_history_is_numerically_valid():
     params = {
         "zred": 4.8,
         "logzsol": -0.2,
+        "gas_logz": -0.2,
         "dust2": 0.3,
         "age_fraction": 0.65,
         **{name: 0.0 for name in sfh.ratio_names},
@@ -569,6 +644,7 @@ class FakeStellarPopulation:
                 "agn_tau": 10.0,
                 "imf_type": 2,
                 "dust_type": 0,
+                "add_neb_emission": True,
             }
         )
         self.tabular_sfh = None

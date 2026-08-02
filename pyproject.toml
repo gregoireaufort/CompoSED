@@ -51,7 +51,7 @@ samplers = [
   "tqdm",
 ]
 mc-diagnostics = [
-  "arviz",
+  "arviz>=0.20,<2",
 ]
 notebooks = [
   "jupyterlab",
@@ -96,7 +96,7 @@ all = [
   "scipy",
   "emcee",
   "pocomc",
-  "arviz",
+  "arviz>=0.20,<2",
   "corner",
   "pandas",
   "tqdm",

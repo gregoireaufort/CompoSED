@@ -28,12 +28,13 @@ from composed import (
 )
 
 parameters = ParameterSpace(
-    names=["zred", "log10_mass", "dust2", "logzsol"],
+    names=["zred", "log10_mass", "dust2", "logzsol", "gas_logz"],
     priors={
         "zred": UniformPrior(0.05, 2.0),
         "log10_mass": UniformPrior(8.0, 12.0),
         "dust2": UniformPrior(0.0, 1.0),
         "logzsol": UniformPrior(-1.0, 0.2),
+        "gas_logz": UniformPrior(-1.0, 0.2),
     },
 )
 

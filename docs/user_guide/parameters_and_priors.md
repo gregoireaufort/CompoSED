@@ -7,11 +7,12 @@ parameters:
 
 ```python
 parameters = ParameterSpace(
-    names=["zred", "log10_mass", "logzsol", "dust2"],
+    names=["zred", "log10_mass", "logzsol", "gas_logz", "dust2"],
     priors={
         "zred": UniformPrior(0.01, 4.0),
         "log10_mass": UniformPrior(7.0, 13.0),
         "logzsol": UniformPrior(-1.5, 0.3),
+        "gas_logz": UniformPrior(-1.5, 0.3),
         "dust2": UniformPrior(0.0, 2.0),
     },
 )

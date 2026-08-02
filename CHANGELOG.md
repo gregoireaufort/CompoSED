@@ -35,6 +35,21 @@
   CompoSED, passed directly to FSPS, and projected in memory onto CIGALE's
   chronological 1 Myr grid. Native CIGALE SFH modules remain available when
   explicitly requested.
+- Constant, exponential, and delayed-tau SFHs now default to `n_time=2048`;
+  CIGALE's 1 Myr array is documented as a destination grid rather than extra
+  physical resolution beyond the canonical CompoSED history.
+- FSPS documentation now records every constructor default that differs from
+  python-fsps 0.4.7. The backend warns once when nebular emission is active,
+  stellar metallicity is explicit, and gas metallicity is silently left at
+  the independent python-fsps baseline. An explicit `parameter_transform`
+  example shows how to tie `gas_logz` deterministically to `logzsol`.
+
+### Fixed
+
+- ArviZ tail ESS diagnostics now specify the 5% and 95% tail probabilities,
+  restoring `diagnose()` for MCMC results with current ArviZ releases. The
+  supported ArviZ range is bounded and the optional diagnostics stack has its
+  own CI job.
 
 ## 0.1.1
 

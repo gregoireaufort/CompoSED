@@ -69,25 +69,25 @@ cosmology.
 ### Time-grid resolution
 
 The constant, exponential, and delayed-tau models evaluate the SFH on a
-linear time-since-onset grid with `n_time=256` by default. This is adequate only
-when the shortest physically important SFH timescale is resolved by several
-grid intervals. Very short `tau_gyr` values in an old population can therefore
-have a correctly normalized but poorly resolved SFH shape.
+linear time-since-onset grid with `n_time=2048` by default. At an age of 13 Gyr
+this corresponds to 6.35 Myr spacing. The shortest physically important SFH
+timescale should still be resolved by several grid intervals; very short
+`tau_gyr` values in an old population can otherwise have a correctly normalized
+but poorly resolved SFH shape.
 
-For analyses allowing short bursts or `tau_gyr` near or below about 0.2 Gyr,
-repeat a representative calculation with a finer grid, for example
-`DelayedTauSFH(n_time=2048)`, and verify that the photometry or posterior is
-stable. The relevant convergence criterion is the ratio of the shortest SFH
-timescale to `tage_gyr / (n_time - 1)`; 0.2 Gyr is a warning scale, not a
-universal physical boundary.
+For analyses allowing bursts or `tau_gyr` near or below about 0.05 Gyr, repeat
+a representative calculation with a finer grid and verify that the photometry
+or posterior is stable. The relevant convergence criterion is the ratio of the
+shortest SFH timescale to `tage_gyr / (n_time - 1)`; 0.05 Gyr is a warning scale,
+not a universal physical boundary.
 
 Increasing `n_time` costs linearly in SFH array construction and memory. A few
-thousand points are normally negligible beside an SPS call. Very large values
-can still matter for hundreds of thousands of SBI simulations, especially
-with several process workers. FSPS receives the full table; CIGALE first
-integrates it into its fixed 1 Myr representation, so increasing `n_time`
-beyond convergence cannot increase CIGALE's final time resolution. Benchmark
-representative end-to-end simulations rather than only the SFH function.
+thousand points are negligible beside an SPS call, including for large SBI
+training sets. FSPS receives the full table. CIGALE projects the same canonical
+history into its fixed 1 Myr bins, but those bins are the destination container:
+the effective information resolution remains the original CompoSED `n_time`
+grid. Increasing `n_time` beyond convergence therefore does not add useful
+physical information merely because CIGALE's container is finer.
 
 This parameterization enforces the cosmic upper bound only. In particular,
 `ContinuitySFH` also requires the resulting galaxy age to exceed its last

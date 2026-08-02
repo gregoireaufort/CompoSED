@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping, Sequence
 
@@ -69,6 +70,7 @@ class FSPSBackend(SEDBackend):
     _sp: Any = field(default=None, init=False, repr=False)
     _baseline_sp_params: dict[str, Any] | None = field(default=None, init=False, repr=False)
     _last_sp_overrides: set[str] = field(default_factory=set, init=False, repr=False)
+    _warned_implicit_gas_logz: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mass_normalization = MassNormalization(self.mass_normalization)
@@ -315,9 +317,53 @@ class FSPSBackend(SEDBackend):
                 f"parameters: {', '.join(sorted(unknown))}."
             )
 
+        self._warn_if_gas_metallicity_is_implicit(params, baseline, overrides)
+
         for key, value in overrides.items():
             sp.params[key] = value
         self._last_sp_overrides.update(overrides)
+
+    def _warn_if_gas_metallicity_is_implicit(
+        self,
+        params: Mapping[str, Any],
+        baseline: Mapping[str, Any],
+        overrides: Mapping[str, Any],
+    ) -> None:
+        """Warn once when nebular gas metallicity is silently left at baseline."""
+
+        if self._warned_implicit_gas_logz:
+            return
+        constructor_parameters = {} if self.sp_kwargs is None else dict(self.sp_kwargs)
+        stellar_metallicity_is_explicit = (
+            "logzsol" in params or "logzsol" in constructor_parameters
+        )
+        gas_metallicity_is_explicit = (
+            "gas_logz" in params or "gas_logz" in constructor_parameters
+        )
+        nebular_is_enabled = bool(
+            overrides.get(
+                "add_neb_emission",
+                baseline.get("add_neb_emission", True),
+            )
+        )
+        if not (
+            nebular_is_enabled
+            and stellar_metallicity_is_explicit
+            and not gas_metallicity_is_explicit
+        ):
+            return
+
+        baseline_gas_logz = baseline.get("gas_logz", 0.0)
+        warnings.warn(
+            "FSPS nebular emission is enabled and stellar metallicity 'logzsol' "
+            "is explicit, but gas metallicity 'gas_logz' is not. python-fsps "
+            f"therefore keeps gas_logz={baseline_gas_logz!r} independently of "
+            "logzsol. Pass gas_logz in the ParameterSpace or sp_kwargs, or tie "
+            "gas_logz to logzsol with Problem(parameter_transform=...).",
+            UserWarning,
+            stacklevel=3,
+        )
+        self._warned_implicit_gas_logz = True
 
     def _get_redshift(self, params: Mapping[str, Any]) -> float:
         ordered_keys = (self.default_z_key,) + tuple(key for key in REDSHIFT_KEYS if key != self.default_z_key)

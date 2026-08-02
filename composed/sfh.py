@@ -85,7 +85,7 @@ class SFHModel:
 class _AgeParameterizedSFH(SFHModel):
     age: str = "tage_gyr"
     age_kind: AgeKind = "gyr"
-    n_time: int = 256
+    n_time: int = 2048
 
     def __post_init__(self) -> None:
         if not str(self.age):

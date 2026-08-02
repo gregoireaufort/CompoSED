@@ -44,12 +44,55 @@ Lyman break should normally make this choice explicit rather than relying on a
 default. Nebular and dust emission are enabled by the current CompoSED FSPS
 configuration unless explicitly disabled.
 
+### FSPS defaults changed by CompoSED
+
+CompoSED uses python-fsps defaults except where the universal tabular-SFH
+contract or an explicit galaxy-SED convention requires otherwise:
+
+| Option | python-fsps 0.4.7 | CompoSED default | Reason |
+|---|---:|---:|---|
+| `sfh` | `0` | `3` | Required to supply the canonical tabular SFH |
+| `zcontinuous` | `0` | `1` | Interpolate continuously in stellar metallicity |
+| `add_neb_emission` | `False` | `True` | CompoSED galaxy-SED convention; may be disabled explicitly |
+| `add_dust_emission` | `True` | `True` | Unchanged |
+| `add_igm_absorption` | `False` | `False` | Unchanged; enable explicitly for Lyman-break work |
+| `compute_vega_mags` | `False` | `False` | Unchanged; CompoSED returns AB-based maggies |
+
+Every value may be overridden through `sp_kwargs`. The effective constructor
+arguments are included in Problem provenance.
+
 FSPS treats stellar metallicity (`logzsol`) and gas metallicity (`gas_logz`) as
 separate parameters. If `gas_logz` is omitted, python-FSPS uses its own default;
 CompoSED does not silently copy `logzsol` into it. A user may fit both values
 independently or tie them explicitly with `Problem(parameter_transform=...)`.
 That choice should be recorded because it changes the physical relation between
 the stellar continuum and nebular emission.
+
+For an explicit one-to-one tie:
+
+```python
+from composed import Gaussian, Problem
+
+def tie_gas_to_stellar_metallicity(params):
+    backend_params = dict(params)
+    backend_params["gas_logz"] = backend_params["logzsol"]
+    return backend_params
+
+problem = Problem(
+    backend=backend,
+    parameters=parameters,  # contains logzsol, but not gas_logz
+    data=data,
+    filters=filters,
+    likelihood=Gaussian(),
+    parameter_transform=tie_gas_to_stellar_metallicity,
+)
+```
+
+More general deterministic relations can be written in the same transform.
+The transform is applied before every backend evaluation and recorded in the
+Problem fingerprint. When nebular emission is enabled and `logzsol` is explicit
+but `gas_logz` is absent, the backend emits a one-time warning rather than
+silently implying that the two metallicities are tied.
 
 See {doc}`../install` and the backend API reference.
 

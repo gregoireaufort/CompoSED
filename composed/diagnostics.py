@@ -280,7 +280,9 @@ def _diagnose_mcmc(result, *, rhat_threshold: float, min_ess: float, require_arv
                     else None
                 )
                 ess_bulk = _arviz_scalar(arviz.ess(values, method="bulk"))
-                ess_tail = _arviz_scalar(arviz.ess(values, method="tail"))
+                ess_tail = _arviz_scalar(
+                    arviz.ess(values, method="tail", prob=(0.05, 0.95))
+                )
                 mcse_mean = _arviz_scalar(arviz.mcse(values, method="mean"))
             sample_sd = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
             metrics.update(

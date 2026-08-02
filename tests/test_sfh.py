@@ -37,6 +37,12 @@ def test_parametric_sfh_histories_are_finite_increasing_and_unit_formed_mass(mod
     assert history.formed_mass_msun == pytest.approx(1.0, rel=1.0e-10)
 
 
+def test_parametric_sfh_default_grid_has_production_resolution():
+    assert ConstantSFH().n_time == 2048
+    assert ExponentialSFH().n_time == 2048
+    assert DelayedTauSFH().n_time == 2048
+
+
 def test_parametric_sfh_shapes_follow_the_documented_equations():
     constant = ConstantSFH(n_time=101).evaluate({"tage_gyr": 4.0})
     exponential = ExponentialSFH(n_time=101).evaluate({"tage_gyr": 4.0, "tau_gyr": 2.0})
