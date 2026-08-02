@@ -362,7 +362,7 @@ def _gaussian_mixture_logpdf(continuous: np.ndarray, proposal: MixedTamisProposa
             + _multivariate_normal_logpdf(continuous, proposal.means[k], proposal.covariances[k])
         )
     terms = np.asarray(terms, dtype=float)
-    return np.asarray([_logsumexp(terms[:, i]) for i in range(continuous.shape[0])], dtype=float)
+    return _logsumexp(terms, axis=0)
 
 
 def _multivariate_normal_logpdf(x: np.ndarray, mean: np.ndarray, cov: np.ndarray) -> np.ndarray:
@@ -446,7 +446,7 @@ def _mixture_responsibilities(continuous: np.ndarray, proposal: MixedTamisPropos
             + _multivariate_normal_logpdf(continuous, proposal.means[k], proposal.covariances[k])
         )
     terms = np.asarray(terms, dtype=float).T
-    denom = np.asarray([_logsumexp(row) for row in terms], dtype=float)
+    denom = _logsumexp(terms, axis=1)
     return np.exp(terms - denom[:, None])
 
 
@@ -477,7 +477,7 @@ def _amis_log_weights(samples, log_target, proposals, parameter_space, n_per_ite
             np.log(float(n_per_iter)) + _mixed_proposal_logpdf(samples, proposal, parameter_space, transform=transform)
         )
     log_q_terms = np.asarray(log_q_terms, dtype=float)
-    log_denom = np.asarray([_logsumexp(log_q_terms[:, i]) for i in range(samples.shape[0])], dtype=float)
+    log_denom = _logsumexp(log_q_terms, axis=0)
     log_denom -= np.log(float(n_per_iter * len(proposals)))
     return np.asarray(log_target, dtype=float) - log_denom
 

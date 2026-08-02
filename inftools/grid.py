@@ -527,10 +527,26 @@ def _fixed_prior_value(prior) -> float | None:
     return None
 
 
-def _logsumexp(values: np.ndarray) -> float:
-    finite = np.asarray(values, dtype=float)
-    max_value = np.max(finite[np.isfinite(finite)])
-    return float(max_value + np.log(np.sum(np.exp(finite - max_value))))
+def _logsumexp(values: np.ndarray, axis=None):
+    """Stable scalar or axis-wise log-sum-exp reduction.
+
+    An all-``-inf`` slice has zero probability mass and therefore returns
+    ``-inf``. Supporting an axis avoids millions of tiny NumPy reductions in
+    deterministic-mixture AMIS recycling.
+    """
+
+    values = np.asarray(values, dtype=float)
+    max_value = np.max(values, axis=axis, keepdims=True)
+    finite = np.isfinite(max_value)
+    safe_max = np.where(finite, max_value, 0.0)
+    shifted = np.where(finite, values - safe_max, -np.inf)
+    with np.errstate(divide="ignore", under="ignore"):
+        summed = np.sum(np.exp(shifted), axis=axis, keepdims=True)
+        out = max_value + np.log(summed)
+    out = np.where(finite, out, -np.inf)
+    if axis is None:
+        return float(np.asarray(out).reshape(()).item())
+    return np.squeeze(out, axis=axis)
 
 
 def _probabilities_from_log_weights(

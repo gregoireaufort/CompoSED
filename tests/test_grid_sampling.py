@@ -3,6 +3,7 @@ import pytest
 
 from inftools.core import Posterior, SamplingResult
 from inftools.grid import (
+    _logsumexp,
     conditional_continuous_posterior,
     enumerate_discrete_grid,
     full_theta_from_blocks,
@@ -14,6 +15,26 @@ from inftools.grid import (
 )
 from composed.parameters import ParameterSpace
 from composed.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, UniformPrior
+
+
+def test_logsumexp_supports_scalar_axis_and_all_negative_infinity():
+    values = np.asarray(
+        [
+            [0.0, -2.0, -np.inf],
+            [-1.0, -3.0, -np.inf],
+        ]
+    )
+
+    assert _logsumexp(values) == pytest.approx(np.logaddexp.reduce(values.ravel()))
+    np.testing.assert_allclose(
+        _logsumexp(values, axis=0),
+        np.logaddexp.reduce(values, axis=0),
+    )
+    np.testing.assert_allclose(
+        _logsumexp(values, axis=1),
+        np.logaddexp.reduce(values, axis=1),
+    )
+    assert np.isneginf(_logsumexp(np.full(4, -np.inf)))
 
 
 def test_enumerate_discrete_grid_from_choice_and_integer_priors():

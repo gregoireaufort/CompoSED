@@ -7,7 +7,7 @@ from typing import Sequence
 
 import numpy as np
 
-from inftools.grid import full_theta_from_blocks, split_parameter_space
+from inftools.grid import _logsumexp, full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
 from composed.errors import ModelDomainError
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
@@ -1422,21 +1422,6 @@ def _catalog_marginal_mass_logp(
         "mass_posterior_norm": mass_posterior_norm,
         "log10_mass_quantiles": log10_mass_quantiles,
     }
-
-
-def _logsumexp(values: np.ndarray, axis=None) -> np.ndarray:
-    values = np.asarray(values, dtype=float)
-    max_value = np.max(values, axis=axis, keepdims=True)
-    finite = np.isfinite(max_value)
-    safe_max = np.where(finite, max_value, 0.0)
-    shifted = np.where(finite, values - safe_max, -np.inf)
-    with np.errstate(divide="ignore", under="ignore"):
-        summed = np.sum(np.exp(shifted), axis=axis, keepdims=True)
-        out = max_value + np.log(summed)
-    out = np.where(finite, out, -np.inf)
-    if axis is None:
-        return np.asarray(out).reshape(()).item()
-    return np.squeeze(out, axis=axis)
 
 
 def _weighted_quantile_grid(grid: np.ndarray, weights: np.ndarray, quantiles: Sequence[float]) -> np.ndarray:
