@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from composed import (
 )
 from composed.backends.base import ModelPhotometry, ModelSpectrum, SEDBackend
 from composed.parameters import ParameterSpace
+from composed.problem import _SAMPLER_OPTION_NAMES
 from composed.priors import ChoicePrior, UniformPrior
 from composed.units import MassNormalization
 
@@ -218,6 +220,51 @@ def test_experimental_sampler_status_is_exposed_without_ambiguity():
     assert TAMIS().capabilities.experimental is True
     assert MixedTAMIS().capabilities.experimental is False
     assert "external TAMIS" in TAMIS().capabilities.limitations
+
+
+def test_sampler_options_are_validated_at_construction():
+    emcee = Emcee(nwalkers=48, nsteps=2_000, burnin=500)
+    assert emcee.options["burnin"] == 500
+
+    mixed_tamis = MixedTAMIS(n_per_iter=4_000, T_max=50, n_comp=4)
+    assert mixed_tamis.options["n_per_iter"] == 4_000
+
+    with pytest.raises(TypeError, match="burn.*did you mean 'burnin'"):
+        Emcee(nwalkers=48, burn=500)
+
+    with pytest.raises(TypeError, match="n_sample.*n_per_iter.*recycle"):
+        MixedTAMIS(n_sample=4_000, recycle=True)
+
+
+def test_sampler_option_schema_matches_runner_signatures():
+    from inftools.grid import run_grid_sampler, run_mixed_gibbs
+    from inftools.laplace import run_laplace
+    from inftools.mcmc import run_emcee, run_rw_metropolis
+    from inftools.mixed_tamis import run_mixed_tamis
+    from inftools.pocomc_adapter import run_pocomc
+    from inftools.tamis_adapter import run_tamis
+
+    runners = {
+        "emcee": (run_emcee, {"posterior", "x0"}),
+        "random_walk": (run_rw_metropolis, {"posterior", "x0"}),
+        "rw_metropolis": (run_rw_metropolis, {"posterior", "x0"}),
+        "grid": (run_grid_sampler, {"posterior", "parameter_space"}),
+        "mixed_gibbs": (
+            run_mixed_gibbs,
+            {"posterior", "parameter_space", "x0"},
+        ),
+        "mixed_tamis": (
+            run_mixed_tamis,
+            {"posterior", "parameter_space", "x0"},
+        ),
+        "laplace": (run_laplace, {"posterior", "x0"}),
+        "tamis": (run_tamis, {"posterior", "x0"}),
+        "pocomc": (run_pocomc, {"posterior"}),
+    }
+
+    for name, (runner, internal_names) in runners.items():
+        signature_names = set(inspect.signature(runner).parameters)
+        assert _SAMPLER_OPTION_NAMES[name] == signature_names - internal_names
 
 
 def test_fit_conditions_reduce_pocomc_space_and_restore_full_result(monkeypatch):

@@ -12,7 +12,7 @@ result = fit(problem, method, seed=12)
 ```python
 result = fit(
     problem,
-    Emcee(nwalkers=48, nsteps=2_000, burn=500),
+    Emcee(nwalkers=48, nsteps=2_000, burnin=500),
     seed=12,
 )
 ```
@@ -49,10 +49,9 @@ Use `MixedTAMIS` or `MixedGibbs` when a CIGALE-like model includes both:
 result = fit(
     problem,
     MixedTAMIS(
-        n_sample=4_000,
+        n_per_iter=4_000,
         T_max=50,
         n_comp=4,
-        recycle=True,
     ),
     seed=12,
 )

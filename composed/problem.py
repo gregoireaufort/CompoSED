@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
+from difflib import get_close_matches
 from enum import Enum
 from hashlib import sha256
 import importlib.metadata
@@ -315,6 +316,107 @@ _SAMPLER_CAPABILITIES = {
 }
 
 
+# These are the user-facing keyword arguments accepted by the corresponding
+# ``inftools.run_*`` functions. Keep the lists explicit so constructing a
+# sampler remains possible without importing its optional dependencies.
+_SAMPLER_OPTION_NAMES = {
+    "emcee": frozenset(
+        {"nwalkers", "nsteps", "pool", "burnin", "thin", "rng", "seed", "progress"}
+    ),
+    "random_walk": frozenset({"nsteps", "proposal_cov", "burnin", "thin", "rng"}),
+    "rw_metropolis": frozenset({"nsteps", "proposal_cov", "burnin", "thin", "rng"}),
+    "grid": frozenset({"max_size"}),
+    "mixed_gibbs": frozenset(
+        {
+            "nsteps",
+            "continuous_sampler",
+            "continuous_sampler_kwargs",
+            "rng",
+            "discrete_candidates",
+            "discrete_probability_floor",
+            "discrete_floor_failure_probability",
+            "discrete_floor_max_mass",
+            "max_exact_grid_size",
+        }
+    ),
+    "mixed_tamis": frozenset(
+        {
+            "n_comp",
+            "T_max",
+            "n_per_iter",
+            "init_span",
+            "var0",
+            "alpha",
+            "discrete_probability_floor",
+            "discrete_floor_failure_probability",
+            "discrete_floor_max_mass",
+            "covariance_jitter",
+            "continuous_transform",
+            "rng",
+            "seed",
+            "n_workers",
+            "batch_size",
+            "mp_context",
+        }
+    ),
+    "laplace": frozenset({"bounds", "method"}),
+    "tamis": frozenset(
+        {
+            "n_comp",
+            "T_max",
+            "n_per_iter",
+            "init_span",
+            "var0",
+            "map_func",
+            "tamis_kwargs",
+            "transform",
+            "init",
+            "seed",
+            "qmc_engine",
+            "qmc_eps",
+            "jitter_means",
+            "return_space",
+        }
+    ),
+    "pocomc": frozenset(
+        {"bounds", "prior", "random_state", "sampler_kwargs", "run_kwargs"}
+    ),
+}
+
+_SAMPLER_OPTION_ALIASES = {
+    ("emcee", "burn"): "burnin",
+    ("mixed_tamis", "n_sample"): "n_per_iter",
+}
+
+
+def _validate_sampler_option_names(name: str, options: Mapping[str, object]) -> None:
+    """Reject misspelled sampler options before inference begins."""
+
+    valid = _SAMPLER_OPTION_NAMES[name]
+    unknown = sorted(set(options) - valid)
+    if not unknown:
+        return
+
+    details = []
+    for option in unknown:
+        known_alias = _SAMPLER_OPTION_ALIASES.get((name, option))
+        suggestion = (
+            [known_alias]
+            if known_alias is not None
+            else get_close_matches(option, valid, n=1, cutoff=0.5)
+        )
+        if suggestion:
+            details.append(f"{option!r} (did you mean {suggestion[0]!r}?)")
+        else:
+            details.append(repr(option))
+    valid_text = ", ".join(sorted(valid)) or "none"
+    plural = "option" if len(unknown) == 1 else "options"
+    raise TypeError(
+        f"Unknown {name} sampler {plural}: {', '.join(details)}. "
+        f"Valid options are: {valid_text}."
+    )
+
+
 @dataclass(frozen=True)
 class Sampler:
     """Named inference runner plus its explicit options."""
@@ -326,8 +428,10 @@ class Sampler:
         name = str(self.name).lower()
         if name not in _SAMPLER_CAPABILITIES:
             raise ValueError(f"Unknown sampler {name!r}.")
+        options = dict(self.options)
+        _validate_sampler_option_names(name, options)
         object.__setattr__(self, "name", name)
-        object.__setattr__(self, "options", dict(self.options))
+        object.__setattr__(self, "options", options)
 
     @property
     def capabilities(self) -> SamplerCapabilities:
