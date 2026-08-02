@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
+import warnings
 
 import numpy as np
 
@@ -27,6 +28,8 @@ class SEDDataset:
     mask
         Optional boolean array where ``True`` means the band is usable. Invalid
         or non-positive uncertainty values are also excluded from active arrays.
+        Requested bands excluded for invalid flux or uncertainty emit a warning
+        naming the affected bands; explicitly masked bands do not.
     upper_limit, upper_limit_mask
         Optional one-dimensional upper-limit fluxes and boolean flags. A band
         marked as an upper limit contributes a one-sided Gaussian CDF term to
@@ -79,10 +82,32 @@ class SEDDataset:
             raise ValueError("Active upper_limit values must be finite.")
         self.metadata = dict(self.metadata)
         self.flux_unit = canonical_photometric_flux_unit(self.flux_unit)
-        if not np.any(self.active_mask):
+        active_mask = self.active_mask
+        if not np.any(active_mask):
             raise ValueError(
                 "SEDDataset requires at least one active band: a finite detection or finite upper limit "
                 "with strictly positive sigma."
+            )
+        requested = np.ones(self.flux.shape, dtype=bool) if self.mask is None else self.mask
+        implicitly_dropped = requested & ~active_mask
+        if np.any(implicitly_dropped):
+            descriptions = []
+            for index in np.where(implicitly_dropped)[0]:
+                reasons = []
+                if not np.isfinite(self.sigma[index]) or self.sigma[index] <= 0.0:
+                    reasons.append("sigma is non-finite or non-positive")
+                if self.upper_limit_mask[index]:
+                    if not np.isfinite(self.upper_limit[index]):
+                        reasons.append("upper limit is non-finite")
+                elif not np.isfinite(self.flux[index]):
+                    reasons.append("flux is non-finite")
+                descriptions.append(f"{self.band_names[index]} ({'; '.join(reasons)})")
+            warnings.warn(
+                "SEDDataset implicitly excluded invalid band(s): "
+                + ", ".join(descriptions)
+                + ". Set mask=False for bands whose exclusion is intentional.",
+                UserWarning,
+                stacklevel=2,
             )
 
     @property

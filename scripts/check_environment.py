@@ -113,7 +113,7 @@ def check_core() -> list[Check]:
         Check("Python", True, f"{sys.version.split()[0]} on {platform.platform()}"),
         import_check("numpy"),
         import_check("astropy"),
-        import_check("composed"),
+        import_check("composed", distribution="composed-sed"),
     ]
     return checks
 

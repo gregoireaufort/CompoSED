@@ -196,7 +196,7 @@ class ConditionalCatalogNoise:
             "seed": None if seed is None else int(seed),
             "architecture": estimator.configuration(),
             "package_versions": {
-                "composed": _package_version("composed"),
+                "composed": _package_version("composed-sed"),
                 "numpy": str(np.__version__),
                 "torch": str(getattr(estimator.torch, "__version__", "unknown")),
                 "nflows": _package_version("nflows"),

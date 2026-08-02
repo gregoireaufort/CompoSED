@@ -22,6 +22,11 @@ The core CompoSED package is lightweight, but the FSPS and CIGALE scientific
 engines have their own upstream installation and data requirements. Start with
 the install guide:
 
+The installable distribution is named **`composed-sed`**, while the Python
+package remains **`composed`**. This distinction is intentional: the unrelated
+PyPI distribution named `composed` is not this project. A source checkout is
+installed with the commands below and imported with `import composed`.
+
 ```bash
 python -m pip install -e ".[dev,plot]"
 python scripts/check_environment.py --core
@@ -83,6 +88,11 @@ must declare their `MassNormalization`. The likelihood multiplies by
 contract, `log10_mass` is the present-day surviving stellar mass and per-mass
 backend outputs are normalized by that same quantity.
 
+`log10_mass` is directly comparable to CIGALE's `bayes.stellar.m_star`.
+Prospector's usual `mass`/`logmass` parameter is formed mass instead; multiply
+it by Prospector's surviving fraction `mfrac` before comparing it with
+CompoSED.
+
 The stable traditional inference paths are grid, random walk, emcee,
 self-contained mixed Gibbs/TAMIS, and PocoMC. The finite-difference Laplace
 runner and the adapter named `TAMIS` for a separately installed historical
@@ -110,12 +120,16 @@ from composed.filters import FilterSet
 from sedpy.observate import load_filters
 
 filters = FilterSet(load_filters(["sdss_g0", "sdss_r0"]), names=["sdss_g0", "sdss_r0"])
-backend = FSPSBackend(sfh=DelayedTauSFH())
+backend = FSPSBackend(
+    sfh=DelayedTauSFH(),
+    sp_kwargs={"add_igm_absorption": True},
+)
 
 phot = backend.predict_photometry(
     {
         "zred": 0.1,
         "logzsol": -0.3,
+        "gas_logz": -0.3,
         "dust2": 0.2,
         "tage_gyr": 5.0,
         "tau_gyr": 1.5,
@@ -318,6 +332,13 @@ Simulation fails on the first invalid prior draw by default. This prevents a
 backend failure from silently changing the training distribution. If replacing
 failed simulations is scientifically intended, request it explicitly:
 
+> **Effective-prior warning:** `failure_policy="resample"` trains on the
+> declared prior *conditioned on successful simulation and noise-model
+> support*. For dropout objects, a learned survey-noise model can reject very
+> faint noiseless blue-band predictions. Always inspect the accepted effective
+> prior; it may be narrower and correlated even when the declared priors are
+> independent.
+
 ```python
 training = Simulate(
     n=100_000,
@@ -358,6 +379,14 @@ warning but is not clipped. A second warning identifies bounded posterior
 marginals that are both very narrow and pressed against a prior edge. These
 are deliberately simple triage checks, not a multivariate out-of-distribution
 test.
+
+Stable MAF and MDN checkpoints have a fixed ordered band schema. Every object
+passed to one checkpoint must provide finite flux and positive sigma in all of
+those bands; per-object masks do not change the neural input dimension. For a
+catalog with heterogeneous coverage, train one estimator per common coverage
+pattern (and route objects accordingly), or restrict the catalog to a shared
+band set. Availability-mask conditioning is not part of the stable MAF/MDN
+interface.
 
 Use the same workflow with a small, closed-form mixture posterior by changing
 only the method:
@@ -523,16 +552,28 @@ result = run_photometric_grid_catalog(
 z_map = result.map_estimates[:, parameter_space.names.index("z")]
 ```
 
-Cached per-solar-mass grids can profile or marginalize over a separate
+Cached per-solar-mass grids use the lower-level catalog API:
+
+```python
+from composed.catalog import (
+    build_photometric_model_grid,
+    evaluate_catalog_model_grid_likelihood,
+)
+```
+
+They can profile or marginalize over a separate
 `log10_mass_grid`. For marginalization, that numerical grid is only an
 integration grid: pass the same continuous `Prior` declared by the scientific
 model. CompoSED multiplies its density by each irregular-grid cell width.
 Sampler-specific arrays of mass weights are rejected.
 
 Analytic mass profiling assumes a prior that is flat in `log10_mass` over the
-declared bounds. It is not equivalent to marginalizing an informative or
-otherwise non-flat mass prior. In that case, supply an explicit
-`log10_mass_grid` and `log10_mass_prior` and use mass marginalization.
+declared bounds. A cached grid inherits those bounds automatically from an
+excluded `UniformPrior`. Profiling is an excellent high-S/N approximation to
+flat-log-mass marginalization, but not a mathematical identity. Informative or
+otherwise non-flat mass priors require an explicit `log10_mass_grid`; CompoSED
+uses the prior recorded when the grid was built unless an override is supplied
+deliberately.
 
 The separate rest-frame fast-projection API is experimental in 0.1.1. It
 accepts only backends that explicitly declare a redshift-independent
@@ -545,6 +586,24 @@ For independent per-object samplers, use `inftools.fit_many` to run a
 single-object fitting function across a catalog with serial, thread, or process
 execution. For process execution, build fragile backend state such as FSPS or
 CIGALE inside the worker function rather than trying to pickle a live backend.
+
+## Runtime expectations
+
+There is no hardware-independent wall time: stellar-population calls, filter
+count, parameter dimension, process count, and neural device dominate different
+phases. The practical scaling is predictable:
+
+| Phase | Main scaling | What normally dominates |
+|---|---|---|
+| FSPS/CIGALE simulation | accepted prior draws | backend SED construction |
+| MixedTAMIS/PocoMC | likelihood calls for one object | backend SED construction |
+| MAF/MDN training | simulations plus epochs | simulations first, then CPU/GPU training |
+| Trained catalog inference | objects x posterior draws | batched neural sampling |
+
+The release tutorials print simulation, training, and catalog-inference timing
+separately. Benchmark quick mode on the target machine before scheduling a full
+300,000-simulation run; do not extrapolate neural inference timing from SPS
+simulation throughput.
 
 ## One fitting workflow
 

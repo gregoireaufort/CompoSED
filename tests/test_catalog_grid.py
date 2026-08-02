@@ -18,7 +18,7 @@ from composed.backends.base import ModelPhotometry, SEDBackend
 from composed.errors import ModelDomainError
 from composed.likelihood import GaussianPhotometricLikelihood
 from composed.parameters import ParameterSpace
-from composed.priors import ChoicePrior, UniformPrior
+from composed.priors import ChoicePrior, NormalPrior, UniformPrior
 from composed.units import MassNormalization, MassReference
 from composed.provenance import provenance_path_for
 
@@ -436,6 +436,90 @@ def test_build_model_grid_excludes_mass_and_profiles_mass_for_catalog():
     assert np.isclose(result.log10_mass_quantiles[0, 1], 1.0, atol=0.02)
 
 
+def test_cached_grid_uses_declared_uniform_mass_prior_as_profile_bounds():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={
+            "log10_mass": UniformPrior(0.0, 1.0),
+            "template": ChoicePrior([0.0]),
+        },
+    )
+    dataset = SEDDataset(
+        band_names=("u", "g"),
+        flux=np.asarray([100.0, 200.0]),
+        sigma=np.asarray([0.1, 0.1]),
+    )
+
+    grid = build_photometric_model_grid(backend, space, filters=("u", "g"), band_names=("u", "g"))
+    result = evaluate_catalog_model_grid_likelihood(grid, [dataset])
+
+    assert result.meta["log10_mass_bounds"] == (0.0, 1.0)
+    assert result.meta["mass_prior"]["type"] == "UniformPrior"
+    assert grid.meta["excluded_parameter_priors"]["log10_mass"]["type"].endswith("UniformPrior")
+    assert np.allclose(result.log10_mass_profile, 1.0)
+    assert np.all(result.mass_profile_at_boundary)
+
+
+def test_cached_grid_uses_declared_mass_prior_for_numerical_marginalization():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={
+            "log10_mass": UniformPrior(0.0, 2.0),
+            "template": ChoicePrior([0.0]),
+        },
+    )
+    dataset = SEDDataset(("u", "g"), np.asarray([10.0, 20.0]), np.asarray([0.1, 0.1]))
+    grid = build_photometric_model_grid(backend, space, filters=("u", "g"), band_names=("u", "g"))
+
+    result = evaluate_catalog_model_grid_likelihood(
+        grid,
+        [dataset],
+        log10_mass_grid=np.linspace(0.0, 2.0, 41),
+    )
+
+    assert result.marginal_logp is not None
+    assert result.meta["mass_prior"]["type"] == "UniformPrior"
+    assert result.meta["mass_prior"]["integration_bounds"] == (0.0, 2.0)
+
+
+def test_cached_grid_refuses_to_ignore_declared_informative_mass_prior():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={
+            "log10_mass": NormalPrior(9.0, 1.0),
+            "template": ChoicePrior([0.0]),
+        },
+    )
+    dataset = SEDDataset(("u", "g"), np.asarray([1.0, 2.0]), np.asarray([0.1, 0.1]))
+    grid = build_photometric_model_grid(backend, space, filters=("u", "g"), band_names=("u", "g"))
+
+    with pytest.raises(ValueError, match="Analytic cached-grid mass profiling"):
+        evaluate_catalog_model_grid_likelihood(grid, [dataset])
+
+
+def test_cached_grid_rejects_profile_bounds_that_disagree_with_declared_prior():
+    backend = PerMassTemplateBackend()
+    space = ParameterSpace(
+        names=("log10_mass", "template"),
+        priors={
+            "log10_mass": UniformPrior(8.0, 11.0),
+            "template": ChoicePrior([0.0]),
+        },
+    )
+    dataset = SEDDataset(("u", "g"), np.asarray([1.0, 2.0]), np.asarray([0.1, 0.1]))
+    grid = build_photometric_model_grid(backend, space, filters=("u", "g"), band_names=("u", "g"))
+
+    with pytest.raises(ValueError, match="do not match the UniformPrior"):
+        evaluate_catalog_model_grid_likelihood(
+            grid,
+            [dataset],
+            log10_mass_bounds=(7.0, 12.0),
+        )
+
+
 def test_unbounded_analytic_mass_profile_rejects_nonpositive_amplitude():
     backend = PerMassTemplateBackend()
     space = ParameterSpace(names=("template",), priors={"template": ChoicePrior([0.0])})
@@ -499,6 +583,7 @@ def test_model_grid_save_load_roundtrip(tmp_path):
     assert np.allclose(loaded.log_prior, grid.log_prior)
     assert np.array_equal(loaded.valid, grid.valid)
     assert loaded.meta["schema"] == "composed.photometric_model_grid.v3"
+    assert loaded.meta["excluded_parameter_priors"] == {}
     specification = loaded.meta["scientific_specification"]
     assert specification["backend"]["type"].endswith("PerMassTemplateBackend")
     assert specification["parameters"] == ["template"]

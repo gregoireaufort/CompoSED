@@ -72,6 +72,14 @@ success conditioning, including correlations introduced by physical-domain
 failures. For `ContinuitySFH`, an age expressed as a fraction of Universe age
 still has to exceed the final fixed lookback-bin edge.
 
+```{warning}
+For learned survey-noise models, simulator success includes the noise model's
+magnitude support. Very faint noiseless dropout-band predictions can therefore
+truncate the training distribution even when the SPS backend itself succeeds.
+Treat the effective-prior plot as a required check whenever failed rows are
+resampled.
+```
+
 ## Pre-existing pairs
 
 If simulations or empirical labels already exist, do not construct an unrelated
@@ -106,6 +114,12 @@ samples = posterior.sample(
 
 The shape is `(n_object, n_sample, n_parameter)`. Objects are batched inside
 the neural estimator; CompoSED does not sample one SED at a time.
+
+One trained MAF/MDN uses one fixed ordered band schema. Every catalog row must
+contain finite flux and strictly positive sigma in all trained bands.
+`SEDDataset.mask` cannot reduce the neural input dimension for an individual
+object. For heterogeneous coverage, select a shared band set or train and route
+one estimator per common coverage pattern.
 
 The trained MAF/MDN stores the minimum and maximum of every encoded context
 feature. At inference it warns when an object leaves that coordinate-wise box,

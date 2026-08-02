@@ -39,6 +39,14 @@ values_again = parameters.to_dict(theta)
 `sample_prior(n, rng)` returns shape `(n, ndim)`. Samples from valid finite
 priors must have finite `log_prior`.
 
+`ParameterSpace` represents a product of independent scalar priors; it does not
+implement a general joint or conditional prior density. Deterministic physical
+relations can be expressed with `Problem(parameter_transform=...)`, such as
+mapping a sampled stellar metallicity to a gas metallicity. A genuinely
+correlated stochastic prior should be represented by explicitly generated
+training pairs for SBI, or by a custom inference workflow that evaluates that
+joint density; it must not be hidden inside a backend transform.
+
 ## Fixed object-specific values
 
 Use `conditions` when a quantity is known for the object but remains part of

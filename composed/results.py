@@ -193,6 +193,7 @@ def save_inference_result(
     path: str | Path,
     *,
     diagnostics=None,
+    overwrite: bool = False,
 ) -> tuple[Path, Path]:
     """Save arrays and cryptographically bind their scientific metadata.
 
@@ -203,9 +204,18 @@ def save_inference_result(
 
     Pass ``diagnostics=diagnose(result)`` to bind the diagnostic report into
     the same metadata digest. If omitted, ``result.diagnostics`` is preserved.
+    Existing numerical or metadata files are never replaced unless
+    ``overwrite=True`` is supplied explicitly.
     """
 
     npz_path, json_path = _result_paths(path)
+    existing = tuple(candidate for candidate in (npz_path, json_path) if candidate.exists())
+    if existing and not overwrite:
+        paths = ", ".join(str(candidate) for candidate in existing)
+        raise FileExistsError(
+            f"Refusing to overwrite existing inference result file(s): {paths}. "
+            "Pass overwrite=True only when replacement is intentional."
+        )
     metadata = dict(result.metadata)
     provenance = dict(
         metadata.get("provenance")

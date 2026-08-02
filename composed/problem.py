@@ -1042,8 +1042,9 @@ def _callable_dependency_specification(value: object, seen: set[int]) -> object:
 
 
 def _distribution_version(name: str) -> str | None:
+    distribution_name = "composed-sed" if name == "composed" else name
     try:
-        return importlib.metadata.version(name)
+        return importlib.metadata.version(distribution_name)
     except importlib.metadata.PackageNotFoundError:
         return None
 

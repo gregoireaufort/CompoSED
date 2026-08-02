@@ -53,6 +53,11 @@ backends, the likelihood applies no mass factor.
 Formed mass may appear in backend metadata, but it is not the public fitted
 mass parameter.
 
+CompoSED `log10_mass` is directly comparable to CIGALE
+`bayes.stellar.m_star`. Prospector's usual `mass`/`logmass` coordinate is formed
+mass; multiply it by the returned surviving fraction `mfrac` before comparing
+with CompoSED. This is a definitional conversion, not an inference discrepancy.
+
 ## SFH
 
 Named SFHs produce:
@@ -72,6 +77,10 @@ cosmology can affect named-SFH age conversion but cannot replace the upstream
 redshifting cosmology.
 
 This difference must be recorded when comparing engines.
+It also means the same redshift and age parameter can correspond to slightly
+different fractions of the available cosmic age in FSPS and CIGALE. A
+cross-backend comparison should either pass an intentionally shared cosmology
+where the backend permits it or treat cosmology as part of the model difference.
 
 ## Failure semantics
 

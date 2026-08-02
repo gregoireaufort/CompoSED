@@ -16,7 +16,7 @@ author = "Gregoire Aufort"
 copyright = "2026, Gregoire Aufort"
 
 try:
-    release = version("composed")
+    release = version("composed-sed")
 except PackageNotFoundError:
     release = "development"
 version = release

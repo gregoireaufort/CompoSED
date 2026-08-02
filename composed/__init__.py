@@ -102,7 +102,7 @@ from composed.sfh import (
 from composed.units import MassNormalization, MassReference
 
 try:
-    __version__ = version("composed")
+    __version__ = version("composed-sed")
 except PackageNotFoundError:
     __version__ = "0+unknown"
 

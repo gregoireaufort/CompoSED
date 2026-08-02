@@ -68,6 +68,12 @@ The stable photometric SBI context conditions explicitly on both the measured
 flux and its catalog uncertainty. Upper-limit/censoring states are not yet part
 of the stable MAF/MDN context.
 
+MAF and MDN checkpoints have a fixed ordered band schema. They require every
+catalog object to provide finite flux and positive uncertainty in every trained
+band; heterogeneous per-object masks are not supported by one stable
+checkpoint. Use a common-band catalog selection or train one estimator per
+coverage pattern. Availability-mask conditioning remains experimental.
+
 ## Parameter-prior compatibility
 
 - `UniformPrior`, `LogUniformPrior`, `NormalPrior`, and `StudentTPrior` describe

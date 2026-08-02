@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -164,14 +165,29 @@ def test_all_bad_sigma_photometry_raises_clear_error():
 
 
 def test_nonfinite_or_bad_sigma_bands_are_masked_automatically():
-    data = SEDDataset(
-        ["u", "g", "r", "i"],
-        flux=np.array([np.nan, 2.0, 3.0, 4.0]),
-        sigma=np.array([1.0, np.inf, 0.0, 0.4]),
-    )
+    with pytest.warns(UserWarning, match=r"u \(flux is non-finite\).+g .+r "):
+        data = SEDDataset(
+            ["u", "g", "r", "i"],
+            flux=np.array([np.nan, 2.0, 3.0, 4.0]),
+            sigma=np.array([1.0, np.inf, 0.0, 0.4]),
+        )
     assert data.active_band_names == ("i",)
     assert np.allclose(data.active_flux, [4.0])
     assert np.allclose(data.active_sigma, [0.4])
+
+
+def test_explicitly_masked_invalid_band_does_not_warn():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        data = SEDDataset(
+            ["u", "g"],
+            flux=np.asarray([np.nan, 1.0]),
+            sigma=np.asarray([0.0, 0.1]),
+            mask=np.asarray([False, True]),
+        )
+
+    assert caught == []
+    assert data.active_band_names == ("g",)
 
 
 def test_upper_limit_band_can_have_nan_flux_and_stays_active():

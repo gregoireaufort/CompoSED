@@ -110,6 +110,34 @@ def test_inference_result_save_load_roundtrip(tmp_path):
     assert loaded.metadata["filters"] == ["u", "g"]
 
 
+def test_save_inference_result_requires_explicit_overwrite(tmp_path):
+    first = InferenceResult(
+        samples=np.asarray([[0.0], [1.0]]),
+        logp=np.asarray([-1.0, 0.0]),
+        weights=np.ones(2),
+        parameter_names=("z",),
+        sampler_name="first",
+    )
+    second = InferenceResult(
+        samples=np.asarray([[2.0], [3.0]]),
+        logp=np.asarray([-1.0, 0.0]),
+        weights=np.ones(2),
+        parameter_names=("z",),
+        sampler_name="second",
+    )
+    path = tmp_path / "protected"
+
+    save_inference_result(first, path)
+    with pytest.raises(FileExistsError, match="overwrite=True"):
+        save_inference_result(second, path)
+    assert load_inference_result(path).sampler_name == "first"
+
+    save_inference_result(second, path, overwrite=True)
+    loaded = load_inference_result(path)
+    assert loaded.sampler_name == "second"
+    assert np.allclose(loaded.samples, second.samples)
+
+
 def test_problem_fingerprint_is_stable_across_json_roundtrip():
     specification = make_problem().specification()
     restored = json.loads(json.dumps(specification))

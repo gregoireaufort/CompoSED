@@ -12,6 +12,13 @@ engines it can call.  The stable rule is:
 This keeps the scientific provenance visible. FSPS grids and the selected
 CIGALE release are part of the model definition, not generic Python utilities.
 
+```{note}
+The installable distribution is named `composed-sed`, while Python code uses
+`import composed`. The unrelated PyPI distribution named `composed` is not
+CompoSED. From a cloned repository, the editable-install commands below install
+the correct `composed-sed` distribution.
+```
+
 ## Core Install
 
 The core install is deliberately lightweight.  It is enough for data containers,

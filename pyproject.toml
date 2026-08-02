@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "composed"
+name = "composed-sed"
 version = "0.1.1"
 description = "Composable Bayesian SED fitting and photo-z inference."
 readme = "README.md"
@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
@@ -30,7 +31,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/gregoireaufort/CompoSED"
-Documentation = "https://github.com/gregoireaufort/CompoSED/tree/main/docs"
+Documentation = "https://gregoireaufort.github.io/CompoSED/"
 Repository = "https://github.com/gregoireaufort/CompoSED"
 Issues = "https://github.com/gregoireaufort/CompoSED/issues"
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-08-01
 
 ### Changed
 
@@ -43,20 +43,23 @@
   stellar metallicity is explicit, and gas metallicity is silently left at
   the independent python-fsps baseline. An explicit `parameter_transform`
   example shows how to tie `gas_logz` deterministically to `logzsol`.
+- The installable distribution is named `composed-sed` to avoid collision with
+  an unrelated package; the Python import remains `composed`.
+- `SEDDataset` now warns with band names and reasons when invalid requested
+  measurements are excluded implicitly. Explicitly masked bands remain quiet.
 
 ### Fixed
 
+- Cached per-mass catalog grids now retain and enforce the excluded
+  `log10_mass` prior. A declared flat bounded prior supplies analytic profile
+  bounds automatically; informative priors require explicit numerical mass
+  marginalization rather than being silently ignored.
+- `save_inference_result` refuses to replace an existing numerical archive or
+  JSON sidecar unless `overwrite=True` is supplied explicitly.
 - ArviZ tail ESS diagnostics now specify the 5% and 95% tail probabilities,
   restoring `diagnose()` for MCMC results with current ArviZ releases. The
   supported ArviZ range is bounded and the optional diagnostics stack has its
   own CI job.
-
-## 0.1.1
-
-Scientific-safety patch release.
-
-### Fixed
-
 - Analytic catalog mass profiling no longer converts a non-positive amplitude
   into a numerically finite `log10_mass` near -307. Unbounded invalid optima
   now fail clearly; explicitly bounded fits report whether the optimum was

@@ -11,7 +11,16 @@ from inftools.grid import full_theta_from_blocks, split_parameter_space
 from composed.data import SEDDataset
 from composed.errors import ModelDomainError
 from composed.likelihood import _backend_params_and_mass_scale, _normal_logcdf
-from composed.priors import ChoicePrior, DeltaPrior, IntegerUniformPrior, LogUniformPrior, Prior, UniformPrior
+from composed.priors import (
+    ChoicePrior,
+    DeltaPrior,
+    IntegerUniformPrior,
+    LogUniformPrior,
+    NormalPrior,
+    Prior,
+    StudentTPrior,
+    UniformPrior,
+)
 from composed.problem import _backend_configuration, _filter_specification, _stable_value
 from composed.provenance import provenance_path_for, read_provenance, require_provenance, save_npz_with_provenance
 from composed.units import (
@@ -178,6 +187,11 @@ def build_photometric_model_grid(
         meta={
             "schema": "composed.photometric_model_grid.v3",
             "excluded_parameters": excluded,
+            "excluded_parameter_priors": {
+                name: _stable_value(parameter_space.priors[name])
+                for name in excluded
+                if name in parameter_space.priors
+            },
             "scientific_specification": {
                 "backend": _backend_configuration(backend),
                 "parameters": list(parameter_space.names),
@@ -253,11 +267,33 @@ def evaluate_catalog_model_grid_likelihood(
             f"grid={tuple(model_grid.band_names)}, catalog={band_names}."
         )
 
+    try:
+        declared_mass_prior = _declared_excluded_prior(model_grid, "log10_mass")
+    except ValueError:
+        # A custom Prior may be scientifically valid but not reconstructable
+        # from generic JSON metadata. A fully explicit quadrature and Prior is
+        # still auditable and must remain usable.
+        if log10_mass_grid is None or log10_mass_prior is None:
+            raise
+        declared_mass_prior = None
+    log10_mass_grid, log10_mass_bounds, log10_mass_prior = _apply_declared_mass_prior(
+        declared_prior=declared_mass_prior,
+        log10_mass_grid=log10_mass_grid,
+        log10_mass_bounds=log10_mass_bounds,
+        log10_mass_prior=log10_mass_prior,
+    )
     log10_mass_grid_arr, log_mass_prior_weights, mass_bounds, mass_prior_meta = _prepare_mass_grid_and_prior(
         log10_mass_grid=log10_mass_grid,
         log10_mass_bounds=log10_mass_bounds,
         log10_mass_prior=log10_mass_prior,
     )
+    if mass_prior_meta is None and declared_mass_prior is not None:
+        mass_prior_meta = {
+            "type": type(declared_mass_prior).__name__,
+            "repr": repr(declared_mass_prior),
+            "profile_bounds": mass_bounds,
+            "handling": "analytic profile constrained to declared flat log10_mass support",
+        }
     profile = _catalog_profile_mass_logp(
         data_flux=data_flux,
         data_sigma=data_sigma,
@@ -894,6 +930,99 @@ def _prepare_mass_grid_and_prior(*, log10_mass_grid, log10_mass_bounds, log10_ma
         "normalized_weights": np.exp(log_weights),
     }
     return grid, log_weights, bounds, prior_meta
+
+
+def _declared_excluded_prior(model_grid: PhotometricModelGrid, name: str) -> Prior | None:
+    """Recover an excluded parameter prior recorded when the grid was built."""
+
+    excluded = tuple(model_grid.meta.get("excluded_parameters", ()))
+    if name not in excluded:
+        return None
+    prior_spec = model_grid.meta.get("excluded_parameter_priors", {}).get(name)
+    if prior_spec is None:
+        prior_spec = (
+            model_grid.meta.get("scientific_specification", {})
+            .get("priors", {})
+            .get(name)
+        )
+    if prior_spec is None:
+        return None
+    return _prior_from_stable_specification(prior_spec, parameter_name=name)
+
+
+def _apply_declared_mass_prior(
+    *,
+    declared_prior: Prior | None,
+    log10_mass_grid,
+    log10_mass_bounds,
+    log10_mass_prior,
+):
+    """Make the cached grid's declared mass prior the default scientific contract."""
+
+    if declared_prior is None:
+        return log10_mass_grid, log10_mass_bounds, log10_mass_prior
+
+    if log10_mass_grid is not None:
+        # An explicit prior remains a deliberate override, allowing one expensive
+        # model grid to be reused for sensitivity tests. Otherwise the declared
+        # ParameterSpace prior is authoritative.
+        if log10_mass_prior is None:
+            log10_mass_prior = declared_prior
+        return log10_mass_grid, log10_mass_bounds, log10_mass_prior
+
+    if log10_mass_prior is not None:
+        raise ValueError("log10_mass_prior requires log10_mass_grid.")
+    if not isinstance(declared_prior, UniformPrior):
+        raise ValueError(
+            "Analytic cached-grid mass profiling is valid only for a declared "
+            "UniformPrior in log10_mass. The cached grid records "
+            f"{type(declared_prior).__name__}; supply log10_mass_grid to perform "
+            "numerical mass marginalization with that prior."
+        )
+
+    declared_bounds = (float(declared_prior.low), float(declared_prior.high))
+    if log10_mass_bounds is None:
+        log10_mass_bounds = declared_bounds
+    else:
+        supplied = tuple(float(value) for value in log10_mass_bounds)
+        if not np.allclose(supplied, declared_bounds, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                "log10_mass_bounds do not match the UniformPrior declared when the "
+                f"cached grid was built: supplied={supplied}, declared={declared_bounds}."
+            )
+    return log10_mass_grid, log10_mass_bounds, log10_mass_prior
+
+
+def _prior_from_stable_specification(specification, *, parameter_name: str) -> Prior:
+    """Reconstruct a built-in scalar prior from deterministic grid metadata."""
+
+    if not isinstance(specification, dict):
+        raise ValueError(f"Cached prior metadata for {parameter_name!r} is malformed.")
+    prior_type = str(specification.get("type", "")).rsplit(".", 1)[-1]
+    configuration = specification.get("configuration")
+    if not isinstance(configuration, dict):
+        raise ValueError(f"Cached prior metadata for {parameter_name!r} has no configuration.")
+    prior_classes = {
+        "UniformPrior": UniformPrior,
+        "NormalPrior": NormalPrior,
+        "StudentTPrior": StudentTPrior,
+        "LogUniformPrior": LogUniformPrior,
+        "IntegerUniformPrior": IntegerUniformPrior,
+        "ChoicePrior": ChoicePrior,
+        "DeltaPrior": DeltaPrior,
+    }
+    prior_class = prior_classes.get(prior_type)
+    if prior_class is None:
+        raise ValueError(
+            f"Cached prior type {prior_type!r} for excluded parameter {parameter_name!r} "
+            "cannot be reconstructed. Supply an explicit numerical grid and Prior."
+        )
+    try:
+        return prior_class(**configuration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Cached prior metadata for excluded parameter {parameter_name!r} is invalid."
+        ) from exc
 
 
 def _finite_prior_support(prior: Prior) -> tuple[float, float] | None:

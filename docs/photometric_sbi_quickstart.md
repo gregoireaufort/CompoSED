@@ -11,6 +11,14 @@ q(theta | measured flux, sigma)
 The training simulator and observed object use the same `Problem`, active-band
 mask, flux units, mass normalization, and context encoding.
 
+```{warning}
+If `failure_policy="resample"` is used, the neural estimator learns the declared
+prior conditioned on simulator and noise-model success. A survey-noise model's
+magnitude support can reject faint dropout-band predictions and alter the
+effective redshift prior. Plot the accepted effective prior before interpreting
+the posterior.
+```
+
 ## Simulate And Fit One Problem
 
 ```python

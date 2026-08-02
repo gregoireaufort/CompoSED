@@ -2583,7 +2583,7 @@ class TrainedMAFSBI:
                 if is_hybrid
                 else "composed.maf.v1"
             ),
-            "composed_version": _distribution_version("composed"),
+            "composed_version": _distribution_version("composed-sed"),
             "torch_version": str(getattr(self.estimator.torch, "__version__", "unknown")),
             "nflows_version": _distribution_version("nflows"),
             "estimator": self.estimator.configuration(),
@@ -2725,7 +2725,7 @@ class TrainedMDNSBI(TrainedMAFSBI):
 
         manifest = {
             "format": "composed.mdn.v1",
-            "composed_version": _distribution_version("composed"),
+            "composed_version": _distribution_version("composed-sed"),
             "torch_version": str(getattr(self.estimator.torch, "__version__", "unknown")),
             "estimator": self.estimator.configuration(),
             "schema": dict(self.schema),

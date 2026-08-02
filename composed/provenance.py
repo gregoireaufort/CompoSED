@@ -276,8 +276,9 @@ def _run(args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _package_version(name: str) -> str | None:
+    distribution_name = "composed-sed" if name == "composed" else name
     try:
-        return importlib_metadata.version(name)
+        return importlib_metadata.version(distribution_name)
     except importlib_metadata.PackageNotFoundError:
         return None
 
