@@ -684,3 +684,11 @@ a JSON sidecar containing metadata and posterior summaries.
 Validation scripts that cache arrays should write provenance sidecars with
 `composed.provenance.save_npz_with_provenance`; see
 [`docs/validation_provenance.md`](docs/validation_provenance.md).
+
+## Development Transparency
+
+CompoSED has been developed with extensive assistance from AI coding tools,
+principally OpenAI Codex and Anthropic Claude. AI assistance has been used for
+implementation, testing, documentation, and adversarial code review.
+Scientific design decisions, validation, and responsibility for the released
+code remain with the maintainer.
