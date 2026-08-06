@@ -7,9 +7,10 @@ generation and spectral or joint spectrophotometric fitting remain
 experimental interfaces: they are available for development and validation,
 but are not part of the supported analysis pipeline yet.
 
-The documentation source starts at [`docs/index.md`](docs/index.md). It contains
+The [hosted documentation](https://gregoireaufort.github.io/CompoSED/) contains
 the workflow-oriented user guide, scientific conventions, capability matrix,
-and generated API reference. A local HTML build is:
+and generated API reference. Its source starts at [`docs/index.md`](docs/index.md).
+A local HTML build is:
 
 ```bash
 python -m pip install -e ".[docs]"
