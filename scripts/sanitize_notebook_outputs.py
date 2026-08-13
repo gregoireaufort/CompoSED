@@ -36,10 +36,13 @@ def output_path_replacements() -> dict[str, str]:
         str(REPO_ROOT): "${REPO_ROOT}",
         str(Path(sys.prefix).resolve()): "${PYTHON_ENV}",
     }
-    for variable in ("SPS_HOME",):
+    for variable in ("SPS_HOME", "TMPDIR"):
         value = os.environ.get(variable)
         if value:
-            replacements[str(Path(value).expanduser().resolve())] = f"${{{variable}}}"
+            path = Path(value).expanduser()
+            placeholder = f"${{{variable}}}"
+            replacements[str(path)] = placeholder
+            replacements[str(path.resolve())] = placeholder
 
     spec = importlib.util.find_spec("pcigale")
     if spec is not None and spec.origin:
