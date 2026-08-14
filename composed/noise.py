@@ -465,18 +465,17 @@ class ConditionalCatalogNoise:
 
 @dataclass(frozen=True)
 class EmpiricalPhotometricNoise:
-    """Deprecated independent-row catalog noise approximation.
+    """Sample complete empirical catalog-uncertainty rows.
 
     ``sigma_rows`` has shape ``(n_objects, n_bands)`` in the same flux unit as
     the simulator. Sampling one complete row preserves empirical correlations
-    in depth between bands but ignores their dependence on source brightness.
-    For backward compatibility the returned uncertainty is
+    in survey depth between bands. The returned uncertainty is
 
     ``sqrt((sigma_scale * empirical_sigma)**2 + (fractional_error * abs(flux))**2)``.
 
-    New analyses should use :class:`ConditionalCatalogNoise` and declare model
-    discrepancy on ``Gaussian(photometric_model_discrepancy=...)``. This class
-    is retained only so old checkpoints and scripts remain readable.
+    Set ``fractional_error=0`` when model discrepancy is declared separately on
+    ``Gaussian(photometric_model_discrepancy=...)``. This keeps the empirical
+    row as raw ``sigma_catalog`` and applies model discrepancy exactly once.
     """
 
     sigma_rows: np.ndarray
@@ -486,13 +485,6 @@ class EmpiricalPhotometricNoise:
     flux_unit: str | None = None
 
     def __post_init__(self) -> None:
-        warnings.warn(
-            "EmpiricalPhotometricNoise is deprecated because it samples uncertainty independently "
-            "of brightness and mixes model discrepancy into sigma_catalog. Use "
-            "ConditionalCatalogNoise plus Gaussian(photometric_model_discrepancy=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         sigma = np.asarray(self.sigma_rows, dtype=float)
         if sigma.ndim != 2 or sigma.shape[0] == 0 or sigma.shape[1] == 0:
             raise ValueError("sigma_rows must have shape (n_objects, n_bands) with non-zero dimensions.")
@@ -537,7 +529,6 @@ class EmpiricalPhotometricNoise:
     def specification(self) -> dict[str, object]:
         return {
             "name": type(self).__name__,
-            "deprecated": True,
             "n_empirical_rows": int(self.sigma_rows.shape[0]),
             "band_names": self.band_names,
             "fractional_error": self.fractional_error,

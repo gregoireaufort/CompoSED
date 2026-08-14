@@ -62,7 +62,7 @@ def test_release_cigale_tutorials_ship_with_executed_results():
         )
 
 
-def test_fsps_and_cigale_tutorials_share_raw_sigma_and_model_discrepancy_convention():
+def test_photometric_tutorials_apply_fractional_uncertainty_exactly_once():
     paths = [
         ROOT / "notebooks" / "tutorials" / name
         for name in (
@@ -77,12 +77,19 @@ def test_fsps_and_cigale_tutorials_share_raw_sigma_and_model_discrepancy_convent
         for path in paths
     ]
 
-    for source in sources:
+    for source in sources[1:3]:
         assert "MODEL_DISCREPANCY = 0.05" in source
         assert "Gaussian(photometric_model_discrepancy=MODEL_DISCREPANCY)" in source
         assert "sigma_effective" not in source
-        assert "EmpiricalPhotometricNoise" not in source
-    for source in sources[:2]:
+    for source in (sources[0], sources[3]):
+        assert "FRACTIONAL_MODEL_ERROR = 0.05" in source
+        assert "sigma_effective" in source
+        assert "Gaussian()" in source
+    assert "EmpiricalPhotometricNoise" in sources[0]
+    assert "fractional_error=FRACTIONAL_MODEL_ERROR" in sources[0]
+    assert "noise_model=survey_noise" in sources[0]
+    assert "ConditionalCatalogNoise" not in sources[0]
+    for source in sources[1:2]:
         assert "ConditionalCatalogNoise" in source
         assert "noise_model=survey_noise" in source
         assert 'survey_noise.support_policy = "raise"' in source
